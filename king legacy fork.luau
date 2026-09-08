@@ -13966,7 +13966,7 @@ local function run(B, T, P, DfT, ...)
 
 	local serverListLabels = {}
 	local serverListButtons = {}
-	local statusLabel, updateTimeLabel
+	local statusLabel
 
 	local function formatTimeAgo(timestamp)
 		if not timestamp then
@@ -14104,14 +14104,6 @@ local function run(B, T, P, DfT, ...)
 			else
 				statusLabel.SetText("\226\143\179 No servers found")
 				statusLabel.Label.TextColor3 = SpectrumX.Theme.TextSecondary
-			end
-		end
-
-		if updateTimeLabel then
-			if _G.lastServerFetch > 0 then
-				updateTimeLabel.SetText("Updated: " .. formatTimeAgo(_G.lastServerFetch))
-			else
-				updateTimeLabel.SetText("Updated: Never")
 			end
 		end
 
@@ -14471,12 +14463,6 @@ local function run(B, T, P, DfT, ...)
 		Size = UDim2.new(1, 0, 0, 25),
 	})
 
-	updateTimeLabel = Window:CreateLabel(ServerTab.Right, {
-		Text = "Updated: Never",
-		Color = GenesisX.Theme.TextMuted,
-		Size = UDim2.new(1, 0, 0, 20),
-	})
-
 	Window:CreateButton(ServerTab.Right, {
 		Text = "Refresh List",
 		Callback = function()
@@ -14638,21 +14624,6 @@ local function run(B, T, P, DfT, ...)
 		while task.wait(30) do
 			pcall(function()
 				fetchServersFromBot()
-			end)
-		end
-	end)
-
-	-- Keep the small timestamp label fresh without rebuilding up to 50 server cards.
-	spawn(function()
-		while task.wait(1) do
-			pcall(function()
-				if updateTimeLabel then
-					if _G.lastServerFetch > 0 then
-						updateTimeLabel.SetText("Updated: " .. formatTimeAgo(_G.lastServerFetch))
-					else
-						updateTimeLabel.SetText("Updated: Never")
-					end
-				end
 			end)
 		end
 	end)
