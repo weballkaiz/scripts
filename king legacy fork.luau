@@ -4,6 +4,257 @@
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
 -- Auto-execute requires this file in the executor workspace at:
 -- GenesisX/king_legacy.luau (no remote reload fallback).
+local function getGenesisRuntimeState()
+	local executorEnvironment = (getgenv and getgenv()) or _G
+	return (executorEnvironment and executorEnvironment.__GENESIS_RUNTIME)
+		or (_G and _G.__GENESIS_RUNTIME)
+end
+
+local function trackGenesisConnection(connection)
+	local runtime = getGenesisRuntimeState()
+	if runtime and runtime.active and connection then
+		runtime.connections[connection] = true
+	end
+	return connection
+end
+
+local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
+	local executorEnvironment = (getgenv and getgenv()) or runtimeEnvironment
+	local previousUnload = executorEnvironment and executorEnvironment.GenesisUnload
+	if type(previousUnload) ~= "function" and type(sharedGlobal.GenesisUnload) == "function" then
+		previousUnload = sharedGlobal.GenesisUnload
+	end
+	if type(previousUnload) == "function" then
+		pcall(previousUnload)
+	end
+
+	local baseTask = task
+	local runtime = {
+		active = true,
+		cleaning = false,
+		connections = {},
+		threads = {},
+		promptStates = {},
+		previousSpectrumX = executorEnvironment.SpectrumX,
+		previousNotify = executorEnvironment.Notify,
+		startedAt = tick(),
+	}
+	executorEnvironment.__GENESIS_RUNTIME = runtime
+	sharedGlobal.__GENESIS_RUNTIME = runtime
+
+	local function registerThread(thread)
+		if thread then
+			runtime.threads[thread] = true
+		end
+		return thread
+	end
+
+	local function runtimeSpawn(callback, ...)
+		local arguments = table.pack(...)
+		local thread
+		thread = baseTask.spawn(function()
+			if runtime.active or runtime.cleaning then
+				callback(table.unpack(arguments, 1, arguments.n))
+			end
+			if thread then
+				runtime.threads[thread] = nil
+			end
+		end)
+		return registerThread(thread)
+	end
+
+	local function runtimeDefer(callback, ...)
+		local arguments = table.pack(...)
+		local thread
+		thread = baseTask.defer(function()
+			if runtime.active or runtime.cleaning then
+				callback(table.unpack(arguments, 1, arguments.n))
+			end
+			if thread then
+				runtime.threads[thread] = nil
+			end
+		end)
+		return registerThread(thread)
+	end
+
+	local function runtimeDelay(seconds, callback, ...)
+		local arguments = table.pack(...)
+		return runtimeSpawn(function()
+			baseTask.wait(seconds)
+			if runtime.active or runtime.cleaning then
+				callback(table.unpack(arguments, 1, arguments.n))
+			end
+		end)
+	end
+
+	local trackedTask = setmetatable({
+		spawn = runtimeSpawn,
+		defer = runtimeDefer,
+		delay = runtimeDelay,
+	}, { __index = baseTask })
+
+	local function unloadGenesis()
+		if not runtime.active and not runtime.cleaning then
+			return true, "Genesis is already unloaded"
+		end
+
+		runtime.active = false
+		runtime.cleaning = true
+		sharedGlobal.allowCombat = false
+
+		-- Disable only the in-memory copy. Saved user settings are deliberately
+		-- untouched, so a later normal load restores the user's configuration.
+		if type(sharedGlobal.Setting) == "table" then
+			for key, entry in pairs(sharedGlobal.Setting) do
+				if type(entry) == "table" and type(entry[1]) == "boolean" then
+					entry[1] = false
+				elseif type(entry) == "boolean" then
+					sharedGlobal.Setting[key] = false
+				end
+			end
+		end
+
+		sharedGlobal.isFishing = false
+		sharedGlobal.isLootingChests = false
+		sharedGlobal.storingFruit = false
+		sharedGlobal.collectingPearls = false
+		sharedGlobal.seaEventActive = false
+		sharedGlobal.conquestActive = false
+		sharedGlobal.isProgressingBusoV2 = false
+		sharedGlobal.isProgressingObservationV2 = false
+
+		local cleanupFunctions = {
+			sharedGlobal._stopFishing,
+			sharedGlobal._removeFarmFix,
+			sharedGlobal._stopSeaEventBypass,
+			sharedGlobal._removeChestLootFix,
+			sharedGlobal._removeConquestPosition,
+		}
+		for _, cleanup in pairs(cleanupFunctions) do
+			if type(cleanup) == "function" then
+				pcall(cleanup)
+			end
+		end
+
+		-- Restore game UI that Genesis may have temporarily hidden or covered.
+		local savedPopupState = sharedGlobal.savedPopupState
+		if type(savedPopupState) == "table" and savedPopupState.frame then
+			pcall(function()
+				for child, visible in pairs(savedPopupState.texts or {}) do
+					if child then
+						child.Visible = visible
+					end
+				end
+				if savedPopupState.parent then
+					savedPopupState.frame.Parent = savedPopupState.parent
+				end
+				savedPopupState.frame.Visible = savedPopupState.visible
+			end)
+		end
+		sharedGlobal.savedPopupState = nil
+		sharedGlobal.hideNotifyActive = false
+		if sharedGlobal.blackScreenGui then
+			pcall(function()
+				sharedGlobal.blackScreenGui:Destroy()
+			end)
+			sharedGlobal.blackScreenGui = nil
+		end
+
+		if type(sharedGlobal.HakiV2) == "table" and type(sharedGlobal.HakiV2.stopLock) == "function" then
+			pcall(sharedGlobal.HakiV2.stopLock)
+		end
+		if type(sharedGlobal.Raid) == "table" then
+			if type(sharedGlobal.Raid.stopDodge) == "function" then
+				pcall(sharedGlobal.Raid.stopDodge)
+			end
+			if type(sharedGlobal.Raid.clearDungeonFarm) == "function" then
+				pcall(sharedGlobal.Raid.clearDungeonFarm)
+			end
+			if type(sharedGlobal.Raid.stopOrbit) == "function" then
+				pcall(sharedGlobal.Raid.stopOrbit)
+			end
+			sharedGlobal.Raid.inraid = false
+		end
+
+		local gameObject = runtimeEnvironment.game
+		local players = gameObject:GetService("Players")
+		local character = players.LocalPlayer and players.LocalPlayer.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if humanoid then
+			humanoid.PlatformStand = false
+			humanoid.AutoRotate = true
+		end
+		if root then
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end
+
+		for prompt, original in pairs(runtime.promptStates) do
+			pcall(function()
+				prompt.HoldDuration = original.HoldDuration
+				prompt.RequiresLineOfSight = original.RequiresLineOfSight
+			end)
+			runtime.promptStates[prompt] = nil
+		end
+
+		for connection in pairs(runtime.connections) do
+			pcall(function()
+				connection:Disconnect()
+			end)
+			runtime.connections[connection] = nil
+		end
+
+		local currentThread = coroutine.running()
+		for thread in pairs(runtime.threads) do
+			if thread ~= currentThread then
+				pcall(baseTask.cancel, thread)
+			end
+			runtime.threads[thread] = nil
+		end
+
+		for _, guiParent in ipairs({ gameObject:GetService("CoreGui"), players.LocalPlayer:FindFirstChild("PlayerGui") }) do
+			if guiParent then
+				for _, child in ipairs(guiParent:GetChildren()) do
+					if child.Name == "GenesisX" then
+						pcall(function()
+							child:Destroy()
+						end)
+					end
+				end
+			end
+		end
+
+		-- These guards belong to workers/connections owned by this runtime. Reset
+		-- them so running Genesis again creates fresh replacements after unload.
+		sharedGlobal._EventHubPollStarted = false
+		sharedGlobal._TeleportFailHooked = false
+		sharedGlobal.ghostShipDiedConnected = false
+		sharedGlobal._lastSwordTrackerConnection = nil
+		sharedGlobal._autoExecuteQueued = false
+		sharedGlobal._pendingHopJobId = nil
+		executorEnvironment.SpectrumX = runtime.previousSpectrumX
+		executorEnvironment.Notify = runtime.previousNotify
+
+		runtime.cleaning = false
+		if executorEnvironment.__GENESIS_RUNTIME == runtime then
+			executorEnvironment.__GENESIS_RUNTIME = nil
+		end
+		if sharedGlobal.__GENESIS_RUNTIME == runtime then
+			sharedGlobal.__GENESIS_RUNTIME = nil
+		end
+		print("[GENESIS HUB] Unloaded UI, connections, workers, and movement locks.")
+		return true, "Genesis unloaded"
+	end
+
+	runtime.unload = unloadGenesis
+	executorEnvironment.GenesisUnload = unloadGenesis
+	executorEnvironment.UnloadGenesis = unloadGenesis
+	sharedGlobal.GenesisUnload = unloadGenesis
+	sharedGlobal.UnloadGenesis = unloadGenesis
+	return trackedTask, runtimeSpawn
+end
+
 local function createBundledUi()
 local GenesisX = {}
 GenesisX.__index = GenesisX
@@ -2116,13 +2367,13 @@ function GenesisX:MakeDraggable(frame, handle)
 			dragInput = input
 		end
 	end)
-	UserInputService.InputChanged:Connect(function(input)
+	trackGenesisConnection(UserInputService.InputChanged:Connect(function(input)
 		if input == dragInput and dragging then
 			local delta = input.Position - dragStart
 			frame.Position =
 				UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 		end
-	end)
+	end))
 end
 
 -- --- RIPPLE EFFECT ------------------------------------------------------------
@@ -2640,22 +2891,22 @@ function GenesisX:CreateWindow(config)
 		self:_CreateFloatingButton(config)
 	end
 
-	UserInputService.InputBegan:Connect(function(input)
+	trackGenesisConnection(UserInputService.InputBegan:Connect(function(input)
 		if
 			input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch
 		then
 			self:_CloseDropdownsOnClick(input.Position)
 		end
-	end)
+	end))
 
 	local success, camera = pcall(function()
 		return workspace.CurrentCamera
 	end)
 	if success and camera then
-		camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+		trackGenesisConnection(camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
 			self:UpdateScale()
-		end)
+		end))
 	end
 
 	if not self.SideMode then
@@ -2888,7 +3139,7 @@ function GenesisX:_CreateSideHandle(config)
 		end
 	end)
 
-	UserInputService.InputChanged:Connect(function(input)
+	trackGenesisConnection(UserInputService.InputChanged:Connect(function(input)
 		if not dragging then
 			return
 		end
@@ -2917,9 +3168,9 @@ function GenesisX:_CreateSideHandle(config)
 				placeHandle()
 			end
 		end
-	end)
+	end))
 
-	UserInputService.InputEnded:Connect(function(input)
+	trackGenesisConnection(UserInputService.InputEnded:Connect(function(input)
 		if
 			input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch
@@ -2931,7 +3182,7 @@ function GenesisX:_CreateSideHandle(config)
 			dragArmed = false
 			dragActive = false
 		end
-	end)
+	end))
 
 	-- Reclamp on resolution change
 	local function reclampAll()
@@ -2946,7 +3197,7 @@ function GenesisX:_CreateSideHandle(config)
 		end
 	end
 	if workspace.CurrentCamera then
-		workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(reclampAll)
+		trackGenesisConnection(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(reclampAll))
 	end
 
 	-- subtle intro bounce
@@ -3091,7 +3342,7 @@ function GenesisX:_CreateFloatingButton(config)
 			dragInput = input
 		end
 	end)
-	UserInputService.InputChanged:Connect(function(input)
+	trackGenesisConnection(UserInputService.InputChanged:Connect(function(input)
 		if input == dragInput and dragging then
 			local delta = input.Position - dragStart
 			lastDelta = delta
@@ -3099,7 +3350,7 @@ function GenesisX:_CreateFloatingButton(config)
 			self.FloatBtn.Position =
 				UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 		end
-	end)
+	end))
 
 	self.FloatBtn.MouseButton1Click:Connect(function()
 		if not dragging then
@@ -3279,7 +3530,7 @@ function GenesisX:CreateTab(config)
 			isScrolling = true
 		end)
 
-		RunService.Heartbeat:Connect(function()
+		trackGenesisConnection(RunService.Heartbeat:Connect(function()
 			if not isScrolling then
 				return
 			end
@@ -3289,7 +3540,7 @@ function GenesisX:CreateTab(config)
 			end
 			-- Heavy damping - slows down faster
 			scrollVelocity = scrollVelocity * 0.85
-		end)
+		end))
 		self:CreateCorner(scrollFrame, UDim.new(0, 8))
 
 		local layout = Instance.new("UIListLayout")
@@ -3688,6 +3939,7 @@ function GenesisX:CreateToggle(parent, config)
 	local default = config.Default or false
 	local callback = config.Callback or function() end
 	local height = self:S(46)
+	local trackWidth, trackHeight = self:S(46), self:S(24)
 
 	local frame = Instance.new("Frame")
 	frame.Name = "Toggle_" .. text
@@ -3713,17 +3965,17 @@ function GenesisX:CreateToggle(parent, config)
 	label.Name = "Label"
 	label.BackgroundTransparency = 1
 	label.Position = UDim2.new(0, self:S(14), 0, 0)
-	label.Size = UDim2.new(0.6, 0, 1, 0)
+	label.Size = UDim2.new(1, -(trackWidth + self:S(42)), 1, 0)
 	label.Font = self:GetFontSemibold()
 	label.Text = text
 	label.TextColor3 = self.Theme.Text
 	label.TextSize = self:S(13)
 	label.TextXAlignment = Enum.TextXAlignment.Left
-	label.TextTruncate = Enum.TextTruncate.AtEnd
+	label.TextWrapped = true
+	label.TextTruncate = Enum.TextTruncate.None
 	label.ZIndex = 13
 	label.Parent = frame
 
-	local trackWidth, trackHeight = self:S(46), self:S(24)
 	local track = Instance.new("TextButton")
 	track.Name = "Track"
 	track.AutoButtonColor = false
@@ -4248,7 +4500,7 @@ function GenesisX:CreateSlider(parent, config)
 			dragging = true
 		end
 	end)
-	UserInputService.InputChanged:Connect(function(input)
+	trackGenesisConnection(UserInputService.InputChanged:Connect(function(input)
 		if
 			dragging
 			and (
@@ -4258,15 +4510,15 @@ function GenesisX:CreateSlider(parent, config)
 		then
 			updateFromDrag(input)
 		end
-	end)
-	UserInputService.InputEnded:Connect(function(input)
+	end))
+	trackGenesisConnection(UserInputService.InputEnded:Connect(function(input)
 		if
 			input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch
 		then
 			dragging = false
 		end
-	end)
+	end))
 
 	-- -- Click the value -> becomes an input ---------------------------------
 	valueLabel.MouseButton1Click:Connect(function()
@@ -5023,23 +5275,18 @@ function GenesisX:CreateLabel(parent, config)
 	config = config or {}
 	local text = config.Text or "Label"
 	local color = config.Color or self.Theme.TextSecondary
-	-- If the text contains a manual line break (\n) and Wrapped was not explicitly set,
-	-- disable TextWrapped so the manual breaks work correctly.
-	local hasNewline = text:find("\n") ~= nil
-	local wrapped
-	if config.Wrapped == nil then
-		wrapped = not hasNewline
-	else
-		wrapped = config.Wrapped
-	end
+	-- Manual line breaks and automatic wrapping work together. Only disable
+	-- wrapping when a caller explicitly requests Wrapped = false.
+	local wrapped = config.Wrapped ~= false
 	local padV = self:S(10)
 	local padH = self:S(14)
-	local minHeight = self:S(36)
+	local requestedSize = config.Size and self:S(config.Size) or nil
+	local minHeight = math.max(self:S(36), requestedSize and requestedSize.Y.Offset or 0)
 
 	local frame = Instance.new("Frame")
 	frame.Name = "Label_" .. text:sub(1, 10)
 	frame.BackgroundColor3 = self.Theme.Card
-	frame.Size = UDim2.new(1, 0, 0, minHeight)
+	frame.Size = requestedSize or UDim2.new(1, 0, 0, minHeight)
 	frame.ClipsDescendants = false -- does not clip content
 	frame.ZIndex = 12
 	frame.Parent = parent
@@ -5078,7 +5325,13 @@ function GenesisX:CreateLabel(parent, config)
 		if textH <= 0 then
 			textH = self:S(16)
 		end
-		frame.Size = UDim2.new(1, 0, 0, math.max(minHeight, textH + padV * 2))
+		local currentSize = frame.Size
+		frame.Size = UDim2.new(
+			currentSize.X.Scale,
+			currentSize.X.Offset,
+			currentSize.Y.Scale,
+			math.max(minHeight, textH + padV * 2)
+		)
 	end
 
 	label:GetPropertyChangedSignal("TextBounds"):Connect(updateHeight)
@@ -6140,6 +6393,11 @@ local function run(B, T, P, DfT, ...)
 	local TweenService = game:GetService("TweenService")
 	local HttpService = game:GetService("HttpService")
 
+	-- These two locals intentionally replace only task scheduling and legacy
+	-- spawn calls inside run; the lifecycle implementation stays outside this
+	-- register-heavy function to remain below Luau's 200-local limit.
+	local task, spawn = startGenesisRuntime(runtimeEnvironment, _G)
+
 	local function getExecutorName()
 		if identifyexecutor then
 			local ok, name = pcall(identifyexecutor)
@@ -6536,6 +6794,13 @@ local function run(B, T, P, DfT, ...)
 
 	local function setupProximityPrompt(prompt)
 		if prompt:IsA("ProximityPrompt") then
+			local runtime = getGenesisRuntimeState()
+			if runtime and runtime.active and runtime.promptStates and not runtime.promptStates[prompt] then
+				runtime.promptStates[prompt] = {
+					HoldDuration = prompt.HoldDuration,
+					RequiresLineOfSight = prompt.RequiresLineOfSight,
+				}
+			end
 			prompt.HoldDuration = 0
 			prompt.RequiresLineOfSight = false
 		end
@@ -6545,7 +6810,7 @@ local function run(B, T, P, DfT, ...)
 		setupProximityPrompt(obj)
 	end
 
-	workspace.DescendantAdded:Connect(setupProximityPrompt)
+	trackGenesisConnection(workspace.DescendantAdded:Connect(setupProximityPrompt))
 
 	_G.name_game = "King_Legacy"
 	_G.Setting = {
@@ -6590,9 +6855,6 @@ local function run(B, T, P, DfT, ...)
 
 		autoConquest = { false, "autoConquest" },
 		autoHopConquest = { false, "autoHopConquest" },
-		autoBuyChests = { false, "autoBuyChests" },
-		selectedChests = { {}, "selectedChests" },
-
 		autoRaidBoss_ExpertSwordman = { false, "autoRaidBoss_ExpertSwordman" },
 		autoRaidBoss_MsMother = { false, "autoRaidBoss_MsMother" },
 		autoRaidBoss_KingSamurai = { false, "autoRaidBoss_KingSamurai" },
@@ -6804,7 +7066,9 @@ local function run(B, T, P, DfT, ...)
 	_G.thirdSeaKrakenSpawned = false
 	_G.thirdSeaKrakenBoss = nil
 	_G.fishingPreviousTool = nil
+	_G.fishingPreviousWeaponName = nil
 	_G.fishingToolCaptured = false
+	_G.fishingLoadoutBusy = false
 	_G.lastWhirlpoolNotified = false
 
 	_G.lootState = {
@@ -7203,6 +7467,13 @@ local function run(B, T, P, DfT, ...)
 				local humanoid = GetHumanoid(LocalPlayer.Character)
 				if humanoid then
 					humanoid:EquipTool(tool)
+					if toolTip == "Sword" then
+						_G.lastEquippedSword = tool
+						_G.lastEquippedSwordName = tool.Name
+						if _G._GenesisRememberSword then
+							_G._GenesisRememberSword(tool)
+						end
+					end
 				end
 			end
 		end
@@ -7217,18 +7488,9 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	_G.allowCombat = false
-	local lastClick = 0
 	local lastHaoAttempt = 0
-	local lastAutoSkill = 0
-	local lastOpeMethod = 0
-	local CLICK_INTERVAL = 0.1
 
 	local function click()
-		local now = tick()
-		if now - lastClick < CLICK_INTERVAL then
-			return
-		end
-		lastClick = now
 		-- Sigma (Smooth): remote M1 on ALL selected tools (Character + Backpack) simultaneously.
 		if GetSetting("farmMethod") == "Sigma (Smooth)" then
 			local selected = GetSetting("selectedTools") or {}
@@ -7283,18 +7545,21 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		-- Default (Smart): only the equipped tool.
+		-- Default (Smart): preserve the original three-prefix dispatch for the
+		-- equipped tool. The game ignores the two prefixes that do not match it.
 		for _, tool in pairs(LocalPlayer.Character:GetChildren()) do
 			if tool.ClassName == "Tool" then
-				local prefix = "SW_"
-				if tool.ToolTip == "Combat" then
-					prefix = "FS_"
-				elseif tool.ToolTip == "Fruit Power" then
-					prefix = "DF_"
-				end
 				pcall(function()
 					ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(
-						prefix .. tool.Name .. "_M1",
+						"FS_" .. tool.Name .. "_M1",
+						{ MouseHit = _G.pos_skill }
+					)
+					ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(
+						"SW_" .. tool.Name .. "_M1",
+						{ MouseHit = _G.pos_skill }
+					)
+					ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(
+						"DF_" .. tool.Name .. "_M1",
 						{ MouseHit = _G.pos_skill }
 					)
 				end)
@@ -7989,14 +8254,6 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	autoskill = function()
-		-- This function is reached from frame-driven farm paths. A full skill pass
-		-- contains several yielding key presses/remotes, so it must not be started
-		-- again every frame.
-		local now = tick()
-		if now - lastAutoSkill < 1 then
-			return
-		end
-		lastAutoSkill = now
 		-- Sigma (Smooth): skills via remotes on ALL selected tools (Backpack + Character). Does NOT equip.
 		if GetSetting("farmMethod") == "Sigma (Smooth)" then
 			local selected = GetSetting("selectedTools") or {}
@@ -8157,12 +8414,6 @@ local function run(B, T, P, DfT, ...)
 		if not farmActive then
 			return
 		end
-		local now = tick()
-		if now - lastOpeMethod < 1 then
-			return
-		end
-		lastOpeMethod = now
-
 		local targetPos = _G.pos_skill and _G.pos_skill.Position
 		if not targetPos or distance(targetPos) > 50 then
 			return
@@ -8248,7 +8499,7 @@ local function run(B, T, P, DfT, ...)
 			or (GetSetting("auto_dungeon_v2") and _G.Raid and _G.Raid.inraid)
 	end
 
-	RunService.Heartbeat:Connect(function()
+	trackGenesisConnection(RunService.Heartbeat:Connect(function()
 		pcall(function()
 			if GetSetting("autoConquest") then
 				local character = LocalPlayer.Character
@@ -8283,7 +8534,7 @@ local function run(B, T, P, DfT, ...)
 				end
 			end
 		end)
-	end)
+	end))
 
 	local function applyHideNotify(enable)
 		if enable then
@@ -10075,7 +10326,7 @@ local function run(B, T, P, DfT, ...)
 						or chest.PrimaryPart
 						or chest:FindFirstChildWhichIsA("BasePart")
 					if chestPart then
-						table.insert(chestList, chestPart.CFrame * CFrame.new(0, 5, 0))
+						table.insert(chestList, { Part = chestPart })
 					end
 				end
 			end
@@ -10085,25 +10336,43 @@ local function run(B, T, P, DfT, ...)
 				-- the first second of chest looting.
 				removeFarmFix()
 				_G.seaEventActive = true
+				_G.isLootingChests = true
 				_G.currentEventName = "Ghost Ship (Looting)"
 
-				for _, chestCF in ipairs(chestList) do
-					local root = GetRoot(LocalPlayer.Character)
-					if root then
+				for _, chestEntry in ipairs(chestList) do
+					if not GetSetting("autoGhostShip") then
+						break
+					end
+
+					local chestPart = chestEntry.Part
+					for _ = 1, 5 do
+						if
+							not GetSetting("autoGhostShip")
+							or not chestPart
+							or not chestPart.Parent
+							or not chestPart:IsDescendantOf(Workspace)
+						then
+							break
+						end
+
+						local root = GetRoot(LocalPlayer.Character)
+						if not root then
+							break
+						end
+
+						local chestCF = chestPart.CFrame * CFrame.new(0, 5, 0)
 						root.CFrame = chestCF
-						task.wait(1)
 						applyFarmFix(chestCF)
 						updateFarmFix(chestCF)
-						local startLoot = tick()
-						while tick() - startLoot < 1 do
-							updateFarmFix(chestCF)
-							task.wait(1)
-						end
+						task.wait(0.25)
 					end
 				end
 
 				removeFarmFix()
 				_G.isLootingChests = false
+				if not GetSetting("autoGhostShip") then
+					return true
+				end
 				_G.ghostShipKilled = true
 				if GetSetting("autoHopSeaBosses") then
 					SpectrumX:Notify({
@@ -10122,7 +10391,7 @@ local function run(B, T, P, DfT, ...)
 				_G.ghostShipKilled = false
 				if not _G.ghostShipDiedConnected then
 					_G.ghostShipDiedConnected = true
-					ghostShip.Humanoid.Died:Connect(function()
+					trackGenesisConnection(ghostShip.Humanoid.Died:Connect(function()
 						_G.ghostShipDiedConnected = false
 						_G.postEventTimers.GhostShip.active = true
 						_G.postEventTimers.GhostShip.startTime = tick()
@@ -10130,7 +10399,7 @@ local function run(B, T, P, DfT, ...)
 						stopSeaEventBypass()
 						task.wait(3)
 						_G.isLootingChests = false
-					end)
+					end))
 				end
 
 				_G.currentEventName = "Ghost Ship"
@@ -11237,7 +11506,7 @@ local function run(B, T, P, DfT, ...)
 	-- When teleport fails (full/private server, etc.), mark it ignored and try ANOTHER one (without spam).
 	if not _G._TeleportFailHooked then
 		_G._TeleportFailHooked = true
-		TeleportService.TeleportInitFailed:Connect(function(player, teleportResult, errorMessage, placeId, jobId)
+		trackGenesisConnection(TeleportService.TeleportInitFailed:Connect(function(player, teleportResult, errorMessage, placeId, jobId)
 			pcall(function()
 				if player ~= LocalPlayer then
 					return
@@ -11324,7 +11593,7 @@ local function run(B, T, P, DfT, ...)
 					end)
 				end
 			end)
-		end)
+		end))
 	end
 
 	smartHop = function()
@@ -12412,7 +12681,7 @@ local function run(B, T, P, DfT, ...)
 	})
 
 	Window:CreateLabel(MainTab.Left, {
-		Text = "\240\159\146\161: is recommended that you have the Sea Beast Race.",
+		Text = "\240\159\146\161 It is recommended that you have the Sea Beast Race.",
 		Color = SpectrumX.Theme.TextSecondary,
 		Size = UDim2.new(1, 0, 0, 40),
 	})
@@ -12590,7 +12859,7 @@ local function run(B, T, P, DfT, ...)
 	})
 
 	Window:CreateToggle(MainTab.Right, {
-		Text = "Fishing When Not Spawned",
+		Text = "Fish Between Serpent Spawns",
 		Default = GetSetting("fishWhenNotSpawned") or false,
 		Callback = function(state)
 			saveAndApply("fishWhenNotSpawned", state)
@@ -13278,6 +13547,8 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	local buyingStyle = nil
+	_G._GenesisBuyingStyleStartedAt = 0
+	_G._GenesisStylePurchaseGeneration = 0
 	local prevPosition = nil
 
 	for _, style in pairs(styles) do
@@ -13299,6 +13570,8 @@ local function run(B, T, P, DfT, ...)
 				end
 				tp(CFrame.new(npc.CFrame.X, npc.CFrame.Y + 3, npc.CFrame.Z))
 				buyingStyle = style.tool
+				_G._GenesisBuyingStyleStartedAt = tick()
+				_G._GenesisStylePurchaseGeneration = (_G._GenesisStylePurchaseGeneration or 0) + 1
 				SpectrumX:Notify({ Text = "Buying " .. style.name .. "...", Type = "info", Duration = 3 })
 			end,
 		})
@@ -13601,23 +13874,6 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateMultiDropdown(TeleportTab.Left, {
-		Label = "Select Chests",
-		Options = { "Common", "Rare", "Epic", "Legendary" },
-		Default = GetSetting("selectedChests") or {},
-		Callback = function(selected)
-			saveAndApply("selectedChests", selected)
-		end,
-	})
-
-	Window:CreateToggle(TeleportTab.Left, {
-		Text = "Auto Buy Chests",
-		Default = GetSetting("autoBuyChests") or false,
-		Callback = function(state)
-			saveAndApply("autoBuyChests", state)
-		end,
-	})
-
 	Window:CreateSection(TeleportTab.Right, "Passives", GenesisX.Theme.Warning, "lucide-book")
 
 	Window:CreateDropdown(TeleportTab.Right, {
@@ -13889,7 +14145,7 @@ local function run(B, T, P, DfT, ...)
 					btn._connection = nil
 				end
 
-				btn._connection = btn.Button.MouseButton1Click:Connect(function()
+				btn._connection = trackGenesisConnection(btn.Button.MouseButton1Click:Connect(function()
 					local targetId = server.jobId
 					if #targetId > 36 then
 						local decoded = decodeBase64(targetId)
@@ -13904,7 +14160,7 @@ local function run(B, T, P, DfT, ...)
 					})
 					task.wait(0.5)
 					TeleportService:TeleportToPlaceInstance(game.PlaceId, targetId, LocalPlayer)
-				end)
+				end))
 			else
 				if label then
 					label.Label.Visible = false
@@ -14539,7 +14795,7 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
-	LocalPlayer.CharacterAdded:Connect(function()
+	trackGenesisConnection(LocalPlayer.CharacterAdded:Connect(function()
 		_G.hasLegacyPose = false
 		-- A farm-fix worker captures the prior character's root part. Clear it here
 		-- so the next farm tick can attach cleanly to the respawned character.
@@ -14554,7 +14810,7 @@ local function run(B, T, P, DfT, ...)
 			removeChestLootFix()
 		end
 		_G.isLootingChests = false
-	end)
+	end))
 
 	spawn(function()
 		while task.wait(0.5) do
@@ -14644,6 +14900,167 @@ local function run(B, T, P, DfT, ...)
 		return nil
 	end
 
+	_G._GenesisIsSwordTool = function(tool)
+		return tool and tool:IsA("Tool") and tool.ToolTip == "Sword"
+	end
+
+	_G._GenesisRememberSword = function(tool)
+		if _G._GenesisIsSwordTool(tool) then
+			_G.lastEquippedSword = tool
+			_G.lastEquippedSwordName = tool.Name
+			return tool
+		end
+		return nil
+	end
+
+	_G._GenesisGetLastEquippedSwordName = function()
+		local character = LocalPlayer.Character
+		if character then
+			for _, tool in pairs(character:GetChildren()) do
+				if _G._GenesisIsSwordTool(tool) then
+					_G._GenesisRememberSword(tool)
+					return tool.Name
+				end
+			end
+		end
+
+		local swordNameValue = LocalPlayer.PlayerStats:FindFirstChild("SwordName")
+		local selectedName = swordNameValue and swordNameValue.Value
+		if type(selectedName) == "string" and selectedName ~= "" and selectedName ~= "Basic Rod" then
+			_G.lastEquippedSwordName = selectedName
+			return selectedName
+		end
+
+		if type(_G.lastEquippedSwordName) == "string" and _G.lastEquippedSwordName ~= "" then
+			return _G.lastEquippedSwordName
+		end
+
+		for _, tool in pairs(LocalPlayer.Backpack:GetChildren()) do
+			if _G._GenesisIsSwordTool(tool) then
+				_G._GenesisRememberSword(tool)
+				return tool.Name
+			end
+		end
+
+		_G.lastEquippedSword = nil
+		_G.lastEquippedSwordName = nil
+		return nil
+	end
+
+	local function selectPrimaryWeapon(weaponName, timeoutSeconds)
+		if type(weaponName) ~= "string" or weaponName == "" or type(firesignal) ~= "function" then
+			return nil
+		end
+
+		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+		local mainGui = playerGui and playerGui:FindFirstChild("MainGui")
+		local starterFrame = mainGui and mainGui:FindFirstChild("StarterFrame")
+		local inventory = starterFrame and starterFrame:FindFirstChild("Inventory_Frame")
+		local swordList = inventory and inventory:FindFirstChild("ScrollingFrameSwords")
+		local itemButton = swordList and swordList:FindFirstChild(weaponName)
+		local information = inventory and inventory:FindFirstChild("Information")
+		local primaryButton = information and information:FindFirstChild("Primary")
+		if not itemButton or not itemButton:IsA("GuiButton") or not primaryButton or not primaryButton:IsA("GuiButton") then
+			return nil
+		end
+
+		local function isSelectionConfirmed()
+			local nameText = information:FindFirstChild("NameText")
+			return nameText and nameText.Text == weaponName
+		end
+
+		local function waitForSelection(duration)
+			local deadline = os.clock() + duration
+			repeat
+				if isSelectionConfirmed() then
+					return true
+				end
+				task.wait(0.03)
+			until os.clock() >= deadline
+			return isSelectionConfirmed()
+		end
+
+		task.spawn(function()
+			pcall(function()
+				firesignal(itemButton.MouseButton1Click)
+			end)
+		end)
+		local selectionConfirmed = waitForSelection(0.65)
+		if not selectionConfirmed then
+			-- Some inventory revisions bind Activated instead of MouseButton1Click.
+			-- Only dispatch the fallback if the first signal did not select the item.
+			task.spawn(function()
+				pcall(function()
+					firesignal(itemButton.Activated)
+				end)
+			end)
+			selectionConfirmed = waitForSelection(0.65)
+		end
+		if not selectionConfirmed then
+			return nil
+		end
+
+		local function findLoadedWeapon()
+			local character = LocalPlayer.Character
+			local tool = (character and character:FindFirstChild(weaponName))
+				or LocalPlayer.Backpack:FindFirstChild(weaponName)
+			local swordNameValue = LocalPlayer.PlayerStats:FindFirstChild("SwordName")
+			local replicatedName = swordNameValue and swordNameValue.Value
+			if tool and replicatedName == weaponName then
+				return tool
+			end
+			return nil
+		end
+
+		local function waitForLoadedWeapon(duration)
+			local deadline = os.clock() + duration
+			repeat
+				local tool = findLoadedWeapon()
+				if tool then
+					return tool
+				end
+				task.wait(0.05)
+			until os.clock() >= deadline
+			return findLoadedWeapon()
+		end
+
+		task.spawn(function()
+			pcall(function()
+				firesignal(primaryButton.MouseButton1Click)
+			end)
+		end)
+		local loadedTool = waitForLoadedWeapon(math.min(timeoutSeconds or 4, 1.5))
+		if loadedTool then
+			return loadedTool
+		end
+
+		task.spawn(function()
+			pcall(function()
+				firesignal(primaryButton.Activated)
+			end)
+		end)
+		return waitForLoadedWeapon(math.max((timeoutSeconds or 4) - 1.5, 0.5))
+	end
+
+	_G._GenesisBindSwordTracker = function(character)
+		if _G._lastSwordTrackerConnection then
+			pcall(function()
+				_G._lastSwordTrackerConnection:Disconnect()
+			end)
+			_G._lastSwordTrackerConnection = nil
+		end
+		if not character then
+			return
+		end
+
+		for _, child in pairs(character:GetChildren()) do
+			_G._GenesisRememberSword(child)
+		end
+		_G._lastSwordTrackerConnection = trackGenesisConnection(character.ChildAdded:Connect(function(child)
+			_G._GenesisRememberSword(child)
+		end))
+	end
+
 	local function getFishingRod()
 		local character = LocalPlayer.Character
 		for _, container in ipairs({ character, LocalPlayer.Backpack }) do
@@ -14659,37 +15076,49 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	local function equipFishingRod()
+		if _G.fishingLoadoutBusy then
+			return getFishingRod()
+		end
 		local character = LocalPlayer.Character
 		local humanoid = GetHumanoid(character)
-		local rod = getFishingRod()
-		if not character or not humanoid or not rod then
+		if not character or not humanoid then
 			return nil
 		end
 
-		-- Capture the actual previously equipped Tool once.  A fishing rod and
-		-- combat weapon share the same Roblox equip slot, so an index is not a
-		-- reliable way to restore it.
+		-- The rod replaces the selected sword in the game's Primary weapon slot.
+		-- Preserve the weapon name because the old Tool instance is destroyed.
 		if not _G.fishingToolCaptured then
 			local equipped = getEquippedTool()
-			_G.fishingPreviousTool = equipped ~= rod and equipped or nil
+			_G._GenesisRememberSword(equipped)
+			_G.fishingPreviousWeaponName = _G._GenesisGetLastEquippedSwordName()
+			_G.fishingPreviousTool = nil
 			_G.fishingToolCaptured = true
 		end
 
-		if rod.Parent ~= character then
-			humanoid:EquipTool(rod)
-			task.wait(0.05)
+		_G.fishingLoadoutBusy = true
+		local rod = nil
+		local ok = pcall(function()
+			rod = getFishingRod()
+			local swordNameValue = LocalPlayer.PlayerStats:FindFirstChild("SwordName")
+			if not rod or not swordNameValue or swordNameValue.Value ~= "Basic Rod" then
+				rod = selectPrimaryWeapon("Basic Rod", 4)
+			end
+			if rod and rod.Parent ~= character then
+				humanoid:EquipTool(rod)
+				task.wait(0.05)
+			end
+		end)
+		_G.fishingLoadoutBusy = false
+		if not ok then
+			return nil
 		end
 		return rod
 	end
 
 	local function restoreFishingWeapon()
-		if not _G.fishingToolCaptured then
+		if not _G.fishingToolCaptured or _G.fishingLoadoutBusy then
 			return
 		end
-
-		local previous = _G.fishingPreviousTool
-		_G.fishingPreviousTool = nil
-		_G.fishingToolCaptured = false
 
 		local character = LocalPlayer.Character
 		local humanoid = GetHumanoid(character)
@@ -14697,19 +15126,35 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		if previous and previous:IsA("Tool") and (previous.Parent == character or previous.Parent == LocalPlayer.Backpack) then
-			if previous.Parent ~= character then
-				humanoid:EquipTool(previous)
-			end
+		_G.fishingLoadoutBusy = true
+		local previousName = _G.fishingPreviousWeaponName or _G._GenesisGetLastEquippedSwordName()
+		local restoredTool = nil
+		pcall(function()
+			restoredTool = previousName and selectPrimaryWeapon(previousName, 4) or nil
+		end)
+		if restoredTool then
+			pcall(function()
+				if restoredTool.Parent ~= character then
+					humanoid:EquipTool(restoredTool)
+				end
+			end)
+			_G._GenesisRememberSword(restoredTool)
+			_G.fishingPreviousTool = nil
+			_G.fishingPreviousWeaponName = nil
+			_G.fishingToolCaptured = false
+			_G.fishingLoadoutBusy = false
 			return
 		end
 
-		-- If the player had empty hands before fishing, leave them empty instead
-		-- of leaving the rod selected after Auto Fish stops.
-		local equipped = getEquippedTool()
-		if equipped and string.find(string.lower(equipped.Name), "rod", 1, true) then
-			humanoid:UnequipTools()
-		end
+		-- Do not leave the rod equipped if restoration is temporarily unavailable.
+		-- Keep the captured name so the next cleanup tick can retry restoration.
+		pcall(function()
+			local equipped = getEquippedTool()
+			if equipped and string.find(string.lower(equipped.Name), "rod", 1, true) then
+				humanoid:UnequipTools()
+			end
+		end)
+		_G.fishingLoadoutBusy = false
 	end
 
 	stopFishing = function()
@@ -14741,56 +15186,31 @@ local function run(B, T, P, DfT, ...)
 			or _G.isLootingChests
 			or _G.collectingPearls
 			or _G.seaEventActive
+			or _G.conquestActive
 			or _G.isProgressingBusoV2
 			or _G.isProgressingObservationV2
 		then
 			return true
 		end
-
-		local competingModes = {
-			"auto_farm",
-			"farmmaterial",
-			"allboss",
-			"easybounty",
-			"autoKillMobs",
-			"autoFarmBoss",
-			"autoFarmKaido",
-			"autoDarkBeard",
-			"autoCrimsonDemon",
-			"autoIceKing",
-			"autoSecondSea",
-			"autoThirdSea",
-			"autoRaidBoss_ExpertSwordman",
-			"autoRaidBoss_MsMother",
-			"autoRaidBoss_KingSamurai",
-			"autoRaidBoss_BushidoApe",
-			"autoRaidBoss_LordOfSaber",
-			"autoHuntSerpent",
-			"autoHuntPtero",
-			"autoDailyQuest",
-			"autoSKHD",
-			"autoGhostShip",
-			"autoRaceIsland",
-			"autoConquest",
-			"auto_dungeon_v2",
-			"autoBusoV2",
-			"autoKenV2",
-		}
-		for _, setting in ipairs(competingModes) do
-			if GetSetting(setting) then
-				return true
-			end
+		if GetSetting("auto_dungeon_v2") and _G.Raid and _G.Raid.inraid then
+			return true
 		end
 		return false
 	end
 
-	LocalPlayer.CharacterAdded:Connect(function()
+	_G._GenesisBindSwordTracker(LocalPlayer.Character)
+
+	trackGenesisConnection(LocalPlayer.CharacterAdded:Connect(function(character)
 		removeFishPosition()
 		_G.isFishing = false
 		_G.fishingPosition = nil
 		_G.fishingPreviousTool = nil
-		_G.fishingToolCaptured = false
-	end)
+		-- Keep the remembered name through respawn so a death while fishing cannot
+		-- strand the Primary slot on Basic Rod.
+		_G.fishingToolCaptured = _G.fishingPreviousWeaponName ~= nil
+		_G.fishingLoadoutBusy = false
+		_G._GenesisBindSwordTracker(character)
+	end))
 
 	spawn(function()
 		while task.wait(0.5) do
@@ -14873,7 +15293,7 @@ local function run(B, T, P, DfT, ...)
 
 				if not fishingUI then
 					local args = {
-						"SW_" .. rod.Name .. "_M1",
+						"SW_Basic Rod_M1",
 						{
 							MouseHit = cf * CFrame.new(0, 0, 5),
 							Charge = 100,
@@ -14886,7 +15306,7 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
-	RunService.Heartbeat:Connect(function()
+	trackGenesisConnection(RunService.Heartbeat:Connect(function()
 		pcall(function()
 			if not GetSetting("autoFish") then
 				if _G.isFishing or _G.fishingToolCaptured then
@@ -14943,7 +15363,89 @@ local function run(B, T, P, DfT, ...)
 				)
 			end
 		end)
-	end)
+	end))
+
+	-- Dispatches only to a button that belongs to a currently visible GUI tree.
+	-- Signal dispatch is the quiet primary path. The enlarged click path is a
+	-- bounded fallback for menus whose LocalScript listens to real pointer input.
+	_G._GenesisIsVisibleGuiButton = function(button)
+		if not button or not button:IsA("GuiButton") or not button.Parent then
+			return false
+		end
+		local current = button
+		while current do
+			if current:IsA("GuiObject") and not current.Visible then
+				return false
+			end
+			if current:IsA("LayerCollector") and not current.Enabled then
+				return false
+			end
+			current = current.Parent
+		end
+		return button.AbsoluteSize.X > 0 and button.AbsoluteSize.Y > 0
+	end
+
+	_G._GenesisDispatchGuiButton = function(button, forceEnlargedClick)
+		if not _G._GenesisIsVisibleGuiButton(button) then
+			return false, "not_visible"
+		end
+
+		if not forceEnlargedClick and type(firesignal) == "function" then
+			local signalOk = pcall(function()
+				firesignal(button.MouseButton1Click)
+			end)
+			if signalOk then
+				return true, "firesignal"
+			end
+		end
+
+		if not VirtualInputManager then
+			return false, "unsupported"
+		end
+
+		local originalSize = button.Size
+		local originalPosition = button.Position
+		local originalAnchorPoint = button.AnchorPoint
+		local clickOk = pcall(function()
+			-- This is the previously reliable large hitbox technique, but it is now
+			-- applied only to the exact validated button and restored immediately.
+			button.AnchorPoint = Vector2.new(0, 0)
+			button.Size = UDim2.new(10, 0, 10, 0)
+			button.Position = UDim2.new(-1.9, 0, -5.5, 0)
+			RunService.Heartbeat:Wait()
+
+			if not _G._GenesisIsVisibleGuiButton(button) then
+				error("button_hidden_during_dispatch")
+			end
+
+			local camera = Workspace.CurrentCamera
+			local viewport = camera and camera.ViewportSize or Vector2.new(1366, 768)
+			local absolutePosition = button.AbsolutePosition
+			local absoluteSize = button.AbsoluteSize
+			local left = math.max(1, absolutePosition.X)
+			local top = math.max(1, absolutePosition.Y)
+			local right = math.min(viewport.X - 1, absolutePosition.X + absoluteSize.X - 1)
+			local bottom = math.min(viewport.Y - 1, absolutePosition.Y + absoluteSize.Y - 1)
+			if right <= left or bottom <= top then
+				error("enlarged_button_offscreen")
+			end
+
+			-- Click the center of the button's verified on-screen intersection. This
+			-- cannot drift to the old fixed top-right coordinate when a menu is absent.
+			local clickX = math.floor((left + right) * 0.5)
+			local clickY = math.floor((top + bottom) * 0.5)
+			VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 0)
+			VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
+		end)
+
+		pcall(function()
+			button.Size = originalSize
+			button.Position = originalPosition
+			button.AnchorPoint = originalAnchorPoint
+		end)
+
+		return clickOk, clickOk and "enlarged_click" or "click_failed"
+	end
 
 	spawn(function()
 		while task.wait(1) do
@@ -15239,13 +15741,7 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
-	local farmSteppedBusy = false
-	RunService.Stepped:Connect(function()
-		if farmSteppedBusy then
-			return
-		end
-		farmSteppedBusy = true
-		pcall(function()
+	trackGenesisConnection(RunService.Stepped:Connect(function()
 		if _G.isLootingChests then
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
@@ -15340,6 +15836,13 @@ local function run(B, T, P, DfT, ...)
 				end
 				return
 			end
+		end
+
+		-- Do not let combat start while the Primary slot is still being switched
+		-- back from Basic Rod to the weapon that fishing replaced.
+		if _G.fishingToolCaptured or _G.fishingLoadoutBusy then
+			stopFishing()
+			return
 		end
 
 		if not _G.isAnyCombatActive() then
@@ -16192,9 +16695,7 @@ local function run(B, T, P, DfT, ...)
 				currentFarmTarget = nil
 			end
 		end
-		end)
-		farmSteppedBusy = false
-	end)
+	end))
 
 	spawn(function()
 		while task.wait(1) do
@@ -16309,48 +16810,36 @@ local function run(B, T, P, DfT, ...)
 						tp(CFrame.new(2587, 95, -1879))
 						task.wait(0.5)
 
-						local screenSize = workspace.CurrentCamera.ViewportSize
-						VirtualInputManager:SendMouseButtonEvent(screenSize.X / 2, screenSize.Y / 2, 0, true, game, 0)
-						task.wait(0.05)
-						VirtualInputManager:SendMouseButtonEvent(screenSize.X / 2, screenSize.Y / 2, 0, false, game, 0)
+						local allNpc = Workspace:FindFirstChild("AllNPC")
+						local npcFolder = ReplicatedStorage:FindFirstChild("NPC")
+						local traveler = (allNpc and allNpc:FindFirstChild("Traveler"))
+							or (npcFolder and npcFolder:FindFirstChild("Traveler"))
+						if traveler then
+							ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(traveler)
+						end
 						task.wait(0.5)
 
 						pcall(function()
 							local acceptBtn = LocalPlayer.PlayerGui.Traveler.Dialogue.Accept
-							if acceptBtn then
-								local centerX = acceptBtn.AbsolutePosition.X + (acceptBtn.AbsoluteSize.X / 2)
-								local centerY = acceptBtn.AbsolutePosition.Y + (acceptBtn.AbsoluteSize.Y / 2)
-								for i = 1, 20 do
-									VirtualInputManager:SendMouseButtonEvent(centerX, centerY - 5, 0, true, game, 0)
-									task.wait(0.01)
-									VirtualInputManager:SendMouseButtonEvent(centerX, centerY - 5, 0, false, game, 0)
-									task.wait(0.01)
-								end
-							end
+							_G._GenesisDispatchGuiButton(acceptBtn, false)
 						end)
 					end
 				elseif progression == "Yes" then
 					tp(CFrame.new(-2162, 17, -3988))
 					task.wait(0.5)
 
-					local screenSize = workspace.CurrentCamera.ViewportSize
-					VirtualInputManager:SendMouseButtonEvent(screenSize.X / 2, screenSize.Y / 2, 0, true, game, 0)
-					task.wait(0.05)
-					VirtualInputManager:SendMouseButtonEvent(screenSize.X / 2, screenSize.Y / 2, 0, false, game, 0)
+					local allNpc = Workspace:FindFirstChild("AllNPC")
+					local npcFolder = ReplicatedStorage:FindFirstChild("NPC")
+					local elitePirate = (allNpc and allNpc:FindFirstChild("Elite Pirate"))
+						or (npcFolder and npcFolder:FindFirstChild("Elite Pirate"))
+					if elitePirate then
+						ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(elitePirate)
+					end
 					task.wait(0.5)
 
 					pcall(function()
 						local acceptBtn = LocalPlayer.PlayerGui["Elite Pirate"].Dialogue.Accept
-						if acceptBtn then
-							local centerX = acceptBtn.AbsolutePosition.X + (acceptBtn.AbsoluteSize.X / 2)
-							local centerY = acceptBtn.AbsolutePosition.Y + (acceptBtn.AbsoluteSize.Y / 2)
-							for i = 1, 20 do
-								VirtualInputManager:SendMouseButtonEvent(centerX, centerY - 5, 0, true, game, 0)
-								task.wait(0.01)
-								VirtualInputManager:SendMouseButtonEvent(centerX, centerY - 5, 0, false, game, 0)
-								task.wait(0.01)
-							end
-						end
+						_G._GenesisDispatchGuiButton(acceptBtn, false)
 					end)
 				end
 			end)
@@ -16424,12 +16913,7 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
-				local screenSize = workspace.CurrentCamera.ViewportSize
-				local clickX = screenSize.X - 20
-				local clickY = screenSize.Y / 15
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 0)
-				task.wait(0.01)
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
+				_G._GenesisDispatchGuiButton(acceptBtn, false)
 			end)
 		end
 	end)
@@ -16698,214 +17182,99 @@ local function run(B, T, P, DfT, ...)
 				if not _G.storingFruit then
 					return
 				end
-				local screenSize = workspace.CurrentCamera.ViewportSize
-				local clickX = screenSize.X - 20
-				local clickY = screenSize.Y / 15
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 0)
-				task.wait(0.01)
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
+				local eatFruitGui = LocalPlayer.PlayerGui:FindFirstChild("EatFruitBecky")
+				local dialogue = eatFruitGui and eatFruitGui:FindFirstChild("Dialogue")
+				local collectBtn = dialogue and dialogue:FindFirstChild("Collect")
+				_G._GenesisDispatchGuiButton(collectBtn, false)
 			end)
 		end
 	end)
 
-	spawn(function()
-		while task.wait(0.01) do
-			pcall(function()
-				if not GetSetting("autoStoreFruits") then
-					return
-				end
-				local collectBtn = LocalPlayer.PlayerGui.EatFruitBecky.Dialogue.Collect
-				if collectBtn then
-					collectBtn.Size = UDim2.new(10, 0, 10, 0)
-					collectBtn.Position = UDim2.new(-1.9, 0, -5.5, 0)
-				end
-			end)
+	_G._GenesisBoundedUiClickStates = {}
+
+	_G._GenesisResetBoundedUiClick = function(key)
+		_G._GenesisBoundedUiClickStates[key] = nil
+	end
+
+	_G._GenesisClickVisibleButton = function(key, button, maxAttempts, interval)
+		if not _G._GenesisIsVisibleGuiButton(button) then
+			return false, "not_visible"
 		end
-	end)
+
+		local clickState = _G._GenesisBoundedUiClickStates[key]
+		if not clickState or clickState.Button ~= button then
+			clickState = { Button = button, Attempts = 0, LastClick = 0 }
+			_G._GenesisBoundedUiClickStates[key] = clickState
+		end
+		if clickState.Attempts >= maxAttempts then
+			return false, "exhausted"
+		end
+
+		local now = tick()
+		if now - clickState.LastClick < interval then
+			return false, "cooldown"
+		end
+
+		clickState.Attempts = clickState.Attempts + 1
+		clickState.LastClick = now
+		local fired, method = _G._GenesisDispatchGuiButton(button, false)
+		if not fired then
+			return false, method
+		end
+		return true, clickState.Attempts >= maxAttempts and "exhausted" or method
+	end
 
 	spawn(function()
-		while task.wait(0.01) do
-			pcall(function()
-				if not GetSetting("autoFarmKaido") then
-					return
-				end
-				local acceptBtn = LocalPlayer.PlayerGui.SummonDragon.Dialogue.Accept
-				if acceptBtn then
-					acceptBtn.Size = UDim2.new(10, 0, 10, 0)
-					acceptBtn.Position = UDim2.new(-1.9, 0, -5.5, 0)
-				end
-			end)
-		end
-	end)
-
-	spawn(function()
-		while task.wait(0.01) do
-			pcall(function()
-				if not GetSetting("autoSecondSea") then
-					return
-				end
-				local acceptBtn = LocalPlayer.PlayerGui.Traveler.Dialogue.Accept
-				if acceptBtn then
-					acceptBtn.Size = UDim2.new(10, 0, 10, 0)
-					acceptBtn.Position = UDim2.new(-1.9, 0, -5.5, 0)
-				end
-			end)
-		end
-	end)
-
-	spawn(function()
-		while task.wait(0.01) do
-			pcall(function()
-				if not GetSetting("autoSecondSea") then
-					return
-				end
-				local acceptBtn = LocalPlayer.PlayerGui["Elite Pirate"].Dialogue.Accept
-				if acceptBtn then
-					acceptBtn.Size = UDim2.new(10, 0, 10, 0)
-					acceptBtn.Position = UDim2.new(-1.9, 0, -5.5, 0)
-				end
-			end)
-		end
-	end)
-
-	spawn(function()
-		while task.wait(0.01) do
+		while task.wait(0.1) do
 			pcall(function()
 				if not GetSetting("autoThirdSea") then
+					_G._GenesisResetBoundedUiClick("thirdSeaSquid")
+					_G._GenesisResetBoundedUiClick("thirdSeaSummon")
 					return
 				end
-				if _G.thirdSeaState ~= "squid_mission" and _G.thirdSeaState ~= "finished" then
+
+				local state = _G.thirdSeaState
+				local guiName, clickKey
+				if state == "squid_mission" or state == "finished" then
+					guiName = "The Squid"
+					clickKey = "thirdSeaSquid"
+					_G._GenesisResetBoundedUiClick("thirdSeaSummon")
+				elseif state == "summon_kraken" then
+					guiName = "Summon Tentacle"
+					clickKey = "thirdSeaSummon"
+					_G._GenesisResetBoundedUiClick("thirdSeaSquid")
+				else
+					_G._GenesisResetBoundedUiClick("thirdSeaSquid")
+					_G._GenesisResetBoundedUiClick("thirdSeaSummon")
 					return
 				end
-				local gui = LocalPlayer.PlayerGui:FindFirstChild("The Squid")
-				if not gui then
-					return
-				end
-				local dialogue = gui:FindFirstChild("Dialogue")
-				if not dialogue then
-					return
-				end
-				local accept = dialogue:FindFirstChild("Accept")
-				if not accept then
-					return
-				end
-				accept.Size = UDim2.new(10, 0, 10, 0)
-				accept.Position = UDim2.new(-1.9, 0, -5.5, 0)
+
+				local gui = LocalPlayer.PlayerGui:FindFirstChild(guiName)
+				local dialogue = gui and gui:FindFirstChild("Dialogue")
+				local accept = dialogue and dialogue:FindFirstChild("Accept")
+				_G._GenesisClickVisibleButton(clickKey, accept, 8, 0.25)
 			end)
 		end
 	end)
 
 	spawn(function()
-		while task.wait(0.01) do
+		while task.wait(0.1) do
 			pcall(function()
-				if not GetSetting("autoThirdSea") then
-					return
-				end
-				if _G.thirdSeaState ~= "squid_mission" and _G.thirdSeaState ~= "finished" then
-					return
-				end
-				local screenSize = workspace.CurrentCamera.ViewportSize
-				local clickX = screenSize.X - 20
-				local clickY = screenSize.Y / -30
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 0)
-				task.wait(0.01)
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
-			end)
-		end
-	end)
-
-	spawn(function()
-		while task.wait(0.01) do
-			pcall(function()
-				if not GetSetting("autoThirdSea") then
-					return
-				end
-				if _G.thirdSeaState ~= "summon_kraken" then
-					return
-				end
-				local gui = LocalPlayer.PlayerGui:FindFirstChild("Summon Tentacle")
-				if not gui then
-					return
-				end
-				local dialogue = gui:FindFirstChild("Dialogue")
-				if not dialogue then
-					return
-				end
-				local accept = dialogue:FindFirstChild("Accept")
-				if not accept then
-					return
-				end
-				accept.Size = UDim2.new(10, 0, 10, 0)
-				accept.Position = UDim2.new(-1.9, 0, -5.5, 0)
-			end)
-		end
-	end)
-
-	spawn(function()
-		while task.wait(0.01) do
-			pcall(function()
-				if not GetSetting("autoThirdSea") then
-					return
-				end
-				if _G.thirdSeaState ~= "summon_kraken" then
-					return
-				end
-				local screenSize = workspace.CurrentCamera.ViewportSize
-				local clickX = screenSize.X - 20
-				local clickY = screenSize.Y / 15
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 0)
-				task.wait(0.01)
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
-			end)
-		end
-	end)
-
-	spawn(function()
-		while task.wait(0.5) do
-			pcall(function()
-				if not GetSetting("autoDailyQuest") then
-					return
-				end
-				if _G.dailyQuestState ~= "get_quest" then
+				if not GetSetting("autoDailyQuest") or _G.dailyQuestState ~= "get_quest" then
+					_G._GenesisResetBoundedUiClick("dailyQuest")
 					return
 				end
 
 				local gui = LocalPlayer.PlayerGui:FindFirstChild("LoreGUI")
-				if gui then
-					local dialogue = gui:FindFirstChild("Dialogue")
-					if dialogue then
-						for _, btn in pairs(dialogue:GetChildren()) do
-							if btn.Name == "Quest 1" or btn.Name == "Quest 2" or btn.Name == "QuestAccept" then
-								btn.Size = UDim2.new(10, 0, 10, 0)
-								btn.Position = UDim2.new(-1.9, 0, -5.5, 0)
-							end
-						end
-					end
-				else
-					local npcPart = Workspace.AllNPC:FindFirstChild(_G.dailyQuestCurrentNPC)
-					if npcPart then
-						ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(npcPart)
-					end
+				local dialogue = gui and gui:FindFirstChild("Dialogue")
+				if not dialogue then
+					return
 				end
-			end)
-		end
-	end)
 
-	spawn(function()
-		while task.wait(0.01) do
-			pcall(function()
-				if not GetSetting("autoDailyQuest") then
-					return
-				end
-				if _G.dailyQuestState ~= "get_quest" then
-					return
-				end
-				local screenSize = workspace.CurrentCamera.ViewportSize
-				local clickX = screenSize.X - 20
-				local clickY = screenSize.Y / 15
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 0)
-				task.wait(0.01)
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
+				local button = dialogue:FindFirstChild("QuestAccept")
+					or dialogue:FindFirstChild("Quest 1")
+					or dialogue:FindFirstChild("Quest 2")
+				_G._GenesisClickVisibleButton("dailyQuest", button, 8, 0.25)
 			end)
 		end
 	end)
@@ -17284,38 +17653,7 @@ local function run(B, T, P, DfT, ...)
 	end)
 
 	spawn(function()
-		while task.wait(0.01) do
-			pcall(function()
-				if not buyingStyle then
-					return
-				end
-
-				local screenSize = workspace.CurrentCamera.ViewportSize
-				local clickX = screenSize.X - 20
-				local clickY = screenSize.Y / 15
-
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 0)
-				task.wait(0.01)
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
-
-				for _, gui in pairs(LocalPlayer.PlayerGui:GetChildren()) do
-					if gui.Name:find("Shop") then
-						local dialogue = gui:FindFirstChild("Dialogue")
-						if dialogue then
-							local accept = dialogue:FindFirstChild("Accept")
-							if accept then
-								accept.Size = UDim2.new(10, 0, 10, 0)
-								accept.Position = UDim2.new(-1.9, 0, -5.5, 0)
-							end
-						end
-					end
-				end
-			end)
-		end
-	end)
-
-	spawn(function()
-		while task.wait(0.5) do
+		while task.wait(0.1) do
 			pcall(function()
 				if not buyingStyle then
 					return
@@ -17323,11 +17661,42 @@ local function run(B, T, P, DfT, ...)
 				if hasStyle(buyingStyle) then
 					SpectrumX:Notify({ Text = "Style purchased!", Type = "success", Duration = 3 })
 					buyingStyle = nil
+					_G._GenesisBuyingStyleStartedAt = 0
 					if prevPosition then
 						tp(prevPosition)
 						prevPosition = nil
 					end
+					return
 				end
+				if tick() - (_G._GenesisBuyingStyleStartedAt or 0) >= 12 then
+					SpectrumX:Notify({ Text = "Style purchase was not confirmed.", Type = "error", Duration = 3 })
+					buyingStyle = nil
+					_G._GenesisBuyingStyleStartedAt = 0
+					if prevPosition then
+						tp(prevPosition)
+						prevPosition = nil
+					end
+					return
+				end
+
+				local accept = nil
+				for _, gui in pairs(LocalPlayer.PlayerGui:GetChildren()) do
+					if gui.Name:find("Shop") then
+						local dialogue = gui:FindFirstChild("Dialogue")
+						local candidate = dialogue and dialogue:FindFirstChild("Accept")
+						if _G._GenesisIsVisibleGuiButton(candidate) then
+							accept = candidate
+							break
+						end
+					end
+				end
+
+				_G._GenesisClickVisibleButton(
+					"buyStyle_" .. tostring(_G._GenesisStylePurchaseGeneration),
+					accept,
+					8,
+					0.25
+				)
 			end)
 		end
 	end)
@@ -17475,38 +17844,10 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
-	spawn(function()
-		while task.wait(0.5) do
-			pcall(function()
-				if not GetSetting("autoBuyChests") then
-					return
-				end
-				local selected = GetSetting("selectedChests") or {}
-				if #selected == 0 then
-					return
-				end
-
-				for _, chestName in ipairs(selected) do
-					for price = 1, 500 do
-						local success = pcall(function()
-							ReplicatedStorage.Chest.Remotes.Functions.CrewOperations:InvokeServer("BuyChest", {
-								ChestName = chestName,
-								Price = price,
-							})
-						end)
-						if success then
-							break
-						end
-						task.wait(0.01)
-					end
-				end
-			end)
-		end
-	end)
-
 	_G.dailyQuestState = "idle"
 	_G.dailyQuestCurrentNPC = ""
 	_G.dailyQuestCheckQueued = false
+	_G.dailyQuestLastCheckAttempt = 0
 	_G.dailyQuestTarget = nil
 
 	local dailyQuests = {
@@ -17568,6 +17909,7 @@ local function run(B, T, P, DfT, ...)
 					_G.dailyQuestState = hasQuest and "kill" or "get_quest"
 					_G.dailyQuestCurrentNPC = current.npc
 					_G.dailyQuestCheckQueued = false
+					_G.dailyQuestLastCheckAttempt = 0
 					return
 				end
 
@@ -17575,6 +17917,7 @@ local function run(B, T, P, DfT, ...)
 					if hasQuest then
 						_G.dailyQuestState = "kill"
 						_G.dailyQuestCheckQueued = false
+						_G.dailyQuestLastCheckAttempt = 0
 						return
 					end
 					local npc = Workspace.AllNPC:FindFirstChild(current.npc)
@@ -17584,8 +17927,9 @@ local function run(B, T, P, DfT, ...)
 							root.CFrame = CFrame.new(npc.Position)
 						end
 					end
-					if not _G.dailyQuestCheckQueued then
+					if tick() - (_G.dailyQuestLastCheckAttempt or 0) >= 2 then
 						_G.dailyQuestCheckQueued = true
+						_G.dailyQuestLastCheckAttempt = tick()
 						task.wait(0.5)
 						pcall(function()
 							local npcPart = Workspace.AllNPC:FindFirstChild(current.npc)
@@ -17601,6 +17945,7 @@ local function run(B, T, P, DfT, ...)
 					if not hasQuest then
 						_G.dailyQuestState = "idle"
 						_G.dailyQuestCheckQueued = false
+						_G.dailyQuestLastCheckAttempt = 0
 						return
 					end
 				end
@@ -17666,9 +18011,9 @@ local function run(B, T, P, DfT, ...)
 
 	local lastInput = tick()
 
-	UserInputService.InputBegan:Connect(function()
+	trackGenesisConnection(UserInputService.InputBegan:Connect(function()
 		lastInput = tick()
-	end)
+	end))
 
 	spawn(function()
 		while task.wait(1) do
@@ -17677,14 +18022,8 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
-				local screenSize = workspace.CurrentCamera.ViewportSize
-				local clickX = screenSize.X - 20
-				local clickY = screenSize.Y / 15
-
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 0)
-				task.wait(0.1)
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
-
+				-- Avoid blind screen-coordinate clicks: an unrelated menu can occupy that
+				-- point. A bounded key pulse is sufficient to keep the client active.
 				VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
 				task.wait(0.1)
 				VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
@@ -17694,53 +18033,63 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
+	local autoPlayInFlight = false
+	local autoPlayLastAttempt = 0
+
 	local function autoPlay()
-		pcall(function()
-			local GuiService = game:GetService("GuiService")
-			local loadingGui = LocalPlayer:FindFirstChild("PlayerGui")
-				and LocalPlayer.PlayerGui:FindFirstChild("LoadingGUI")
+		if autoPlayInFlight then
+			return true
+		end
 
-			if not loadingGui then
-				return
-			end
+		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+		local loadingGui = playerGui and playerGui:FindFirstChild("LoadingGUI")
+		if not loadingGui then
+			return false
+		end
+		if os.clock() - autoPlayLastAttempt < 3 then
+			return true
+		end
 
-			local playButton = loadingGui:FindFirstChild("Play")
-			if not playButton or not playButton:IsA("GuiButton") or not playButton.Visible then
-				return
-			end
+		local playButton = loadingGui and loadingGui:FindFirstChild("Play")
+		if not playButton or not playButton:IsA("GuiButton") or not playButton.Visible then
+			return true
+		end
 
-			GuiService.SelectedObject = playButton
-			task.wait(0.1)
+		local chest = ReplicatedStorage:FindFirstChild("Chest")
+		local remotes = chest and chest:FindFirstChild("Remotes")
+		local functionsFolder = remotes and remotes:FindFirstChild("Functions")
+		local etcFunction = functionsFolder and functionsFolder:FindFirstChild("EtcFunction")
+		if not etcFunction or not etcFunction:IsA("RemoteFunction") then
+			return true
+		end
 
-			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
-			task.wait(0.05)
-			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
-
-			task.wait(0.2)
-
-			if playButton and playButton.Visible then
+		autoPlayInFlight = true
+		autoPlayLastAttempt = os.clock()
+		task.spawn(function()
+			local finished = false
+			local invokeThread = task.spawn(function()
 				pcall(function()
-					playButton:Activate()
+					-- This is the action used by ReplicatedFirst.LoadingScript's Play callback.
+					etcFunction:InvokeServer("EnterTheGame", {})
 				end)
+				finished = true
+			end)
+
+			local deadline = os.clock() + 10
+			while not finished and os.clock() < deadline do
+				local currentGui = playerGui and playerGui:FindFirstChild("LoadingGUI")
+				if not currentGui then
+					break
+				end
+				task.wait(0.1)
 			end
 
-			task.wait(0.01)
-			if playButton and playButton.Visible then
-				pcall(function()
-					playButton.MouseButton1Click:Fire()
-					if playButton:IsA("TextButton") or playButton:IsA("ImageButton") then
-						local inputObject = {
-							UserInputType = Enum.UserInputType.MouseButton1,
-							KeyCode = Enum.KeyCode.Unknown,
-							Position = playButton.AbsolutePosition + (playButton.AbsoluteSize / 2),
-						}
-						if playButton.Activated then
-							playButton.Activated:Fire(inputObject)
-						end
-					end
-				end)
+			if not finished then
+				pcall(task.cancel, invokeThread)
 			end
+			autoPlayInFlight = false
 		end)
+		return true
 	end
 
 	spawn(function()
@@ -18187,7 +18536,7 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
-				detectionConnection = overlay.ChildAdded:Connect(function(child)
+				detectionConnection = trackGenesisConnection(overlay.ChildAdded:Connect(function(child)
 					task.wait(0.6)
 					local text = ""
 					pcall(function()
@@ -18206,7 +18555,7 @@ local function run(B, T, P, DfT, ...)
 					then
 						forceHop()
 					end
-				end)
+				end))
 			end
 
 			-- Try to start detection several times.
@@ -18431,7 +18780,7 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	_G.HakiV2.clickAccept = function(npcName)
-		pcall(function()
+		local ok, fired = pcall(function()
 			local gui = LocalPlayer.PlayerGui:FindFirstChild(npcName)
 				or LocalPlayer.PlayerGui:FindFirstChild(npcName .. "Shop")
 			if not gui then
@@ -18455,34 +18804,11 @@ local function run(B, T, P, DfT, ...)
 			end
 			local accept = dialogue:FindFirstChild("Accept")
 			if not accept or not accept:IsA("GuiButton") then
-				return
+				return false
 			end
-
-			pcall(function()
-				accept.Size = UDim2.new(10, 0, 10, 0)
-				accept.Position = UDim2.new(-1.9, 0, -5.5, 0)
-			end)
-
-			local GuiService = game:GetService("GuiService")
-			GuiService.SelectedObject = accept
-			task.wait(0.05)
-			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
-			task.wait(0.04)
-			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
-			pcall(function()
-				accept:Activate()
-			end)
-			pcall(function()
-				if accept.MouseButton1Click then
-					accept.MouseButton1Click:Fire()
-				end
-			end)
-
-			local screenSize = workspace.CurrentCamera.ViewportSize
-			VirtualInputManager:SendMouseButtonEvent(screenSize.X - 20, screenSize.Y / 15, 0, true, game, 0)
-			task.wait(0.02)
-			VirtualInputManager:SendMouseButtonEvent(screenSize.X - 20, screenSize.Y / 15, 0, false, game, 0)
+			return _G._GenesisDispatchGuiButton(accept, false)
 		end)
+		return ok and fired == true
 	end
 
 	_G.HakiV2.findDarkBeardBoss = function()
@@ -18639,7 +18965,7 @@ local function run(B, T, P, DfT, ...)
 		_G.HakiV2.bg.P = 500000
 		_G.HakiV2.bg.Parent = root
 
-		_G.HakiV2.lockConn = RunService.Heartbeat:Connect(function()
+		_G.HakiV2.lockConn = trackGenesisConnection(RunService.Heartbeat:Connect(function()
 			pcall(function()
 				if not (_G.isProgressingBusoV2 or _G.isProgressingObservationV2) then
 					_G.HakiV2.stopLock()
@@ -18659,7 +18985,7 @@ local function run(B, T, P, DfT, ...)
 				root.AssemblyLinearVelocity = Vector3.zero
 				root.AssemblyAngularVelocity = Vector3.zero
 			end)
-		end)
+		end))
 	end
 
 	_G.HakiV2.teleportSea2 = function()
@@ -19480,7 +19806,26 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	_G.Raid.checkInRaid = function()
-		_G.Raid.inraid = LocalPlayer.PlayerGui:FindFirstChild("DungeonUI") ~= nil
+		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+		local hasDungeonUi = playerGui and playerGui:FindFirstChild("DungeonUI") ~= nil
+		local hasLoadedDungeon = false
+		local islandFolder = Workspace:FindFirstChild("Island")
+		if islandFolder then
+			for _, island in ipairs(islandFolder:GetChildren()) do
+				if island:IsA("Model")
+					and string.match(island.Name, "^%(Real%) .+ Dungeon$")
+					and island:GetAttribute("Loaded") == true
+				then
+					hasLoadedDungeon = true
+					break
+				end
+			end
+		end
+
+		-- DungeonUI is created from the server's DungeonUI effect. The loaded
+		-- dungeon model exists slightly earlier and slightly later, covering the
+		-- transition windows where relying on the GUI alone can misclassify state.
+		_G.Raid.inraid = hasDungeonUi or hasLoadedDungeon
 		if not _G.Raid.inraid then
 			_G.Raid.inop = false
 		end
@@ -19526,28 +19871,113 @@ local function run(B, T, P, DfT, ...)
 		end
 	end
 
+	_G.Raid._difficultyAttemptsByGui = setmetatable({}, { __mode = "k" })
+
 	_G.Raid.selectDifficulty = function()
-		local current = GetSetting("dungeon_select") or "Easy"
-		for _ = 1, 10 do
-			local chooseMap = LocalPlayer.PlayerGui:FindFirstChild("ChooseMap")
+		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+		if not playerGui then
+			return false
+		end
+
+		-- The server creates ChooseMap only after the entrance circle's 20-second timer.
+		-- Wait for the actual GUI instead of assuming an exact countdown duration.
+		local chooseMap = nil
+		local deadline = os.clock() + 35
+		local nextRecenter = 0
+		while GetSetting("auto_dungeon_v2") and os.clock() < deadline do
+			if _G.Raid.checkInRaid() then
+				return true
+			end
+
+			chooseMap = playerGui:FindFirstChild("ChooseMap")
 			if chooseMap and chooseMap:FindFirstChild("ChooseMapFrame") then
-				local mapFrame = chooseMap.ChooseMapFrame:FindFirstChild("MapFrame")
-				if mapFrame then
-					local btn = mapFrame:FindFirstChild(current)
-					if btn and btn:IsA("TextButton") then
-						pcall(function()
-							for _, conn in pairs(getconnections(btn.MouseButton1Click)) do
-								conn:Fire()
-							end
-						end)
-						task.wait(0.5)
-						return true
+				break
+			end
+
+			-- Keep the character inside the large entrance trigger while it counts down.
+			if os.clock() >= nextRecenter then
+				nextRecenter = os.clock() + 2
+				_G.Raid.teleportToDungeonEntrance()
+			end
+			task.wait(0.25)
+		end
+
+		if not chooseMap or not chooseMap.Parent or not GetSetting("auto_dungeon_v2") then
+			return false
+		end
+
+		local chooseMapFrame = chooseMap:FindFirstChild("ChooseMapFrame")
+		local mapFrame = chooseMapFrame and chooseMapFrame:FindFirstChild("MapFrame")
+		if not mapFrame then
+			return false
+		end
+
+		local current = tostring(GetSetting("dungeon_select") or "Easy")
+		local aliases = { current }
+		if current == "Normal" then
+			table.insert(aliases, "Medium")
+		elseif current == "Medium" then
+			table.insert(aliases, "Normal")
+		end
+
+		local button = nil
+		for _, candidateName in ipairs(aliases) do
+			local exact = mapFrame:FindFirstChild(candidateName, true)
+			if exact and exact:IsA("GuiButton") then
+				button = exact
+				break
+			end
+
+			for _, descendant in ipairs(mapFrame:GetDescendants()) do
+				if descendant:IsA("GuiButton") then
+					local buttonText = descendant:IsA("TextButton") and descendant.Text or ""
+					if string.lower(descendant.Name) == string.lower(candidateName)
+						or string.lower(buttonText) == string.lower(candidateName)
+					then
+						button = descendant
+						break
 					end
 				end
 			end
-			task.wait(0.5)
+			if button then
+				break
+			end
 		end
-		return false
+
+		if not button or not _G._GenesisIsVisibleGuiButton(button) then
+			return false
+		end
+
+		local attemptCount = _G.Raid._difficultyAttemptsByGui[chooseMap] or 0
+		while attemptCount < 3 and chooseMap.Parent and GetSetting("auto_dungeon_v2") do
+			attemptCount = attemptCount + 1
+			_G.Raid._difficultyAttemptsByGui[chooseMap] = attemptCount
+
+			-- First try the direct signal. If the same verified popup remains after
+			-- three seconds, subsequent bounded attempts use the enlarged hitbox.
+			local fired = _G._GenesisDispatchGuiButton(button, attemptCount > 1)
+			if not fired then
+				return false
+			end
+
+			local verifyDeadline = os.clock() + 3
+			repeat
+				if _G.Raid.checkInRaid() or not chooseMap.Parent then
+					return true
+				end
+				if chooseMap:IsA("ScreenGui") and not chooseMap.Enabled then
+					return true
+				end
+				if chooseMapFrame:IsA("GuiObject") and not chooseMapFrame.Visible then
+					return true
+				end
+				task.wait(0.1)
+			until os.clock() >= verifyDeadline
+		end
+
+		-- A vote-style menu may remain visible while the server waits for players.
+		-- The same generated popup is capped at three dispatches to prevent spam.
+		return (_G.Raid._difficultyAttemptsByGui[chooseMap] or 0) > 0
 	end
 
 	_G.Raid.cycleTools = function()
@@ -19808,7 +20238,7 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	-- MAIN DUNGEON LOOP
-	RunService.Stepped:Connect(function()
+	trackGenesisConnection(RunService.Stepped:Connect(function()
 		if _G.Raid._mainLoopBusy then
 			return
 		end
@@ -19826,18 +20256,11 @@ local function run(B, T, P, DfT, ...)
 			end
 			_G.Raid._wasDungeon = true
 
-			-- auto play loading
-			pcall(function()
-				local loadingGui = LocalPlayer.PlayerGui:FindFirstChild("LoadingGUI")
-				if loadingGui then
-					local playBtn = loadingGui:FindFirstChild("Play")
-					if playBtn and playBtn.Visible then
-						for _, conn in pairs(getconnections(playBtn.MouseButton1Click)) do
-							conn:Fire()
-						end
-					end
-				end
-			end)
+			-- Use the loading screen's confirmed server action; autoPlay is debounced.
+			-- Do not run entrance/farm movement while a loading screen is active.
+			if autoPlay() then
+				return
+			end
 
 			if not _G.Raid.checkInRaid() then
 				_G.Raid.clearDungeonFarm()
@@ -19949,7 +20372,7 @@ local function run(B, T, P, DfT, ...)
 			end
 		end)
 		_G.Raid._mainLoopBusy = false
-	end)
+	end))
 
 	-- Raid-tab UI.
 	pcall(function()
