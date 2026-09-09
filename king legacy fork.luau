@@ -122,6 +122,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal.conquestActive = false
 		sharedGlobal.isProgressingBusoV2 = false
 		sharedGlobal.isProgressingObservationV2 = false
+		sharedGlobal.thirdSeaProgressionActive = false
 
 		local cleanupFunctions = {
 			sharedGlobal._stopFishing,
@@ -231,6 +232,12 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._TeleportFailHooked = false
 		sharedGlobal.ghostShipDiedConnected = false
 		sharedGlobal._lastSwordTrackerConnection = nil
+		sharedGlobal._GenesisM1State = nil
+		sharedGlobal._GenesisInvokeM1 = nil
+		sharedGlobal._GenesisPerformM1Pass = nil
+		sharedGlobal._GenesisDispatchM1IfReady = nil
+		sharedGlobal._GenesisSkillLastSent = nil
+		sharedGlobal._GenesisSkillReady = nil
 		sharedGlobal._autoExecuteQueued = false
 		sharedGlobal._pendingHopJobId = nil
 		executorEnvironment.SpectrumX = runtime.previousSpectrumX
@@ -6786,8 +6793,9 @@ local function run(B, T, P, DfT, ...)
 			if key == "autoSKHD" or key == "autoGhostShip" or key == "autoHuntSerpent" then
 				_G.seaEventActive = false
 			end
-		elseif combatKeys[key] and value == true and key ~= "autoFish" then
-			-- Other combat modes take ownership of the weapon slot immediately.
+		elseif combatKeys[key] and value == true and key ~= "autoFish" and not GetSetting("autoFish") then
+			-- Fishing arbitrates live boss/combat ownership below. Only force an
+			-- immediate handoff when Auto Fish itself is not enabled.
 			pcall(stopFishing)
 		end
 	end
@@ -7065,10 +7073,18 @@ local function run(B, T, P, DfT, ...)
 	_G.thirdSeaHasHeart = false
 	_G.thirdSeaKrakenSpawned = false
 	_G.thirdSeaKrakenBoss = nil
+	_G.thirdSeaProgressionActive = false
 	_G.fishingPreviousTool = nil
 	_G.fishingPreviousWeaponName = nil
 	_G.fishingToolCaptured = false
 	_G.fishingLoadoutBusy = false
+	_G.fishingState = "idle"
+	_G.fishingGeneration = 0
+	_G.fishingRestoreAttempts = 0
+	_G.fishingNextRestoreAttempt = 0
+	_G.fishingRestoreFailureNotified = false
+	_G.ghostChestAttemptState = setmetatable({}, { __mode = "k" })
+	_G.ghostChestExhaustedNotified = setmetatable({}, { __mode = "k" })
 	_G.lastWhirlpoolNotified = false
 
 	_G.lootState = {
@@ -7489,82 +7505,132 @@ local function run(B, T, P, DfT, ...)
 
 	_G.allowCombat = false
 	local lastHaoAttempt = 0
+	local function fishingOwnsWeaponSlot()
+		return _G.isFishing or _G.fishingToolCaptured or _G.fishingLoadoutBusy
+	end
 
-	local function click()
-		-- Sigma (Smooth): remote M1 on ALL selected tools (Character + Backpack) simultaneously.
+	-- Keep M1 responsive without returning to the old unbounded Stepped overlap.
+	-- Combat branches renew a short attack lease through click(); this worker then
+	-- continues M1 independently while slower skill keypresses are still yielding.
+	_G._GenesisM1State = {
+		-- About eleven swings per second keeps combat responsive without making
+		-- every accepted M1 render/effect compete for the same mobile frame.
+		interval = 0.09,
+		lease = 0.9,
+		maxInFlight = 2,
+		requestedUntil = 0,
+		lastDispatch = 0,
+		inFlight = 0,
+	}
+
+	_G._GenesisInvokeM1 = function(tool)
+		if not tool or not tool:IsA("Tool") then
+			return false
+		end
+		local prefixByToolTip = {
+			Combat = "FS_",
+			Sword = "SW_",
+			["Fruit Power"] = "DF_",
+		}
+		local prefix = prefixByToolTip[tool.ToolTip]
+		if not prefix then
+			return false
+		end
+		ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(
+			prefix .. tool.Name .. "_M1",
+			{ MouseHit = _G.pos_skill }
+		)
+		return true
+	end
+
+	_G._GenesisPerformM1Pass = function()
+		local character = LocalPlayer.Character
+		if not character then
+			return
+		end
+
 		if GetSetting("farmMethod") == "Sigma (Smooth)" then
 			local selected = GetSetting("selectedTools") or {}
-			local want = {}
-			for k, v in pairs(selected) do
-				local name = (type(k) == "string" and v == true) and k or v
+			local wantedToolTips = {}
+			for key, value in pairs(selected) do
+				local name = (type(key) == "string" and value == true) and key or value
 				if name == "Mele" or name == "Combat" then
-					want["Combat"] = true
+					wantedToolTips.Combat = true
 				elseif name == "Sword" then
-					want["Sword"] = true
+					wantedToolTips.Sword = true
 				elseif name == "Fruit" or name == "Fruit Power" then
-					want["Fruit Power"] = true
+					wantedToolTips["Fruit Power"] = true
 				end
 			end
-			local function fireTool(tool)
-				if not tool or not tool:IsA("Tool") then
-					return
+			for _, container in ipairs({ character, LocalPlayer.Backpack }) do
+				for _, tool in pairs(container:GetChildren()) do
+					if tool:IsA("Tool") and wantedToolTips[tool.ToolTip] then
+						_G._GenesisInvokeM1(tool)
+					end
 				end
-				local tip = tool.ToolTip
-				if tip == "Combat" and want["Combat"] then
-					pcall(function()
-						ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(
-							"FS_" .. tool.Name .. "_M1",
-							{ MouseHit = _G.pos_skill }
-						)
-					end)
-				elseif tip == "Sword" and want["Sword"] then
-					pcall(function()
-						ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(
-							"SW_" .. tool.Name .. "_M1",
-							{ MouseHit = _G.pos_skill }
-						)
-					end)
-				elseif tip == "Fruit Power" and want["Fruit Power"] then
-					pcall(function()
-						ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(
-							"DF_" .. tool.Name .. "_M1",
-							{ MouseHit = _G.pos_skill }
-						)
-					end)
-				end
-			end
-			local char = LocalPlayer.Character
-			if char then
-				for _, tool in pairs(char:GetChildren()) do
-					fireTool(tool)
-				end
-			end
-			for _, tool in pairs(LocalPlayer.Backpack:GetChildren()) do
-				fireTool(tool)
 			end
 			return
 		end
 
-		-- Default (Smart): preserve the original three-prefix dispatch for the
-		-- equipped tool. The game ignores the two prefixes that do not match it.
-		for _, tool in pairs(LocalPlayer.Character:GetChildren()) do
-			if tool.ClassName == "Tool" then
-				pcall(function()
-					ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(
-						"FS_" .. tool.Name .. "_M1",
-						{ MouseHit = _G.pos_skill }
-					)
-					ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(
-						"SW_" .. tool.Name .. "_M1",
-						{ MouseHit = _G.pos_skill }
-					)
-					ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(
-						"DF_" .. tool.Name .. "_M1",
-						{ MouseHit = _G.pos_skill }
-					)
-				end)
+		-- Smart mode targets the equipped tool with its real weapon prefix. The
+		-- baseline sent all three prefixes sequentially; two were guaranteed no-ops
+		-- and made every swing wait for three RemoteFunction round trips.
+		for _, tool in pairs(character:GetChildren()) do
+			if _G._GenesisInvokeM1(tool) then
+				return
 			end
 		end
+	end
+
+	_G._GenesisDispatchM1IfReady = function()
+		local state = _G._GenesisM1State
+		if not state then
+			return
+		end
+		if
+			fishingOwnsWeaponSlot()
+			or typeof(_G.pos_skill) ~= "CFrame"
+			or os.clock() > state.requestedUntil
+			or state.inFlight >= state.maxInFlight
+			or os.clock() - state.lastDispatch < state.interval
+		then
+			return
+		end
+		state.lastDispatch = os.clock()
+		state.inFlight = state.inFlight + 1
+		task.spawn(function()
+			pcall(_G._GenesisPerformM1Pass)
+			if _G._GenesisM1State == state then
+				state.inFlight = math.max(0, state.inFlight - 1)
+			end
+		end)
+	end
+
+	local function click()
+		if fishingOwnsWeaponSlot() then
+			return
+		end
+		local state = _G._GenesisM1State
+		if state then
+			state.requestedUntil = os.clock() + state.lease
+			_G._GenesisDispatchM1IfReady()
+		end
+	end
+
+	spawn(function()
+		while task.wait(0.03) do
+			_G._GenesisDispatchM1IfReady()
+		end
+	end)
+
+	_G._GenesisSkillLastSent = {}
+	_G._GenesisSkillReady = function(key)
+		local now = os.clock()
+		if now - (_G._GenesisSkillLastSent[key] or 0) < 0.35 then
+			return false
+		end
+		_G._GenesisSkillLastSent[key] = now
+		return true
 	end
 
 	local function keyboard(key)
@@ -7672,6 +7738,9 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	local function getDownwardCFrame(targetCFrame)
+		if fishingOwnsWeaponSlot() then
+			return targetCFrame
+		end
 		local height = GetSetting("distance") or 8
 		local mobPos = targetCFrame.Position
 		local above = mobPos + Vector3.new(0, height, 0)
@@ -7711,6 +7780,9 @@ local function run(B, T, P, DfT, ...)
 	_G.farmFixOwnershipReleased = false
 
 	local function applyFarmFix(targetCFrame)
+		if fishingOwnsWeaponSlot() then
+			return false
+		end
 		_G.farmFixTargetCF = targetCFrame
 		if _G.farmFixThread then
 			return
@@ -7767,7 +7839,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		_G.farmFixThread = task.spawn(function()
-			while _G.farmFixTargetCF do
+			while _G.farmFixTargetCF and not fishingOwnsWeaponSlot() do
 				if root and root.Parent then
 					if _G.farmFixBodyPos then
 						_G.farmFixBodyPos.Position = _G.farmFixTargetCF.Position
@@ -7785,10 +7857,15 @@ local function run(B, T, P, DfT, ...)
 				task.wait(0.005)
 			end
 		end)
+		return true
 	end
 
 	local function updateFarmFix(targetCFrame)
+		if fishingOwnsWeaponSlot() then
+			return false
+		end
 		_G.farmFixTargetCF = targetCFrame
+		return true
 	end
 
 	removeFarmFix = function()
@@ -7842,7 +7919,7 @@ local function run(B, T, P, DfT, ...)
 		if _G.isProgressingBusoV2 or _G.isProgressingObservationV2 then
 			return true
 		end
-		if GetSetting("auto_dungeon_v2") and _G.Raid and _G.Raid.inraid then
+		if GetSetting("auto_dungeon_v2") then
 			return true
 		end
 		local keys = {
@@ -8215,13 +8292,14 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	local function usetool()
-		-- Fishing uses the same equip slot as combat tools.  Release the rod and
-		-- restore the exact prior Tool before any normal combat selection runs.
-		if _G.isFishing and stopFishing then
-			stopFishing()
+		-- A stale farm pass must never evict the rod. The central arbitration loop
+		-- explicitly stops fishing first when a live boss or higher-priority mode
+		-- genuinely needs the weapon slot.
+		if fishingOwnsWeaponSlot() then
+			return false
 		end
 		if _G.storingFruit then
-			return
+			return false
 		end
 
 		if GetSetting("opeMethod") then
@@ -8230,17 +8308,17 @@ local function run(B, T, P, DfT, ...)
 			else
 				tooltip("Fruit Power")
 			end
-			return
+			return true
 		end
 
 		-- Sigma: does NOT equip anything. M1 and skills use remotes on all selected tools.
 		if GetSetting("farmMethod") == "Sigma (Smooth)" then
-			return
+			return true
 		end
 
 		local tools = GetSetting("selectedTools")
 		if not tools or #tools == 0 then
-			return
+			return false
 		end
 
 		local toolName = tools[_G.currentToolIndex]
@@ -8251,9 +8329,13 @@ local function run(B, T, P, DfT, ...)
 		elseif toolName == "Fruit" then
 			tooltip("Fruit Power")
 		end
+		return true
 	end
 
 	autoskill = function()
+		if fishingOwnsWeaponSlot() then
+			return
+		end
 		-- Sigma (Smooth): skills via remotes on ALL selected tools (Backpack + Character). Does NOT equip.
 		if GetSetting("farmMethod") == "Sigma (Smooth)" then
 			local selected = GetSetting("selectedTools") or {}
@@ -8272,16 +8354,16 @@ local function run(B, T, P, DfT, ...)
 
 			local pos = _G.pos_skill
 			local keys = {}
-			if GetSetting("z") then
+			if GetSetting("z") and _G._GenesisSkillReady("Z") then
 				table.insert(keys, "Z")
 			end
-			if GetSetting("x") then
+			if GetSetting("x") and _G._GenesisSkillReady("X") then
 				table.insert(keys, "X")
 			end
-			if GetSetting("c") then
+			if GetSetting("c") and _G._GenesisSkillReady("C") then
 				table.insert(keys, "C")
 			end
-			if GetSetting("v") then
+			if GetSetting("v") and _G._GenesisSkillReady("V") then
 				if GetSetting("opeMethod") then
 					if not isTransformed() then
 						table.insert(keys, "V")
@@ -8290,13 +8372,13 @@ local function run(B, T, P, DfT, ...)
 					table.insert(keys, "V")
 				end
 			end
-			if GetSetting("f") then
+			if GetSetting("f") and _G._GenesisSkillReady("F") then
 				table.insert(keys, "F")
 			end
-			if GetSetting("b") then
+			if GetSetting("b") and _G._GenesisSkillReady("B") then
 				table.insert(keys, "B")
 			end
-			if GetSetting("e") then
+			if GetSetting("e") and _G._GenesisSkillReady("E") then
 				table.insert(keys, "E")
 			end
 
@@ -8348,16 +8430,16 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		-- Default (Smart): keyboard.
-		if GetSetting("z") then
+		if GetSetting("z") and _G._GenesisSkillReady("Z") then
 			keyboard("Z")
 		end
-		if GetSetting("x") then
+		if GetSetting("x") and _G._GenesisSkillReady("X") then
 			keyboard("X")
 		end
-		if GetSetting("c") then
+		if GetSetting("c") and _G._GenesisSkillReady("C") then
 			keyboard("C")
 		end
-		if GetSetting("v") then
+		if GetSetting("v") and _G._GenesisSkillReady("V") then
 			if GetSetting("opeMethod") then
 				if not isTransformed() then
 					keyboard("V")
@@ -8366,19 +8448,22 @@ local function run(B, T, P, DfT, ...)
 				keyboard("V")
 			end
 		end
-		if GetSetting("f") then
+		if GetSetting("f") and _G._GenesisSkillReady("F") then
 			keyboard("F")
 		end
-		if GetSetting("b") then
+		if GetSetting("b") and _G._GenesisSkillReady("B") then
 			keyboard("B")
 		end
-		if GetSetting("e") then
+		if GetSetting("e") and _G._GenesisSkillReady("E") then
 			keyboard("E")
 		end
 	end
 
 	local function handleOpeMethod()
 		if not GetSetting("opeMethod") then
+			return
+		end
+		if fishingOwnsWeaponSlot() then
 			return
 		end
 		if _G.isLootingChests or _G.collectingPearls then
@@ -9655,17 +9740,33 @@ local function run(B, T, P, DfT, ...)
 
 	local function getSeaEventCFrame(targetCFrame, mobName)
 		local height = getMobHeight({ Name = mobName }) + 8
+		local offset = Vector3.new(math.sin(tick() * 3) * 1.5, math.cos(tick() * 2) * 1, math.cos(tick() * 3) * 1.5)
+		if string.find(mobName or "", "Galleon", 1, true) then
+			-- Stay pitched straight down at the hitbox, but rotate that downward
+			-- stance with the galleon's horizontal heading as it turns.
+			local right = Vector3.new(targetCFrame.RightVector.X, 0, targetCFrame.RightVector.Z)
+			if right.Magnitude < 0.001 then
+				right = Vector3.xAxis
+			else
+				right = right.Unit
+			end
+			local back = Vector3.yAxis
+			local up = back:Cross(right).Unit
+			return CFrame.fromMatrix(targetCFrame.Position + Vector3.new(0, height, 0) + offset, right, up, back)
+		end
+
 		local mobPos = targetCFrame.Position
 		local above = mobPos + Vector3.new(0, height, 0)
 		local lookCF = CFrame.new(above, mobPos)
-
-		local offset = Vector3.new(math.sin(tick() * 3) * 1.5, math.cos(tick() * 2) * 1, math.cos(tick() * 3) * 1.5)
-
 		return lookCF + offset
 	end
 
 	stopSeaEventBypass = function()
 		_seaEventTarget = nil
+		-- The movement lock and combat permission are one ownership unit. If the
+		-- target disappears (or another activity takes over), an older automation
+		-- pass must not retain permission to send M1/skill input.
+		_G.allowCombat = false
 		if _seaEventThread then
 			pcall(function() end)
 			_seaEventThread = nil
@@ -9678,13 +9779,28 @@ local function run(B, T, P, DfT, ...)
 		if not mob or not mob.Parent then
 			return false
 		end
-		if not getMobHRP(mob) then
+		local mobHRP = getMobHRP(mob)
+		if not mobHRP then
+			return false
+		end
+		local character = LocalPlayer.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if not root then
 			return false
 		end
 
 		stopSeaEventBypass()
 
 		_seaEventTarget = mob
+		-- Establish the first lock synchronously. The caller may send M1/skills as
+		-- soon as this function succeeds, so both the position and lock marker must
+		-- already be authoritative before the follow worker is scheduled.
+		local initialTargetCF = getSeaEventCFrame(mobHRP.CFrame, mob.Name)
+		root.CFrame = initialTargetCF
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		_G.pos_skill = mobHRP.CFrame
+		_seaEventLockPosition = initialTargetCF
 
 		_seaEventThread = task.spawn(function()
 			while _seaEventTarget == mob and isValidMob(mob) and isPlayerAlive() do
@@ -9729,6 +9845,15 @@ local function run(B, T, P, DfT, ...)
 			return "mob_invalido"
 		end
 
+		-- Sea targets may appear while fishing owns both the root and Primary slot.
+		-- Finish that handoff before this function moves the character or starts the
+		-- 0.01-second sea lock. Returning "handoff" keeps the event reserved without
+		-- allowing another frame to attack with the rod.
+		if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("sea_event") then
+			stopSeaEventBypass()
+			return "handoff"
+		end
+
 		if _seaEventTarget == mob then
 			return "ancorado"
 		end
@@ -9738,22 +9863,9 @@ local function run(B, T, P, DfT, ...)
 			task.wait(0.05)
 		end
 
-		local dist = getDistanceToMob(mob)
-
-		if dist > 60 then
-			local root = GetRoot(LocalPlayer.Character)
-			if root then
-				local mobHRP = getMobHRP(mob)
-				if mobHRP then
-					local angle = math.random() * math.pi * 2
-					local midPos = mobHRP.Position + Vector3.new(math.cos(angle) * 40, 30, math.sin(angle) * 40)
-					root.CFrame = CFrame.new(midPos, mobHRP.Position)
-					task.wait(0.1)
-				end
-			end
-			return "aproximando"
-		end
-
+		-- CFrame movement is already instantaneous; a staged random approach only
+		-- delays combat and leaves a window without a follow lock. Snap directly to
+		-- the combat offset and let the 0.01-second worker track target movement.
 		if startSeaEventBypass(mob) then
 			return "ancorado"
 		end
@@ -10022,6 +10134,9 @@ local function run(B, T, P, DfT, ...)
 				end
 				return true
 			elseif getSerpentLocation() then
+				if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("serpent_submerged") then
+					return true
+				end
 				removeFarmFix()
 				stopSeaEventBypass()
 				_G.currentEventName = "Serpent (Submerged)"
@@ -10107,6 +10222,9 @@ local function run(B, T, P, DfT, ...)
 				end
 				return true
 			elseif getSerpentLocation() then
+				if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("serpent_submerged") then
+					return true
+				end
 				removeFarmFix()
 				stopSeaEventBypass()
 				_G.currentEventName = "Serpent (Submerged)"
@@ -10152,13 +10270,28 @@ local function run(B, T, P, DfT, ...)
 							return
 						end
 
+						-- Reserve looting before moving so fishing cannot recreate its
+						-- position lock between the death observation and this teleport.
+						_G.isLootingChests = true
+						local handoffDeadline = os.clock() + 12
+						while
+							_G._GenesisPrepareCombatFromFishing
+							and not _G._GenesisPrepareCombatFromFishing("hydra_loot")
+							and GetSetting("autoSKHD")
+							and os.clock() < handoffDeadline
+						do
+							task.wait(0.1)
+						end
+						if _G._GenesisPrepareCombatFromFishing and fishingOwnsWeaponSlot() then
+							_G.isLootingChests = false
+							return
+						end
 						-- Dead: teleport immediately to the chest and lock position.
 						local chestPos = findHydraChestPosition()
 						if chestPos then
 							tp(CFrame.new(chestPos))
 							applyChestLootFix(CFrame.new(chestPos))
 						end
-						_G.isLootingChests = true
 						startLootTimer("Hydra", 30)
 					end)
 				end
@@ -10200,9 +10333,12 @@ local function run(B, T, P, DfT, ...)
 					_G.hydraJoinLootStarted = true
 					local chestPos = findHydraChestPosition()
 					if chestPos then
+						_G.isLootingChests = true
+						if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("hydra_loot") then
+							return true
+						end
 						tp(CFrame.new(chestPos))
 						applyChestLootFix(CFrame.new(chestPos))
-						_G.isLootingChests = true
 						startLootTimer("Hydra", 20)
 					end
 				elseif _G.lootState.Hydra.active then
@@ -10246,13 +10382,26 @@ local function run(B, T, P, DfT, ...)
 							return
 						end
 
+						_G.isLootingChests = true
+						local handoffDeadline = os.clock() + 12
+						while
+							_G._GenesisPrepareCombatFromFishing
+							and not _G._GenesisPrepareCombatFromFishing("sea_king_loot")
+							and GetSetting("autoSKHD")
+							and os.clock() < handoffDeadline
+						do
+							task.wait(0.1)
+						end
+						if _G._GenesisPrepareCombatFromFishing and fishingOwnsWeaponSlot() then
+							_G.isLootingChests = false
+							return
+						end
 						-- Dead: teleport IMMEDIATELY to the chest before locking position.
 						local chestPos = findSeaKingChestPosition()
 						if chestPos then
 							tp(CFrame.new(chestPos))
 							applyChestLootFix(CFrame.new(chestPos))
 						end
-						_G.isLootingChests = true
 						startLootTimer("SeaKing", 30)
 					end)
 				end
@@ -10296,9 +10445,12 @@ local function run(B, T, P, DfT, ...)
 					_G.seaKingJoinLootStarted = true
 					local chestPos = findSeaKingChestPosition()
 					if chestPos then
+						_G.isLootingChests = true
+						if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("sea_king_loot") then
+							return true
+						end
 						tp(CFrame.new(chestPos))
 						applyChestLootFix(CFrame.new(chestPos))
-						_G.isLootingChests = true
 						startLootTimer("SeaKing", 20)
 					end
 				elseif _G.lootState.SeaKing.active then
@@ -10318,36 +10470,53 @@ local function run(B, T, P, DfT, ...)
 			local ghostShip = findGhostShip()
 
 			local chestList = {}
+			local allChestEntries = {}
 			for i = 1, 10 do
 				local chest = Workspace:FindFirstChild("Chest" .. i) or Workspace:FindFirstChild("DarkChest" .. i)
 				if chest then
-					local chestPart = chest:FindFirstChild("RootPart")
+					local chestPart = chest:IsA("BasePart") and chest
+						or chest:FindFirstChild("RootPart")
 						or chest:FindFirstChild("PrimaryPart")
-						or chest.PrimaryPart
+						or (chest:IsA("Model") and chest.PrimaryPart)
 						or chest:FindFirstChildWhichIsA("BasePart")
+					local chestEntry = { Chest = chest, Part = chestPart }
+					table.insert(allChestEntries, chestEntry)
 					if chestPart then
-						table.insert(chestList, { Part = chestPart })
+						-- A chest that exhausted its five real acquisition attempts stays
+						-- ignored until that exact instance despawns. Re-entering this block
+						-- every frame would otherwise toggle the fishing/combat owner forever.
+						if (_G.ghostChestAttemptState[chest] or 0) < 5 then
+							table.insert(chestList, chestEntry)
+						end
 					end
 				end
 			end
 
 			if #chestList > 0 then
-				-- A prior level-farm lock can otherwise pull the player back for
-				-- the first second of chest looting.
-				removeFarmFix()
 				_G.seaEventActive = true
 				_G.isLootingChests = true
 				_G.currentEventName = "Ghost Ship (Looting)"
+				if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("ghost_ship_loot") then
+					return true
+				end
+				-- A prior level-farm lock can otherwise pull the player back during
+				-- the first acquisition attempt.
+				removeFarmFix()
 
 				for _, chestEntry in ipairs(chestList) do
 					if not GetSetting("autoGhostShip") then
 						break
 					end
 
+					local chest = chestEntry.Chest
 					local chestPart = chestEntry.Part
-					for _ = 1, 5 do
+					local attempts = _G.ghostChestAttemptState[chest] or 0
+					while attempts < 5 do
 						if
 							not GetSetting("autoGhostShip")
+							or not chest
+							or not chest.Parent
+							or not chest:IsDescendantOf(Workspace)
 							or not chestPart
 							or not chestPart.Parent
 							or not chestPart:IsDescendantOf(Workspace)
@@ -10360,11 +10529,30 @@ local function run(B, T, P, DfT, ...)
 							break
 						end
 
-						local chestCF = chestPart.CFrame * CFrame.new(0, 5, 0)
+						attempts = attempts + 1
+						_G.ghostChestAttemptState[chest] = attempts
+						local chestCF = chestPart.CFrame
 						root.CFrame = chestCF
 						applyFarmFix(chestCF)
 						updateFarmFix(chestCF)
-						task.wait(0.25)
+
+						-- This is an acquisition attempt, not merely a teleport pulse. Touch
+						-- the chest exactly as the character would and then wait for the
+						-- server-replicated chest instance to disappear.
+						if type(firetouchinterest) == "function" then
+							pcall(firetouchinterest, root, chestPart, 0)
+							task.wait(0.08)
+							pcall(firetouchinterest, root, chestPart, 1)
+						end
+
+						local verifyDeadline = os.clock() + 0.7
+						repeat
+							if not chest.Parent or not chest:IsDescendantOf(Workspace) then
+								break
+							end
+							updateFarmFix(chestCF)
+							task.wait(0.05)
+						until os.clock() >= verifyDeadline
 					end
 				end
 
@@ -10373,8 +10561,32 @@ local function run(B, T, P, DfT, ...)
 				if not GetSetting("autoGhostShip") then
 					return true
 				end
-				_G.ghostShipKilled = true
-				if GetSetting("autoHopSeaBosses") then
+				local remainingChests = 0
+				local exhaustedChest = nil
+				for _, chestEntry in ipairs(allChestEntries) do
+					local chest = chestEntry.Chest
+					if chest and chest.Parent and chest:IsDescendantOf(Workspace) then
+						remainingChests = remainingChests + 1
+						if (_G.ghostChestAttemptState[chest] or 0) >= 5 then
+							exhaustedChest = exhaustedChest or chest
+						end
+					else
+						_G.ghostChestAttemptState[chest] = nil
+						_G.ghostChestExhaustedNotified[chest] = nil
+					end
+				end
+
+				local fullyLooted = remainingChests == 0
+				_G.ghostShipKilled = fullyLooted
+				if exhaustedChest and not _G.ghostChestExhaustedNotified[exhaustedChest] then
+					_G.ghostChestExhaustedNotified[exhaustedChest] = true
+					SpectrumX:Notify({
+						Text = "A Ghost Ship chest remained after 5 acquisition attempts; stopping safely.",
+						Type = "warning",
+						Duration = 5,
+					})
+				end
+				if fullyLooted and GetSetting("autoHopSeaBosses") then
 					SpectrumX:Notify({
 						Text = "Ghost Ship fully looted! Hopping server...",
 						Type = "info",
@@ -10383,7 +10595,22 @@ local function run(B, T, P, DfT, ...)
 					task.wait(5)
 					serverHop()
 				end
+				if not fullyLooted then
+					_G.seaEventActive = false
+					_G.currentEventName = "None"
+				end
 				return true
+			end
+
+			if #allChestEntries > 0 then
+				-- Every remaining chest is either exhausted or structurally invalid.
+				-- The feature has stopped attempting it, so release movement/loadout
+				-- ownership instead of re-entering a zero-work loot pass each frame.
+				_G.isLootingChests = false
+				_G.ghostShipKilled = false
+				_G.seaEventActive = false
+				_G.currentEventName = "None"
+				return false
 			end
 
 			if isValidMob(ghostShip) and ghostShip:FindFirstChild("HumanoidRootPart") then
@@ -10560,9 +10787,16 @@ local function run(B, T, P, DfT, ...)
 				or string.find(name, "Gale")
 				or string.find(name, "SeaKing")
 			then
+				if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("race_island") then
+					_G.currentRaceIsland = name
+					_G.currentEventName = "Race: " .. name
+					_G.seaEventActive = true
+					return true
+				end
 				removeFarmFix()
 				_G.currentRaceIsland = name
 				_G.currentEventName = "Race: " .. name
+				_G.seaEventActive = true
 
 				local part = island:FindFirstChildWhichIsA("BasePart")
 					or island:FindFirstChild("Elevator")
@@ -12859,7 +13093,7 @@ local function run(B, T, P, DfT, ...)
 	})
 
 	Window:CreateToggle(MainTab.Right, {
-		Text = "Fish Between Serpent Spawns",
+		Text = "Fish Between Boss Spawns",
 		Default = GetSetting("fishWhenNotSpawned") or false,
 		Callback = function(state)
 			saveAndApply("fishWhenNotSpawned", state)
@@ -14918,99 +15152,117 @@ local function run(B, T, P, DfT, ...)
 		return nil
 	end
 
-	local function selectPrimaryWeapon(weaponName, timeoutSeconds)
-		if type(weaponName) ~= "string" or weaponName == "" or type(firesignal) ~= "function" then
+	local function selectPrimaryWeapon(weaponName, timeoutSeconds, shouldContinue)
+		if type(weaponName) ~= "string" or weaponName == "" then
 			return nil
 		end
 
-		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-		local mainGui = playerGui and playerGui:FindFirstChild("MainGui")
-		local starterFrame = mainGui and mainGui:FindFirstChild("StarterFrame")
-		local inventory = starterFrame and starterFrame:FindFirstChild("Inventory_Frame")
-		local swordList = inventory and inventory:FindFirstChild("ScrollingFrameSwords")
-		local itemButton = swordList and swordList:FindFirstChild(weaponName)
-		local information = inventory and inventory:FindFirstChild("Information")
-		local primaryButton = information and information:FindFirstChild("Primary")
-		if not itemButton or not itemButton:IsA("GuiButton") or not primaryButton or not primaryButton:IsA("GuiButton") then
-			return nil
+		local timeout = math.max(tonumber(timeoutSeconds) or 4, 0.5)
+		local deadline = os.clock() + timeout
+		local function cancelled()
+			return shouldContinue and not shouldContinue()
 		end
 
-		local function isSelectionConfirmed()
-			local nameText = information:FindFirstChild("NameText")
-			return nameText and nameText.Text == weaponName
-		end
-
-		local function waitForSelection(duration)
-			local deadline = os.clock() + duration
-			repeat
-				if isSelectionConfirmed() then
-					return true
-				end
-				task.wait(0.03)
-			until os.clock() >= deadline
-			return isSelectionConfirmed()
-		end
-
-		task.spawn(function()
-			pcall(function()
-				firesignal(itemButton.MouseButton1Click)
+		local function getReplicatedPrimaryName()
+			local stats = LocalPlayer:FindFirstChild("PlayerStats")
+			local etcData = stats and stats:FindFirstChild("EtcData")
+			if not etcData or type(etcData.Value) ~= "string" then
+				return nil
+			end
+			local ok, decoded = pcall(function()
+				return HttpService:JSONDecode(etcData.Value)
 			end)
-		end)
-		local selectionConfirmed = waitForSelection(0.65)
-		if not selectionConfirmed then
-			-- Some inventory revisions bind Activated instead of MouseButton1Click.
-			-- Only dispatch the fallback if the first signal did not select the item.
-			task.spawn(function()
-				pcall(function()
-					firesignal(itemButton.Activated)
-				end)
-			end)
-			selectionConfirmed = waitForSelection(0.65)
-		end
-		if not selectionConfirmed then
-			return nil
+			return ok and type(decoded) == "table" and decoded.PrimaryWeapon or nil
 		end
 
-		local function findLoadedWeapon()
+		local function findConfirmedWeapon()
+			if cancelled() then
+				return nil
+			end
 			local character = LocalPlayer.Character
 			local tool = (character and character:FindFirstChild(weaponName))
 				or LocalPlayer.Backpack:FindFirstChild(weaponName)
-			local swordNameValue = LocalPlayer.PlayerStats:FindFirstChild("SwordName")
-			local replicatedName = swordNameValue and swordNameValue.Value
-			if tool and replicatedName == weaponName then
+			local stats = LocalPlayer:FindFirstChild("PlayerStats")
+			local swordNameValue = stats and stats:FindFirstChild("SwordName")
+			if
+				tool
+				and swordNameValue
+				and swordNameValue.Value == weaponName
+				and getReplicatedPrimaryName() == weaponName
+			then
 				return tool
 			end
 			return nil
 		end
 
-		local function waitForLoadedWeapon(duration)
-			local deadline = os.clock() + duration
+		local function waitForConfirmation(untilTime)
 			repeat
-				local tool = findLoadedWeapon()
-				if tool then
+				local tool = findConfirmedWeapon()
+				if tool or cancelled() then
 					return tool
 				end
 				task.wait(0.05)
+			until os.clock() >= untilTime
+			return findConfirmedWeapon()
+		end
+
+		local alreadyLoaded = findConfirmedWeapon()
+		if alreadyLoaded then
+			return alreadyLoaded
+		end
+
+		-- Drive the game's validated InventoryScript path. This keeps the server
+		-- request serialized with the loadout transaction; an independently spawned
+		-- EquipWeapon request could arrive late and overwrite a completed restore.
+		-- Reacquire the UI and retry within one bounded transaction because the game
+		-- can rebuild the inventory after a Primary change. Never press Primary unless
+		-- the information panel confirms that this exact weapon is selected.
+		if type(firesignal) == "function" then
+			repeat
+				if cancelled() then
+					break
+				end
+
+				local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+				local mainGui = playerGui and playerGui:FindFirstChild("MainGui")
+				local starterFrame = mainGui and mainGui:FindFirstChild("StarterFrame")
+				local inventory = starterFrame and starterFrame:FindFirstChild("Inventory_Frame")
+				local swordList = inventory and inventory:FindFirstChild("ScrollingFrameSwords")
+				local itemButton = swordList and swordList:FindFirstChild(weaponName)
+				local information = inventory and inventory:FindFirstChild("Information")
+				local primaryButton = information and information:FindFirstChild("Primary")
+				local selectionConfirmed = false
+
+				if itemButton and itemButton:IsA("GuiButton") and primaryButton and primaryButton:IsA("GuiButton") then
+					pcall(function()
+						firesignal(itemButton.MouseButton1Click)
+					end)
+					local selectionDeadline = math.min(deadline, os.clock() + 0.5)
+					repeat
+						local nameText = information:FindFirstChild("NameText")
+						if nameText and nameText.Text == weaponName then
+							selectionConfirmed = true
+							break
+						end
+						task.wait(0.03)
+					until cancelled() or os.clock() >= selectionDeadline
+
+					if selectionConfirmed and not cancelled() then
+						pcall(function()
+							firesignal(primaryButton.MouseButton1Click)
+						end)
+						local confirmed = waitForConfirmation(math.min(deadline, os.clock() + 0.8))
+						if confirmed then
+							return confirmed
+						end
+					end
+				end
+
+				task.wait(0.1)
 			until os.clock() >= deadline
-			return findLoadedWeapon()
 		end
 
-		task.spawn(function()
-			pcall(function()
-				firesignal(primaryButton.MouseButton1Click)
-			end)
-		end)
-		local loadedTool = waitForLoadedWeapon(math.min(timeoutSeconds or 4, 1.5))
-		if loadedTool then
-			return loadedTool
-		end
-
-		task.spawn(function()
-			pcall(function()
-				firesignal(primaryButton.Activated)
-			end)
-		end)
-		return waitForLoadedWeapon(math.max((timeoutSeconds or 4) - 1.5, 0.5))
+		return findConfirmedWeapon()
 	end
 
 	_G._GenesisBindSwordTracker = function(character)
@@ -15036,24 +15288,37 @@ local function run(B, T, P, DfT, ...)
 		local character = LocalPlayer.Character
 		for _, container in ipairs({ character, LocalPlayer.Backpack }) do
 			if container then
-				for _, tool in pairs(container:GetChildren()) do
-					if tool:IsA("Tool") and string.find(string.lower(tool.Name), "rod", 1, true) then
-						return tool
-					end
+				local tool = container:FindFirstChild("Basic Rod")
+				if tool and tool:IsA("Tool") then
+					return tool
 				end
 			end
 		end
 		return nil
 	end
 
+	local restoreFishingWeapon
+	local isFishingBlocked
+
 	local function equipFishingRod()
-		if _G.fishingLoadoutBusy then
-			return getFishingRod()
+		if _G.fishingLoadoutBusy or _G.fishingState == "restoring" then
+			return nil
 		end
 		local character = LocalPlayer.Character
 		local humanoid = GetHumanoid(character)
 		if not character or not humanoid then
 			return nil
+		end
+		local equippedRod = getFishingRod()
+		local swordNameValue = LocalPlayer.PlayerStats:FindFirstChild("SwordName")
+		if
+			equippedRod
+			and equippedRod.Parent == character
+			and swordNameValue
+			and swordNameValue.Value == "Basic Rod"
+		then
+			_G.fishingState = "fishing"
+			return equippedRod
 		end
 
 		-- The rod replaces the selected sword in the game's Primary weapon slot.
@@ -15063,40 +15328,69 @@ local function run(B, T, P, DfT, ...)
 			_G._GenesisRememberSword(equipped)
 			_G.fishingPreviousWeaponName = _G._GenesisGetLastEquippedSwordName()
 			_G.fishingPreviousTool = nil
-			_G.fishingToolCaptured = true
+			_G.fishingToolCaptured = type(_G.fishingPreviousWeaponName) == "string"
+				and _G.fishingPreviousWeaponName ~= ""
+			if not _G.fishingToolCaptured then
+				return nil
+			end
 		end
 
+		_G.fishingGeneration = (_G.fishingGeneration or 0) + 1
+		local generation = _G.fishingGeneration
+		_G.fishingState = "equipping_rod"
 		_G.fishingLoadoutBusy = true
 		local rod = nil
 		local ok = pcall(function()
 			rod = getFishingRod()
-			local swordNameValue = LocalPlayer.PlayerStats:FindFirstChild("SwordName")
 			if not rod or not swordNameValue or swordNameValue.Value ~= "Basic Rod" then
-				rod = selectPrimaryWeapon("Basic Rod", 4)
+				rod = selectPrimaryWeapon("Basic Rod", 4, function()
+					return generation == _G.fishingGeneration
+						and GetSetting("autoFish")
+						and not isFishingBlocked()
+				end)
 			end
-			if rod and rod.Parent ~= character then
+			if generation == _G.fishingGeneration and rod and rod.Parent ~= character then
 				humanoid:EquipTool(rod)
 				task.wait(0.05)
 			end
 		end)
 		_G.fishingLoadoutBusy = false
-		if not ok then
+		if not ok or generation ~= _G.fishingGeneration then
+			_G.fishingState = "restoring"
+			if restoreFishingWeapon then
+				restoreFishingWeapon()
+			end
 			return nil
+		end
+		if rod and rod.Parent == character then
+			_G.fishingState = "fishing"
+			_G.fishingRestoreAttempts = 0
+			_G.fishingRestoreFailureNotified = false
+		else
+			_G.fishingState = "restoring"
 		end
 		return rod
 	end
 
-	local function restoreFishingWeapon()
+	restoreFishingWeapon = function()
 		if not _G.fishingToolCaptured or _G.fishingLoadoutBusy then
-			return
+			if not _G.fishingToolCaptured then
+				_G.fishingState = "idle"
+				return true
+			end
+			return false
 		end
 
 		local character = LocalPlayer.Character
 		local humanoid = GetHumanoid(character)
 		if not character or not humanoid then
-			return
+			return false
+		end
+		if os.clock() < (_G.fishingNextRestoreAttempt or 0) then
+			return false
 		end
 
+		_G.fishingState = "restoring"
 		_G.fishingLoadoutBusy = true
 		local previousName = _G.fishingPreviousWeaponName or _G._GenesisGetLastEquippedSwordName()
 		local restoredTool = nil
@@ -15114,11 +15408,14 @@ local function run(B, T, P, DfT, ...)
 			_G.fishingPreviousWeaponName = nil
 			_G.fishingToolCaptured = false
 			_G.fishingLoadoutBusy = false
-			return
+			_G.fishingState = "idle"
+			_G.fishingRestoreAttempts = 0
+			_G.fishingNextRestoreAttempt = 0
+			_G.fishingRestoreFailureNotified = false
+			return true
 		end
 
-		-- Do not leave the rod equipped if restoration is temporarily unavailable.
-		-- Keep the captured name so the next cleanup tick can retry restoration.
+		-- Do not leave the rod equipped while a bounded restoration retry is pending.
 		pcall(function()
 			local equipped = getEquippedTool()
 			if equipped and string.find(string.lower(equipped.Name), "rod", 1, true) then
@@ -15126,15 +15423,51 @@ local function run(B, T, P, DfT, ...)
 			end
 		end)
 		_G.fishingLoadoutBusy = false
+		_G.fishingRestoreAttempts = (_G.fishingRestoreAttempts or 0) + 1
+		_G.fishingNextRestoreAttempt = os.clock() + 0.75
+		if _G.fishingRestoreAttempts >= 3 then
+			_G.fishingToolCaptured = false
+			_G.fishingPreviousWeaponName = nil
+			_G.fishingState = "failed"
+			if not _G.fishingRestoreFailureNotified then
+				_G.fishingRestoreFailureNotified = true
+				SpectrumX:Notify({
+					Text = "Could not restore the previous Primary weapon after 3 attempts.",
+					Type = "warning",
+					Duration = 5,
+				})
+			end
+		end
+		return false
 	end
 
 	stopFishing = function()
 		removeFishPosition()
+		if _G.isFishing or _G.fishingState == "fishing" or _G.fishingState == "equipping_rod" then
+			_G.fishingGeneration = (_G.fishingGeneration or 0) + 1
+		end
 		_G.isFishing = false
 		_G.fishingPosition = nil
-		restoreFishingWeapon()
+		return restoreFishingWeapon()
 	end
 	_G._stopFishing = stopFishing
+
+	_G._GenesisPrepareCombatFromFishing = function(_reason)
+		if not fishingOwnsWeaponSlot() then
+			return true
+		end
+		removeFishPosition()
+		_G.isFishing = false
+		_G.fishingPosition = nil
+		if _G.fishingLoadoutBusy then
+			-- Cancel the in-flight rod selection. The worker observes this generation
+			-- change, releases its lock, and restoration proceeds on the next pass.
+			_G.fishingGeneration = (_G.fishingGeneration or 0) + 1
+			_G.fishingState = "restoring"
+			return false
+		end
+		return stopFishing()
+	end
 
 	local function getSavedFishCFrame()
 		local fishCF = GetSetting("fishCFrame")
@@ -15151,7 +15484,123 @@ local function run(B, T, P, DfT, ...)
 		return nil
 	end
 
-	local function isFishingBlocked()
+	local function getDesiredFishingCFrame()
+		if GetSetting("inSerpentWhirlpool") then
+			local whirlpoolCF = getWhirlpoolCFrame()
+			if whirlpoolCF then
+				return whirlpoolCF
+			end
+			-- Keep the legacy setting key so existing saved configurations continue
+			-- to work; the option now represents downtime between any enabled bosses.
+			if not GetSetting("fishWhenNotSpawned") then
+				return nil
+			end
+		end
+		return getSavedFishCFrame()
+	end
+
+	local bossFishingBlockCheckedAt = 0
+	local bossFishingBlockCached = false
+	local function hasEnabledBossTarget()
+		if not GetSetting("fishWhenNotSpawned") then
+			return false
+		end
+
+		-- Heartbeat also asks this question, so avoid walking every monster folder
+		-- once per rendered frame. A short cache still reacts well before a cast can
+		-- complete while keeping the check inexpensive.
+		local now = tick()
+		if now - bossFishingBlockCheckedAt < 0.2 then
+			return bossFishingBlockCached
+		end
+		bossFishingBlockCheckedAt = now
+		bossFishingBlockCached = false
+
+		local function isAlive(model)
+			local humanoid = model and model.Parent and model:FindFirstChild("Humanoid")
+			return humanoid ~= nil and humanoid.Health > 0
+		end
+
+		if
+			(GetSetting("autoFarmKaido") and isAlive(_G.kaidoDragon))
+			or (GetSetting("autoDarkBeard") and isAlive(_G.darkBeardBoss))
+			or (GetSetting("autoCrimsonDemon") and isAlive(_G.crimsonBoss))
+			or (GetSetting("autoIceKing") and isAlive(_G.iceKingBoss))
+			or (GetSetting("autoThirdSea") and isAlive(_G.thirdSeaKrakenBoss))
+		then
+			bossFishingBlockCached = true
+			return true
+		end
+
+		local raidOk, raidTarget = pcall(getRaidBossTargetFast)
+		if raidOk and isAlive(raidTarget) then
+			bossFishingBlockCached = true
+			return true
+		end
+
+		local selectedBossName = nil
+		if GetSetting("autoFarmBoss") then
+			local selectedBoss = GetSetting("selectedBoss")
+			selectedBossName = _G.selectedBossName or getBossNameFromDropdown(selectedBoss)
+		end
+
+		local matchNames = {}
+		if GetSetting("autoFarmKaido") then
+			table.insert(matchNames, "Dragon")
+		end
+		if GetSetting("autoDarkBeard") then
+			table.insert(matchNames, "Dark Beard")
+		end
+		if GetSetting("autoCrimsonDemon") then
+			table.insert(matchNames, "Crimson Demon")
+		end
+		if GetSetting("autoIceKing") then
+			table.insert(matchNames, "Ice King")
+		end
+		if GetSetting("autoSecondSea") then
+			table.insert(matchNames, "Seasoned Fishman")
+		end
+		if GetSetting("autoThirdSea") then
+			table.insert(matchNames, "Kraken")
+			table.insert(matchNames, "Tentacle")
+		end
+
+		local monsterRoot = Workspace:FindFirstChild("Monster")
+		if monsterRoot then
+			for _, folder in pairs(monsterRoot:GetChildren()) do
+				if folder:IsA("Folder") then
+					for _, mob in pairs(folder:GetChildren()) do
+						if isAlive(mob) then
+							local name = mob.Name
+							local lowerName = string.lower(name)
+							local isGeneralBoss = folder.Name == "Boss"
+								or string.find(lowerName, "boss", 1, true) ~= nil
+								or mob.Humanoid.MaxHealth > 100000
+
+							if
+								(selectedBossName and string.find(name, selectedBossName, 1, true))
+								or ((GetSetting("allboss") or GetSetting("easybounty")) and isGeneralBoss)
+							then
+								bossFishingBlockCached = true
+								return true
+							end
+
+							for _, wantedName in ipairs(matchNames) do
+								if string.find(name, wantedName, 1, true) then
+									bossFishingBlockCached = true
+									return true
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+
+		return false
+	end
+
+	isFishingBlocked = function()
 		if
 			_G.storingFruit
 			or _G.isLootingChests
@@ -15160,10 +15609,14 @@ local function run(B, T, P, DfT, ...)
 			or _G.conquestActive
 			or _G.isProgressingBusoV2
 			or _G.isProgressingObservationV2
+			or _G.thirdSeaProgressionActive
 		then
 			return true
 		end
 		if GetSetting("auto_dungeon_v2") and _G.Raid and _G.Raid.inraid then
+			return true
+		end
+		if hasEnabledBossTarget() then
 			return true
 		end
 		return false
@@ -15173,6 +15626,7 @@ local function run(B, T, P, DfT, ...)
 
 	trackGenesisConnection(LocalPlayer.CharacterAdded:Connect(function(character)
 		removeFishPosition()
+		_G.fishingGeneration = (_G.fishingGeneration or 0) + 1
 		_G.isFishing = false
 		_G.fishingPosition = nil
 		_G.fishingPreviousTool = nil
@@ -15180,6 +15634,9 @@ local function run(B, T, P, DfT, ...)
 		-- strand the Primary slot on Basic Rod.
 		_G.fishingToolCaptured = _G.fishingPreviousWeaponName ~= nil
 		_G.fishingLoadoutBusy = false
+		_G.fishingState = _G.fishingToolCaptured and "restoring" or "idle"
+		_G.fishingRestoreAttempts = 0
+		_G.fishingNextRestoreAttempt = 0
 		_G._GenesisBindSwordTracker(character)
 	end))
 
@@ -15200,28 +15657,7 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
-				local cf = nil
-
-				if GetSetting("inSerpentWhirlpool") then
-					cf = getWhirlpoolCFrame()
-					if not cf then
-						if not GetSetting("fishWhenNotSpawned") then
-							stopFishing()
-							return
-						end
-						cf = getSavedFishCFrame()
-						if not cf then
-							stopFishing()
-							return
-						end
-					end
-				else
-					cf = getSavedFishCFrame()
-					if not cf then
-						stopFishing()
-						return
-					end
-				end
+				local cf = getDesiredFishingCFrame()
 				if typeof(cf) ~= "CFrame" then
 					stopFishing()
 					return
@@ -15712,7 +16148,8 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
-	trackGenesisConnection(RunService.Stepped:Connect(function()
+	_G._GenesisAutomationStepBusy = false
+	_G._GenesisRunAutomationStep = function()
 		if _G.isLootingChests then
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
@@ -15761,16 +16198,12 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		-- Sea events / raid island ALWAYS check; each toggle is independent.
-		-- Auto Third Sea owns its Sea 2 summon/Kraken state machine.  The generic
-		-- event sweep does not know about that progression and would clear its
-		-- movement lock every frame.
-		if not GetSetting("autoThirdSea") and checkSeaEvents() then
+		-- Sea events / raid islands always remain independently available. Auto
+		-- Third Sea yields only when a real event is found; it must never disable
+		-- the generic Galleon/Ghost Ship dispatcher.
+		if checkSeaEvents() then
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
-			end
-			if _G.isFishing or _G.fishingToolCaptured then
-				stopFishing()
 			end
 			return
 		end
@@ -15798,15 +16231,26 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		if _G.isFishing then
-			if isFishingBlocked() then
-				stopFishing()
-			else
-				if _G.farmFixThread or _G.farmFixBodyPos then
-					removeFarmFix()
-				end
-				return
+		local fishingBlocked = isFishingBlocked()
+		local fishingDestination = nil
+		if GetSetting("autoFish") and not fishingBlocked then
+			fishingDestination = getDesiredFishingCFrame()
+		end
+
+		-- Reserve movement and the Primary weapon slot as soon as fishing is both
+		-- enabled and usable. This closes the half-second startup window in which a
+		-- frame-rate Auto Farm pass could equip the sword before isFishing became true.
+		if typeof(fishingDestination) == "CFrame" then
+			_G.allowCombat = false
+			if _G.farmFixThread or _G.farmFixBodyPos then
+				removeFarmFix()
 			end
+			return
+		end
+
+		if fishingOwnsWeaponSlot() then
+			_G._GenesisPrepareCombatFromFishing("automation")
+			return
 		end
 
 		-- Do not let combat start while the Primary slot is still being switched
@@ -15817,6 +16261,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		if not _G.isAnyCombatActive() then
+			_G.allowCombat = false
 			if _G.farmFixThread or _G.farmFixBodyPos then
 				pcall(removeFarmFix)
 			end
@@ -16455,45 +16900,81 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		if GetSetting("allboss") then
+			-- This branch owns the frame while enabled.  Without an early return it
+			-- falls through to the generic cleanup below, which immediately removes
+			-- the downward-facing farm lock that was just installed.
+			isFarmingMob = false
 			pcall(function()
-				for _, folder in pairs(Workspace.Monster:GetChildren()) do
-					if folder:IsA("Folder") then
-						for _, mob in pairs(folder:GetChildren()) do
-							if mob:FindFirstChild("Humanoid") and mob.Humanoid.Health > 0 then
+				local now = tick()
+				local targetName = currentFarmTarget and currentFarmTarget.Name:lower() or ""
+				local targetHumanoid = currentFarmTarget and currentFarmTarget:FindFirstChild("Humanoid")
+				if
+					not isValidFarmMob(currentFarmTarget, nil)
+					or not (
+						targetName:find("boss")
+						or targetName:find("raid boss")
+						or (targetHumanoid and targetHumanoid.MaxHealth > 100000)
+					)
+				then
+					if now - lastFarmUpdate <= 0.1 then
+						currentFarmTarget = nil
+						return
+					end
+					lastFarmUpdate = now
+					currentFarmTarget = nil
+					for _, folder in pairs(Workspace.Monster:GetChildren()) do
+						if folder:IsA("Folder") then
+							for _, mob in pairs(folder:GetChildren()) do
+								local humanoid = mob:FindFirstChild("Humanoid")
 								local mobName = mob.Name:lower()
 								if
-									mobName:find("boss")
-									or mobName:find("raid boss")
-									or mob.Humanoid.MaxHealth > 100000
+									humanoid
+									and humanoid.Health > 0
+									and mob:FindFirstChild("HumanoidRootPart")
+									and (
+										mobName:find("boss")
+										or mobName:find("raid boss")
+										or humanoid.MaxHealth > 100000
+									)
 								then
-									usetool()
-									buso()
-									ken()
-
-									local hrp = mob.HumanoidRootPart
-									if hrp then
-										getDownwardCFrame(hrp.CFrame)
-										local height = GetSetting("distance") or 8
-										local targetCF =
-											CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-										updateFarmFix(targetCF)
-										if not _G.farmFixThread then
-											applyFarmFix(targetCF)
-										end
-									end
-
-									_G.pos_skill = mob.HumanoidRootPart.CFrame
-									_G.allowCombat = true
-									click()
-									autoskill()
-									handleOpeMethod()
+									currentFarmTarget = mob
 									break
 								end
 							end
 						end
+						if currentFarmTarget then
+							break
+						end
+					end
+				end
+
+				if currentFarmTarget then
+					isFarmingMob = true
+					usetool()
+					buso()
+					ken()
+
+					local hrp = currentFarmTarget:FindFirstChild("HumanoidRootPart")
+					if hrp then
+						getDownwardCFrame(hrp.CFrame)
+						local height = GetSetting("distance") or 8
+						local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
+						updateFarmFix(targetCF)
+						if not _G.farmFixThread then
+							applyFarmFix(targetCF)
+						end
+						_G.pos_skill = hrp.CFrame
+						_G.allowCombat = true
+						click()
+						autoskill()
+						handleOpeMethod()
 					end
 				end
 			end)
+			if not isFarmingMob then
+				removeFarmFix()
+			end
+			return
 		end
 
 		if GetSetting("easybounty") then
@@ -16609,6 +17090,7 @@ local function run(B, T, P, DfT, ...)
 					removeFarmFix()
 				end
 			end)
+			return
 		end
 
 		if GetSetting("autoKillMobs") then
@@ -16665,6 +17147,18 @@ local function run(B, T, P, DfT, ...)
 				isFarmingMob = false
 				currentFarmTarget = nil
 			end
+		end
+	end
+
+	trackGenesisConnection(RunService.Stepped:Connect(function()
+		if _G._GenesisAutomationStepBusy then
+			return
+		end
+		_G._GenesisAutomationStepBusy = true
+		local ok, err = pcall(_G._GenesisRunAutomationStep)
+		_G._GenesisAutomationStepBusy = false
+		if not ok then
+			warn("[GENESIS HUB] Automation step error: " .. tostring(err))
 		end
 	end))
 
@@ -17262,6 +17756,7 @@ local function run(B, T, P, DfT, ...)
 			pcall(function()
 				-- Already in Sea 3 → disable.
 				if game.PlaceId == _G.SEA3_ID or game.PlaceId == 15759515082 then
+					_G.thirdSeaProgressionActive = false
 					if GetSetting("autoThirdSea") then
 						saveAndApply("autoThirdSea", false)
 						_G.thirdSeaState = "idle"
@@ -17275,6 +17770,7 @@ local function run(B, T, P, DfT, ...)
 				end
 
 				if not GetSetting("autoThirdSea") then
+					_G.thirdSeaProgressionActive = false
 					_G.thirdSeaState = _G.thirdSeaState or "idle"
 					return
 				end
@@ -17286,6 +17782,19 @@ local function run(B, T, P, DfT, ...)
 					and game.PlaceId ~= 4520749081
 					and game.PlaceId ~= 6381829480
 				then
+					_G.thirdSeaProgressionActive = false
+					return
+				end
+				_G.thirdSeaProgressionActive = true
+				if fishingOwnsWeaponSlot() then
+					_G._GenesisPrepareCombatFromFishing("third_sea_progression")
+					return
+				end
+
+				-- A live generic sea event (including either Galleon) has priority.
+				-- Pause progression without changing its state; it resumes as soon as
+				-- the event dispatcher releases ownership.
+				if _G.seaEventActive then
 					return
 				end
 
@@ -20223,6 +20732,10 @@ local function run(B, T, P, DfT, ...)
 					end
 					_G.Raid._wasDungeon = false
 				end
+				return
+			end
+			if fishingOwnsWeaponSlot() then
+				_G._GenesisPrepareCombatFromFishing("dungeon")
 				return
 			end
 			_G.Raid._wasDungeon = true
