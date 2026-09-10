@@ -6892,6 +6892,9 @@ local function run(B, T, P, DfT, ...)
 		fishCFrame = { "CFrame.new(0,0,0)", "fishCFrame" },
 		fishPositionSet = { false, "fishPositionSet" },
 		fishWhenNotSpawned = { false, "fishWhenNotSpawned" },
+		-- Hidden loadout fallback. The rod occupies the game's Sword/Primary slot,
+		-- so preserve the last real sword across fresh joins and script reloads.
+		lastEquippedSwordName = { "", "lastEquippedSwordName" },
 
 		autoSKHD = { false, "autoSKHD" },
 		autoGhostShip = { false, "autoGhostShip" },
@@ -7493,10 +7496,14 @@ local function run(B, T, P, DfT, ...)
 				if humanoid then
 					humanoid:EquipTool(tool)
 					if toolTip == "Sword" then
-						_G.lastEquippedSword = tool
-						_G.lastEquippedSwordName = tool.Name
 						if _G._GenesisRememberSword then
 							_G._GenesisRememberSword(tool)
+						elseif tool.Name ~= "Basic Rod"
+							and string.match(string.lower(tool.Name), "%srod$") == nil
+						then
+							-- Startup-only fallback before the persistent tracker is defined.
+							_G.lastEquippedSword = tool
+							_G.lastEquippedSwordName = tool.Name
 						end
 					end
 				end
@@ -15385,17 +15392,106 @@ local function run(B, T, P, DfT, ...)
 		return nil
 	end
 
+	_G._GenesisIsFishingRodName = function(name)
+		if type(name) ~= "string" then
+			return false
+		end
+		local lowerName = string.lower(name)
+		return lowerName == "basic rod" or string.match(lowerName, "%srod$") ~= nil
+	end
+
+	_G._GenesisIsUsableSwordName = function(name)
+		return type(name) == "string"
+			and name ~= ""
+			and string.lower(name) ~= "none"
+			and not _G._GenesisIsFishingRodName(name)
+	end
+
+	_G._GenesisGetReplicatedPrimaryName = function()
+		local stats = LocalPlayer:FindFirstChild("PlayerStats")
+		local etcData = stats and stats:FindFirstChild("EtcData")
+		if not etcData or type(etcData.Value) ~= "string" then
+			return nil
+		end
+		local ok, decoded = pcall(function()
+			return HttpService:JSONDecode(etcData.Value)
+		end)
+		local primaryName = ok and type(decoded) == "table" and decoded.PrimaryWeapon or nil
+		return type(primaryName) == "string" and primaryName or nil
+	end
+
+	_G._GenesisRememberSwordName = function(name)
+		if not _G._GenesisIsUsableSwordName(name) then
+			return nil
+		end
+		_G.lastEquippedSwordName = name
+		if GetSetting("lastEquippedSwordName") ~= name then
+			pcall(function()
+				SetSetting("lastEquippedSwordName", name)
+			end)
+		end
+		return name
+	end
+
 	_G._GenesisIsSwordTool = function(tool)
-		return tool and tool:IsA("Tool") and tool.ToolTip == "Sword"
+		return tool
+			and tool:IsA("Tool")
+			and tool.ToolTip == "Sword"
+			and not _G._GenesisIsFishingRodName(tool.Name)
 	end
 
 	_G._GenesisRememberSword = function(tool)
 		if _G._GenesisIsSwordTool(tool) then
 			_G.lastEquippedSword = tool
-			_G.lastEquippedSwordName = tool.Name
+			_G._GenesisRememberSwordName(tool.Name)
 			return tool
 		end
 		return nil
+	end
+
+	_G._GenesisFindSwordToolByName = function(name)
+		if not _G._GenesisIsUsableSwordName(name) then
+			return nil
+		end
+		for _, container in ipairs({ LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack") }) do
+			local tool = container and container:FindFirstChild(name)
+			if _G._GenesisIsSwordTool(tool) then
+				return tool
+			end
+		end
+		return nil
+	end
+
+	_G._GenesisInventoryShowsSword = function(name)
+		if not _G._GenesisIsUsableSwordName(name) then
+			return false
+		end
+		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+		local mainGui = playerGui and playerGui:FindFirstChild("MainGui")
+		local starterFrame = mainGui and mainGui:FindFirstChild("StarterFrame")
+		local inventory = starterFrame and starterFrame:FindFirstChild("Inventory_Frame")
+		local swordList = inventory and inventory:FindFirstChild("ScrollingFrameSwords")
+		local itemButton = swordList and swordList:FindFirstChild(name)
+		return itemButton ~= nil and itemButton:IsA("GuiButton")
+	end
+
+	_G._GenesisIsAvailableSwordName = function(name)
+		if not _G._GenesisIsUsableSwordName(name) then
+			return false
+		end
+		if _G._GenesisFindSwordToolByName(name) then
+			return true
+		end
+
+		local stats = LocalPlayer:FindFirstChild("PlayerStats")
+		local swordNameValue = stats and stats:FindFirstChild("SwordName")
+		if swordNameValue and swordNameValue.Value == name then
+			return true
+		end
+		if _G._GenesisGetReplicatedPrimaryName() == name then
+			return true
+		end
+		return _G._GenesisInventoryShowsSword(name)
 	end
 
 	_G._GenesisGetLastEquippedSwordName = function()
@@ -15409,27 +15505,57 @@ local function run(B, T, P, DfT, ...)
 			end
 		end
 
-		local swordNameValue = LocalPlayer.PlayerStats:FindFirstChild("SwordName")
+		local stats = LocalPlayer:FindFirstChild("PlayerStats")
+		local swordNameValue = stats and stats:FindFirstChild("SwordName")
 		local selectedName = swordNameValue and swordNameValue.Value
-		if type(selectedName) == "string" and selectedName ~= "" and selectedName ~= "Basic Rod" then
-			_G.lastEquippedSwordName = selectedName
-			return selectedName
+		if _G._GenesisIsUsableSwordName(selectedName) then
+			return _G._GenesisRememberSwordName(selectedName)
 		end
 
-		if type(_G.lastEquippedSwordName) == "string" and _G.lastEquippedSwordName ~= "" then
-			return _G.lastEquippedSwordName
+		-- On a fresh join SwordName and the Tool can lag behind EtcData. PrimaryWeapon
+		-- is replicated server state and closes that bootstrap gap without equipping a
+		-- generic selected tool (which could be Combat or Fruit Power).
+		local replicatedPrimaryName = _G._GenesisGetReplicatedPrimaryName()
+		if _G._GenesisIsUsableSwordName(replicatedPrimaryName) then
+			return _G._GenesisRememberSwordName(replicatedPrimaryName)
 		end
 
-		for _, tool in pairs(LocalPlayer.Backpack:GetChildren()) do
-			if _G._GenesisIsSwordTool(tool) then
-				_G._GenesisRememberSword(tool)
-				return tool.Name
+		if _G._GenesisIsAvailableSwordName(_G.lastEquippedSwordName) then
+			return _G._GenesisRememberSwordName(_G.lastEquippedSwordName)
+		end
+
+		local savedName = GetSetting("lastEquippedSwordName")
+		if _G._GenesisIsAvailableSwordName(savedName) then
+			return _G._GenesisRememberSwordName(savedName)
+		end
+
+		local backpack = LocalPlayer:FindFirstChild("Backpack")
+		if backpack then
+			for _, tool in pairs(backpack:GetChildren()) do
+				if _G._GenesisIsSwordTool(tool) then
+					_G._GenesisRememberSword(tool)
+					return tool.Name
+				end
 			end
 		end
 
 		_G.lastEquippedSword = nil
-		_G.lastEquippedSwordName = nil
 		return nil
+	end
+
+	_G._GenesisWaitForLastEquippedSwordName = function(timeoutSeconds, shouldContinue)
+		local deadline = os.clock() + math.max(tonumber(timeoutSeconds) or 4, 0)
+		repeat
+			if shouldContinue and not shouldContinue() then
+				return nil
+			end
+			local name = _G._GenesisGetLastEquippedSwordName()
+			if name then
+				return name
+			end
+			task.wait(0.1)
+		until os.clock() >= deadline
+		return _G._GenesisGetLastEquippedSwordName()
 	end
 
 	local function selectPrimaryWeapon(weaponName, timeoutSeconds, shouldContinue)
@@ -15441,18 +15567,6 @@ local function run(B, T, P, DfT, ...)
 		local deadline = os.clock() + timeout
 		local function cancelled()
 			return shouldContinue and not shouldContinue()
-		end
-
-		local function getReplicatedPrimaryName()
-			local stats = LocalPlayer:FindFirstChild("PlayerStats")
-			local etcData = stats and stats:FindFirstChild("EtcData")
-			if not etcData or type(etcData.Value) ~= "string" then
-				return nil
-			end
-			local ok, decoded = pcall(function()
-				return HttpService:JSONDecode(etcData.Value)
-			end)
-			return ok and type(decoded) == "table" and decoded.PrimaryWeapon or nil
 		end
 
 		local function findConfirmedWeapon()
@@ -15468,7 +15582,7 @@ local function run(B, T, P, DfT, ...)
 				tool
 				and swordNameValue
 				and swordNameValue.Value == weaponName
-				and getReplicatedPrimaryName() == weaponName
+				and _G._GenesisGetReplicatedPrimaryName() == weaponName
 			then
 				return tool
 			end
@@ -15580,6 +15694,28 @@ local function run(B, T, P, DfT, ...)
 	local restoreFishingWeapon
 	local isFishingBlocked
 
+	_G._GenesisCaptureFishingPreviousWeapon = function()
+		if _G.fishingToolCaptured and _G._GenesisIsUsableSwordName(_G.fishingPreviousWeaponName) then
+			return true
+		end
+
+		_G.fishingToolCaptured = false
+		_G.fishingPreviousWeaponName = nil
+		local equipped = getEquippedTool()
+		_G._GenesisRememberSword(equipped)
+		local previousName = _G._GenesisWaitForLastEquippedSwordName(4, function()
+			return GetSetting("autoFish") and _G.isFishing and not isFishingBlocked()
+		end)
+		if not _G._GenesisIsUsableSwordName(previousName) then
+			return false
+		end
+
+		_G.fishingPreviousWeaponName = previousName
+		_G.fishingPreviousTool = nil
+		_G.fishingToolCaptured = true
+		return true
+	end
+
 	local function equipFishingRod()
 		if _G.fishingLoadoutBusy or _G.fishingState == "restoring" then
 			return nil
@@ -15589,8 +15725,13 @@ local function run(B, T, P, DfT, ...)
 		if not character or not humanoid then
 			return nil
 		end
+		if not _G.fishingToolCaptured or not _G._GenesisIsUsableSwordName(_G.fishingPreviousWeaponName) then
+			return nil
+		end
+
 		local equippedRod = getFishingRod()
-		local swordNameValue = LocalPlayer.PlayerStats:FindFirstChild("SwordName")
+		local stats = LocalPlayer:FindFirstChild("PlayerStats")
+		local swordNameValue = stats and stats:FindFirstChild("SwordName")
 		if
 			equippedRod
 			and equippedRod.Parent == character
@@ -15599,20 +15740,6 @@ local function run(B, T, P, DfT, ...)
 		then
 			_G.fishingState = "fishing"
 			return equippedRod
-		end
-
-		-- The rod replaces the selected sword in the game's Primary weapon slot.
-		-- Preserve the weapon name because the old Tool instance is destroyed.
-		if not _G.fishingToolCaptured then
-			local equipped = getEquippedTool()
-			_G._GenesisRememberSword(equipped)
-			_G.fishingPreviousWeaponName = _G._GenesisGetLastEquippedSwordName()
-			_G.fishingPreviousTool = nil
-			_G.fishingToolCaptured = type(_G.fishingPreviousWeaponName) == "string"
-				and _G.fishingPreviousWeaponName ~= ""
-			if not _G.fishingToolCaptured then
-				return nil
-			end
 		end
 
 		_G.fishingGeneration = (_G.fishingGeneration or 0) + 1
@@ -15903,6 +16030,11 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	_G._GenesisBindSwordTracker(LocalPlayer.Character)
+	-- Prime the persistent fallback as soon as replicated loadout data becomes
+	-- available. This only observes state; it never equips or changes a slot.
+	spawn(function()
+		_G._GenesisWaitForLastEquippedSwordName(8)
+	end)
 
 	trackGenesisConnection(LocalPlayer.CharacterAdded:Connect(function(character)
 		removeFishPosition()
@@ -15918,6 +16050,9 @@ local function run(B, T, P, DfT, ...)
 		_G.fishingRestoreAttempts = 0
 		_G.fishingNextRestoreAttempt = 0
 		_G._GenesisBindSwordTracker(character)
+		spawn(function()
+			_G._GenesisWaitForLastEquippedSwordName(8)
+		end)
 	end))
 
 	spawn(function()
@@ -15949,23 +16084,28 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
-				local dist = (cf.Position - root.Position).Magnitude
+				-- Resolve and preserve slot 1 before fishing claims movement or replaces
+				-- the Primary weapon. On a fresh join this waits boundedly for PlayerStats,
+				-- EtcData, or the owned-sword inventory entry to replicate.
+				_G.isFishing = true
+				_G.fishingPosition = cf
+				if not _G._GenesisCaptureFishingPreviousWeapon() then
+					_G.isFishing = false
+					_G.fishingPosition = nil
+					removeFishPosition()
+					return
+				end
 
+				local dist = (cf.Position - root.Position).Magnitude
 				if dist > 10 then
 					-- Travelling to the fishing point already owns the root through the
 					-- fish BodyMovers.  Keep the mode active during that handoff so a
 					-- competing farm cannot start a second position controller.
-					_G.isFishing = true
-					_G.fishingPosition = cf
-
 					applyFishPosition(cf)
 					root.CFrame = cf
 					task.wait(0.1)
 					return
 				end
-
-				_G.isFishing = true
-				_G.fishingPosition = cf
 
 				applyFishPosition(cf)
 				local rod = equipFishingRod()
