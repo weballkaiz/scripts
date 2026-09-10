@@ -18004,14 +18004,23 @@ local function run(B, T, P, DfT, ...)
 								humanoid:EquipTool(tool)
 								task.wait(0.01)
 
+								local equippedFruit = nil
 								local startEquip = tick()
 								while tick() - startEquip < 2 do
 									local equipped = LocalPlayer.Character
 										and LocalPlayer.Character:FindFirstChild(fruitName)
 									if equipped then
+										equippedFruit = equipped
 										break
 									end
 									task.wait(0.01)
+								end
+
+								-- Equipping only puts the fruit in the character's hand. Its
+								-- normal M1 activation is what opens EatFruitBecky.Dialogue;
+								-- the dedicated worker below then presses Collect.
+								if equippedFruit and equippedFruit.Parent == LocalPlayer.Character then
+									equippedFruit:Activate()
 								end
 
 								local startTime = tick()
