@@ -128,6 +128,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 			sharedGlobal._stopFishing,
 			sharedGlobal._removeFarmFix,
 			sharedGlobal._stopSeaEventBypass,
+			sharedGlobal._stopAbyssalAcquisition,
 			sharedGlobal._removeChestLootFix,
 			sharedGlobal._removeConquestPosition,
 		}
@@ -238,6 +239,10 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._GenesisDispatchM1IfReady = nil
 		sharedGlobal._GenesisSkillLastSent = nil
 		sharedGlobal._GenesisSkillReady = nil
+		sharedGlobal._GenesisAbyssalAcquisition = nil
+		sharedGlobal._GenesisFindAbyssalLocator = nil
+		sharedGlobal._GenesisApproachAbyssalLocator = nil
+		sharedGlobal._stopAbyssalAcquisition = nil
 		sharedGlobal._autoExecuteQueued = false
 		sharedGlobal._pendingHopJobId = nil
 		executorEnvironment.SpectrumX = runtime.previousSpectrumX
@@ -6695,6 +6700,9 @@ local function run(B, T, P, DfT, ...)
 		if type(_G._stopSeaEventBypass) == "function" then
 			_G._stopSeaEventBypass()
 		end
+		if type(_G._stopAbyssalAcquisition) == "function" then
+			_G._stopAbyssalAcquisition()
+		end
 		if type(_G._stopFishing) == "function" then
 			_G._stopFishing()
 		end
@@ -6737,6 +6745,7 @@ local function run(B, T, P, DfT, ...)
 			autoSecondSea = true,
 			autoThirdSea = true,
 			autoHuntSerpent = true,
+			autoKillAbyssalTyrant = true,
 			autoDailyQuest = true,
 			autoHuntPtero = true,
 			autoRaidBoss_ExpertSwordman = true,
@@ -7760,6 +7769,7 @@ local function run(B, T, P, DfT, ...)
 	-- BodyMovers on the live root part.  Tear down those known movers before
 	-- discarding their references.
 	_G.farmFixTargetCF = nil
+	_G.farmFixTargetPart = nil
 	for _, staleMover in ipairs({ _G.farmFixBodyPos, _G.farmFixBodyGyro, _G.farmFixBodyVel }) do
 		pcall(function()
 			if staleMover then
@@ -7779,11 +7789,12 @@ local function run(B, T, P, DfT, ...)
 	_G.farmFixRoot = nil
 	_G.farmFixOwnershipReleased = false
 
-	local function applyFarmFix(targetCFrame)
+	local function applyFarmFix(targetCFrame, targetPart)
 		if fishingOwnsWeaponSlot() then
 			return false
 		end
 		_G.farmFixTargetCF = targetCFrame
+		_G.farmFixTargetPart = typeof(targetPart) == "Instance" and targetPart:IsA("BasePart") and targetPart or nil
 		if _G.farmFixThread then
 			return
 		end
@@ -7841,6 +7852,18 @@ local function run(B, T, P, DfT, ...)
 		_G.farmFixThread = task.spawn(function()
 			while _G.farmFixTargetCF and not fishingOwnsWeaponSlot() do
 				if root and root.Parent then
+					-- Combat actions are serialized to prevent overlapping M1/skill work,
+					-- but movement must not wait for that yielding dispatcher. Follow the
+					-- live hitbox here so jumping/moving targets are refreshed every
+					-- scheduler frame instead of only after a combat pass completes.
+					local liveTargetPart = _G.farmFixTargetPart
+					if liveTargetPart and liveTargetPart.Parent and liveTargetPart:IsDescendantOf(Workspace) then
+						local height = GetSetting("distance") or 8
+						local mobPos = liveTargetPart.Position
+						_G.farmFixTargetCF = CFrame.new(mobPos + Vector3.new(0, height, 0), mobPos)
+						_G.pos_skill = liveTargetPart.CFrame
+					end
+
 					if _G.farmFixBodyPos then
 						_G.farmFixBodyPos.Position = _G.farmFixTargetCF.Position
 					end
@@ -7860,16 +7883,18 @@ local function run(B, T, P, DfT, ...)
 		return true
 	end
 
-	local function updateFarmFix(targetCFrame)
+	local function updateFarmFix(targetCFrame, targetPart)
 		if fishingOwnsWeaponSlot() then
 			return false
 		end
 		_G.farmFixTargetCF = targetCFrame
+		_G.farmFixTargetPart = typeof(targetPart) == "Instance" and targetPart:IsA("BasePart") and targetPart or nil
 		return true
 	end
 
 	removeFarmFix = function()
 		_G.farmFixTargetCF = nil
+		_G.farmFixTargetPart = nil
 		if _G.farmFixThread then
 			_G.farmFixThread = nil
 		end
@@ -9681,6 +9706,32 @@ local function run(B, T, P, DfT, ...)
 	local _seaEventTarget = nil
 	local _seaEventThread = nil
 	local _seaEventLockPosition = nil
+	_G._GenesisAbyssalAcquisition = {
+		approachHeight = 18,
+		retrySeconds = 4,
+		maxAttempts = 3,
+		locatorPollInterval = 0.2,
+		nextLocatorCheckAt = 0,
+		locator = nil,
+		locatorCFrame = nil,
+		startedAt = 0,
+		lastApproachAt = -math.huge,
+		attempts = 0,
+		lastDestination = nil,
+	}
+	_G._stopAbyssalAcquisition = function()
+		local state = _G._GenesisAbyssalAcquisition
+		if type(state) ~= "table" then
+			return
+		end
+		state.locator = nil
+		state.locatorCFrame = nil
+		state.startedAt = 0
+		state.lastApproachAt = -math.huge
+		state.attempts = 0
+		state.lastDestination = nil
+		state.nextLocatorCheckAt = 0
+	end
 
 	local function isValidMob(mob)
 		if not mob or not mob.Parent then
@@ -9871,6 +9922,116 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		return "erro"
+	end
+
+	_G._GenesisFindAbyssalLocator = function()
+		local monster = Workspace:FindFirstChild("Monster")
+		local island = Workspace:FindFirstChild("Island")
+		local areas = Workspace:FindFirstChild("Areas")
+		local boss = monster and monster:FindFirstChild("Boss")
+		local ghostMonster = Workspace:FindFirstChild("GhostMonster")
+		local seaMonster = Workspace:FindFirstChild("SeaMonster")
+		local locator = (island and island:FindFirstChild("SeaDragonLocation"))
+			or (areas and areas:FindFirstChild("SeaDragonLocation"))
+			or (boss and boss:FindFirstChild("SeaDragonLocation"))
+			or (ghostMonster and ghostMonster:FindFirstChild("SeaDragonLocation"))
+			or (seaMonster and seaMonster:FindFirstChild("SeaDragonLocation"))
+		if locator then
+			local locatorCFrame = nil
+			if locator:IsA("BasePart") then
+				locatorCFrame = locator.CFrame
+			elseif locator:IsA("Model") then
+				local ok, pivot = pcall(locator.GetPivot, locator)
+				if ok then
+					locatorCFrame = pivot
+				end
+			end
+
+			if typeof(locatorCFrame) == "CFrame" then
+				local position = locatorCFrame.Position
+				local finite = position.X == position.X
+					and position.Y == position.Y
+					and position.Z == position.Z
+					and math.abs(position.X) < 10000000
+					and math.abs(position.Y) < 10000000
+					and math.abs(position.Z) < 10000000
+				if finite then
+					return locator, locatorCFrame
+				end
+			end
+		end
+
+		return nil, nil
+	end
+
+	_G._GenesisApproachAbyssalLocator = function(locator, locatorCFrame)
+		local state = _G._GenesisAbyssalAcquisition
+		if type(state) ~= "table" then
+			return false
+		end
+		if not locator or not locator.Parent or typeof(locatorCFrame) ~= "CFrame" then
+			_G._stopAbyssalAcquisition()
+			return false
+		end
+
+		if state.locator ~= locator then
+			_G._stopAbyssalAcquisition()
+			state.locator = locator
+			state.startedAt = os.clock()
+		end
+		state.locatorCFrame = locatorCFrame
+
+		-- A locator is an event reservation, not a combat target. Stop stale combat
+		-- input and movement locks before making a single bounded approach.
+		_G.allowCombat = false
+		_G.seaEventActive = true
+		_G.currentEventHealth = 0
+		_G.currentEventMaxHealth = 0
+		if _G.farmFixThread or _G.farmFixBodyPos then
+			removeFarmFix()
+		end
+		if _seaEventTarget or _seaEventThread or _seaEventLockPosition then
+			stopSeaEventBypass()
+			_G.seaEventActive = true
+		end
+
+		if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("abyssal_locator") then
+			_G.currentEventName = "Abyssal Tyrant (Switching Loadout)"
+			return true
+		end
+
+		local now = os.clock()
+		if state.attempts >= state.maxAttempts then
+			_G.currentEventName = "Abyssal Tyrant (Waiting for Spawn)"
+			return true
+		end
+		if now - state.lastApproachAt < state.retrySeconds then
+			_G.currentEventName = "Abyssal Tyrant (Waiting for Spawn)"
+			return true
+		end
+
+		local character = LocalPlayer.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if not humanoid or humanoid.Health <= 0 or not root then
+			_G.currentEventName = "Abyssal Tyrant (Waiting for Respawn)"
+			return true
+		end
+
+		local destination = CFrame.new(locatorCFrame.Position + Vector3.new(0, state.approachHeight, 0))
+		state.attempts = state.attempts + 1
+		state.lastApproachAt = now
+		state.lastDestination = destination
+		_G.currentEventName = "Abyssal Tyrant (Locating "
+			.. state.attempts
+			.. "/"
+			.. state.maxAttempts
+			.. ")"
+
+		root.CFrame = destination
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		return true
 	end
 
 	function serverHop()
@@ -10678,6 +10839,9 @@ local function run(B, T, P, DfT, ...)
 			if not mob or not isValidMob(mob) then
 				return false
 			end
+			if _G._GenesisAbyssalAcquisition and _G._GenesisAbyssalAcquisition.locator then
+				_G._stopAbyssalAcquisition()
+			end
 			removeFarmFix()
 			_G.currentEventName = eventName
 			_G.currentEventHealth = mob.Humanoid.Health
@@ -10719,6 +10883,35 @@ local function run(B, T, P, DfT, ...)
 			return nil
 		end
 
+		local function findAbyssalTyrant()
+			local monster = Workspace:FindFirstChild("Monster")
+			local boss = monster and monster:FindFirstChild("Boss")
+			local seaMonster = Workspace:FindFirstChild("SeaMonster")
+			if boss then
+				for _, child in pairs(boss:GetChildren()) do
+					if
+						string.find(child.Name, "SeaDragon", 1, true)
+						and not string.find(child.Name, "ThirdSeaDragon", 1, true)
+						and isValidMob(child)
+					then
+						return child
+					end
+				end
+			end
+			if seaMonster then
+				for _, child in pairs(seaMonster:GetChildren()) do
+					if
+						string.find(child.Name, "SeaDragon", 1, true)
+						and not string.find(child.Name, "ThirdSeaDragon", 1, true)
+						and isValidMob(child)
+					then
+						return child
+					end
+				end
+			end
+			return nil
+		end
+
 		if GetSetting("autoHuntSerpent") then
 			local serpent = findMobByType("Serpent")
 			if serpent then
@@ -10749,10 +10942,34 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		if GetSetting("autoKillAbyssalTyrant") then
-			local abyssal = findMobByType("SeaDragon")
-			if abyssal and not string.find(abyssal.Name, "ThirdSeaDragon") then
+			local abyssal = findAbyssalTyrant()
+			if abyssal then
 				return attackMob(abyssal, "Abyssal Tyrant")
 			end
+
+			-- The boss model is deliberately absent until a player approaches the
+			-- globally replicated compass marker. The marker itself is authoritative;
+			-- Legacy Pose only toggles the compass UI that renders it.
+			local acquisition = _G._GenesisAbyssalAcquisition
+			local locator, locatorCFrame = nil, nil
+			local now = os.clock()
+			if type(acquisition) == "table" then
+				if acquisition.locator and acquisition.locator.Parent and now < acquisition.nextLocatorCheckAt then
+					locator = acquisition.locator
+					locatorCFrame = acquisition.locatorCFrame
+				elseif now >= acquisition.nextLocatorCheckAt then
+					acquisition.nextLocatorCheckAt = now + acquisition.locatorPollInterval
+					locator, locatorCFrame = _G._GenesisFindAbyssalLocator()
+				end
+			end
+			if locator then
+				return _G._GenesisApproachAbyssalLocator(locator, locatorCFrame)
+			end
+			if acquisition and acquisition.locator then
+				_G._stopAbyssalAcquisition()
+			end
+		else
+			_G._stopAbyssalAcquisition()
 		end
 
 		if GetSetting("autoKillDeepseaCrusher") then
@@ -13372,6 +13589,9 @@ local function run(B, T, P, DfT, ...)
 			Default = GetSetting("autoKillAbyssalTyrant") or false,
 			Callback = function(state)
 				saveAndApply("autoKillAbyssalTyrant", state)
+				if not state and type(_G._stopAbyssalAcquisition) == "function" then
+					_G._stopAbyssalAcquisition()
+				end
 			end,
 		})
 		Window:CreateToggle(EventsTab.Left, {
@@ -14083,6 +14303,66 @@ local function run(B, T, P, DfT, ...)
 			_GBackPosition = nil
 		end,
 	})
+
+	Window:CreateSection(TeleportTab.Left, "Location Teleports", GenesisX.Theme.Warning, "lucide-map-pin")
+
+	do
+		local locationTeleportOptions = {
+			"Boss Chalice",
+		}
+		local locationTeleports = {
+			["Boss Chalice"] = {
+				placeId = 15759515082,
+				cframe = CFrame.new(
+					2245.7707519531,
+					363.50967407227,
+					-1204.8427734375,
+					0.12241239845753,
+					-1.1466188887255e-08,
+					-0.99247932434082,
+					9.3516952404116e-08,
+					1,
+					-1.8695366435506e-11,
+					0.99247932434082,
+					-9.2811355045797e-08,
+					0.12241239845753
+				),
+			},
+		}
+		local locationDropdown = Window:CreateDropdown(TeleportTab.Left, {
+			Label = "Locations List",
+			Options = locationTeleportOptions,
+			Default = locationTeleportOptions[1],
+			Callback = function(selected) end,
+		})
+
+		Window:CreateButton(TeleportTab.Left, {
+			Text = "Teleport To Location",
+			Style = "accent",
+			Callback = function()
+				local selected = locationDropdown.GetValue()
+				local destination = selected and locationTeleports[selected]
+				if not destination then
+					GenesisX:Notify({ Text = "Select a location first!", Type = "error", Duration = 2 })
+					return
+				end
+				if destination.placeId ~= game.PlaceId then
+					GenesisX:Notify({ Text = selected .. " is in Third Sea!", Type = "error", Duration = 3 })
+					return
+				end
+
+				local root = GetRoot(LocalPlayer.Character)
+				if not root then
+					GenesisX:Notify({ Text = "Character position is unavailable!", Type = "error", Duration = 2 })
+					return
+				end
+
+				_GBackPosition = root.CFrame
+				tp(destination.cframe)
+				GenesisX:Notify({ Text = "Teleported to " .. selected, Type = "success", Duration = 2 })
+			end,
+		})
+	end
 
 	Window:CreateSection(TeleportTab.Left, "Crew", GenesisX.Theme.Warning, "lucide-flag")
 
@@ -15773,8 +16053,8 @@ local function run(B, T, P, DfT, ...)
 	end))
 
 	-- Dispatches only to a button that belongs to a currently visible GUI tree.
-	-- Signal dispatch is the quiet primary path. The enlarged click path is a
-	-- bounded fallback for menus whose LocalScript listens to real pointer input.
+	-- The interaction itself deliberately mirrors the known-good baseline: make
+	-- the exact button cover the fixed click point, then send a real mouse press.
 	_G._GenesisIsVisibleGuiButton = function(button)
 		if not button or not button:IsA("GuiButton") or not button.Parent then
 			return false
@@ -15792,18 +16072,9 @@ local function run(B, T, P, DfT, ...)
 		return button.AbsoluteSize.X > 0 and button.AbsoluteSize.Y > 0
 	end
 
-	_G._GenesisDispatchGuiButton = function(button, forceEnlargedClick)
+	_G._GenesisDispatchGuiButton = function(button)
 		if not _G._GenesisIsVisibleGuiButton(button) then
 			return false, "not_visible"
-		end
-
-		if not forceEnlargedClick and type(firesignal) == "function" then
-			local signalOk = pcall(function()
-				firesignal(button.MouseButton1Click)
-			end)
-			if signalOk then
-				return true, "firesignal"
-			end
 		end
 
 		if not VirtualInputManager then
@@ -15812,11 +16083,12 @@ local function run(B, T, P, DfT, ...)
 
 		local originalSize = button.Size
 		local originalPosition = button.Position
-		local originalAnchorPoint = button.AnchorPoint
+		local clickX = nil
+		local clickY = nil
+		local mouseDown = false
 		local clickOk = pcall(function()
-			-- This is the previously reliable large hitbox technique, but it is now
-			-- applied only to the exact validated button and restored immediately.
-			button.AnchorPoint = Vector2.new(0, 0)
+			-- Keep the baseline geometry exactly. Applying it on both sides of a
+			-- heartbeat also prevents a UI layout pass from replacing it before input.
 			button.Size = UDim2.new(10, 0, 10, 0)
 			button.Position = UDim2.new(-1.9, 0, -5.5, 0)
 			RunService.Heartbeat:Wait()
@@ -15825,33 +16097,36 @@ local function run(B, T, P, DfT, ...)
 				error("button_hidden_during_dispatch")
 			end
 
+			button.Size = UDim2.new(10, 0, 10, 0)
+			button.Position = UDim2.new(-1.9, 0, -5.5, 0)
 			local camera = Workspace.CurrentCamera
-			local viewport = camera and camera.ViewportSize or Vector2.new(1366, 768)
-			local absolutePosition = button.AbsolutePosition
-			local absoluteSize = button.AbsoluteSize
-			local left = math.max(1, absolutePosition.X)
-			local top = math.max(1, absolutePosition.Y)
-			local right = math.min(viewport.X - 1, absolutePosition.X + absoluteSize.X - 1)
-			local bottom = math.min(viewport.Y - 1, absolutePosition.Y + absoluteSize.Y - 1)
-			if right <= left or bottom <= top then
-				error("enlarged_button_offscreen")
+			if not camera then
+				error("camera_unavailable")
 			end
 
-			-- Click the center of the button's verified on-screen intersection. This
-			-- cannot drift to the old fixed top-right coordinate when a menu is absent.
-			local clickX = math.floor((left + right) * 0.5)
-			local clickY = math.floor((top + bottom) * 0.5)
+			local viewport = camera.ViewportSize
+			clickX = viewport.X - 20
+			clickY = viewport.Y / 15
+			mouseDown = true
 			VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 0)
+			task.wait(0.01)
 			VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
+			mouseDown = false
+			RunService.Heartbeat:Wait()
 		end)
 
+		-- Never leave the virtual mouse held if the button disappears mid-click.
+		if mouseDown and clickX and clickY then
+			pcall(function()
+				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
+			end)
+		end
 		pcall(function()
 			button.Size = originalSize
 			button.Position = originalPosition
-			button.AnchorPoint = originalAnchorPoint
 		end)
 
-		return clickOk, clickOk and "enlarged_click" or "click_failed"
+		return clickOk, clickOk and "baseline_click" or "click_failed"
 	end
 
 	spawn(function()
@@ -16296,9 +16571,9 @@ local function run(B, T, P, DfT, ...)
 						getDownwardCFrame(hrp.CFrame)
 						local height = GetSetting("distance") or 8
 						local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-						updateFarmFix(targetCF)
+						updateFarmFix(targetCF, hrp)
 						if not _G.farmFixThread then
-							applyFarmFix(targetCF)
+							applyFarmFix(targetCF, hrp)
 						end
 					end
 
@@ -16337,9 +16612,9 @@ local function run(B, T, P, DfT, ...)
 						getDownwardCFrame(hrp.CFrame)
 						local height = GetSetting("distance") or 8
 						local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-						updateFarmFix(targetCF)
+						updateFarmFix(targetCF, hrp)
 						if not _G.farmFixThread then
-							applyFarmFix(targetCF)
+							applyFarmFix(targetCF, hrp)
 						end
 					end
 
@@ -16371,9 +16646,9 @@ local function run(B, T, P, DfT, ...)
 										local height = GetSetting("distance") or 8
 										local targetCF =
 											CFrame.new(hrp2.Position + Vector3.new(0, height, 0), hrp2.Position)
-										updateFarmFix(targetCF)
+										updateFarmFix(targetCF, hrp2)
 										if not _G.farmFixThread then
-											applyFarmFix(targetCF)
+											applyFarmFix(targetCF, hrp2)
 										end
 									end
 
@@ -16405,9 +16680,9 @@ local function run(B, T, P, DfT, ...)
 						getDownwardCFrame(hrp.CFrame)
 						local height = GetSetting("distance") or 8
 						local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-						updateFarmFix(targetCF)
+						updateFarmFix(targetCF, hrp)
 						if not _G.farmFixThread then
-							applyFarmFix(targetCF)
+							applyFarmFix(targetCF, hrp)
 						end
 					end
 
@@ -16436,12 +16711,12 @@ local function run(B, T, P, DfT, ...)
 										if hrp2 then
 											getDownwardCFrame(hrp2.CFrame)
 											local height = GetSetting("distance") or 8
-											local targetCF =
-												CFrame.new(hrp2.Position + Vector3.new(0, height, 0), hrp2.Position)
-											updateFarmFix(targetCF)
-											if not _G.farmFixThread then
-												applyFarmFix(targetCF)
-											end
+										local targetCF =
+											CFrame.new(hrp2.Position + Vector3.new(0, height, 0), hrp2.Position)
+										updateFarmFix(targetCF, hrp2)
+										if not _G.farmFixThread then
+											applyFarmFix(targetCF, hrp2)
+										end
 										end
 
 										_G.pos_skill = mob.HumanoidRootPart.CFrame
@@ -16479,9 +16754,9 @@ local function run(B, T, P, DfT, ...)
 						getDownwardCFrame(hrp.CFrame)
 						local height = GetSetting("distance") or 8
 						local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-						updateFarmFix(targetCF)
+						updateFarmFix(targetCF, hrp)
 						if not _G.farmFixThread then
-							applyFarmFix(targetCF)
+							applyFarmFix(targetCF, hrp)
 						end
 					end
 
@@ -16512,9 +16787,9 @@ local function run(B, T, P, DfT, ...)
 										local height = GetSetting("distance") or 8
 										local targetCF =
 											CFrame.new(hrp2.Position + Vector3.new(0, height, 0), hrp2.Position)
-										updateFarmFix(targetCF)
+										updateFarmFix(targetCF, hrp2)
 										if not _G.farmFixThread then
-											applyFarmFix(targetCF)
+											applyFarmFix(targetCF, hrp2)
 										end
 									end
 
@@ -16552,9 +16827,9 @@ local function run(B, T, P, DfT, ...)
 						getDownwardCFrame(hrp.CFrame)
 						local height = GetSetting("distance") or 8
 						local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-						updateFarmFix(targetCF)
+						updateFarmFix(targetCF, hrp)
 						if not _G.farmFixThread then
-							applyFarmFix(targetCF)
+							applyFarmFix(targetCF, hrp)
 						end
 					end
 
@@ -16585,9 +16860,9 @@ local function run(B, T, P, DfT, ...)
 										local height = GetSetting("distance") or 8
 										local targetCF =
 											CFrame.new(hrp2.Position + Vector3.new(0, height, 0), hrp2.Position)
-										updateFarmFix(targetCF)
+										updateFarmFix(targetCF, hrp2)
 										if not _G.farmFixThread then
-											applyFarmFix(targetCF)
+											applyFarmFix(targetCF, hrp2)
 										end
 									end
 
@@ -16636,8 +16911,15 @@ local function run(B, T, P, DfT, ...)
 								usetool()
 								buso()
 								ken()
-								getDownwardCFrame(mob.HumanoidRootPart.CFrame)
-								_G.pos_skill = mob.HumanoidRootPart.CFrame
+								local hrp = mob.HumanoidRootPart
+								getDownwardCFrame(hrp.CFrame)
+								local height = GetSetting("distance") or 8
+								local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
+								updateFarmFix(targetCF, hrp)
+								if not _G.farmFixThread then
+									applyFarmFix(targetCF, hrp)
+								end
+								_G.pos_skill = hrp.CFrame
 								_G.allowCombat = true
 								click()
 								autoskill()
@@ -16755,9 +17037,9 @@ local function run(B, T, P, DfT, ...)
 						getDownwardCFrame(hrp.CFrame)
 						local height = GetSetting("distance") or 8
 						local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-						updateFarmFix(targetCF)
+						updateFarmFix(targetCF, hrp)
 						if not _G.farmFixThread then
-							applyFarmFix(targetCF)
+							applyFarmFix(targetCF, hrp)
 						end
 					end
 					_G.pos_skill = cachedTarget.HumanoidRootPart.CFrame
@@ -16792,9 +17074,9 @@ local function run(B, T, P, DfT, ...)
 					getDownwardCFrame(hrp.CFrame)
 					local height = GetSetting("distance") or 8
 					local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-					updateFarmFix(targetCF)
+					updateFarmFix(targetCF, hrp)
 					if not _G.farmFixThread then
-						applyFarmFix(targetCF)
+						applyFarmFix(targetCF, hrp)
 					end
 				end
 				_G.pos_skill = target.HumanoidRootPart.CFrame
@@ -16830,9 +17112,9 @@ local function run(B, T, P, DfT, ...)
 						getDownwardCFrame(hrp.CFrame)
 						local height = GetSetting("distance") or 8
 						local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-						updateFarmFix(targetCF)
+						updateFarmFix(targetCF, hrp)
 						if not _G.farmFixThread then
-							applyFarmFix(targetCF)
+							applyFarmFix(targetCF, hrp)
 						end
 					end
 
@@ -16877,9 +17159,9 @@ local function run(B, T, P, DfT, ...)
 						getDownwardCFrame(hrp.CFrame)
 						local height = GetSetting("distance") or 8
 						local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-						updateFarmFix(targetCF)
+						updateFarmFix(targetCF, hrp)
 						if not _G.farmFixThread then
-							applyFarmFix(targetCF)
+							applyFarmFix(targetCF, hrp)
 						end
 					end
 
@@ -16959,9 +17241,9 @@ local function run(B, T, P, DfT, ...)
 						getDownwardCFrame(hrp.CFrame)
 						local height = GetSetting("distance") or 8
 						local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-						updateFarmFix(targetCF)
+						updateFarmFix(targetCF, hrp)
 						if not _G.farmFixThread then
-							applyFarmFix(targetCF)
+							applyFarmFix(targetCF, hrp)
 						end
 						_G.pos_skill = hrp.CFrame
 						_G.allowCombat = true
@@ -17068,9 +17350,9 @@ local function run(B, T, P, DfT, ...)
 						getDownwardCFrame(hrp.CFrame)
 						local height = GetSetting("distance") or 8
 						local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-						updateFarmFix(targetCF)
+						updateFarmFix(targetCF, hrp)
 						if not _G.farmFixThread then
-							applyFarmFix(targetCF)
+							applyFarmFix(targetCF, hrp)
 						end
 					end
 
@@ -17116,9 +17398,9 @@ local function run(B, T, P, DfT, ...)
 										local height = GetSetting("distance") or 8
 										local targetCF =
 											CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-										updateFarmFix(targetCF)
+										updateFarmFix(targetCF, hrp)
 										if not _G.farmFixThread then
-											applyFarmFix(targetCF)
+											applyFarmFix(targetCF, hrp)
 										end
 									end
 
@@ -17286,7 +17568,7 @@ local function run(B, T, P, DfT, ...)
 
 						pcall(function()
 							local acceptBtn = LocalPlayer.PlayerGui.Traveler.Dialogue.Accept
-							_G._GenesisDispatchGuiButton(acceptBtn, false)
+							_G._GenesisDispatchGuiButton(acceptBtn)
 						end)
 					end
 				elseif progression == "Yes" then
@@ -17304,7 +17586,7 @@ local function run(B, T, P, DfT, ...)
 
 					pcall(function()
 						local acceptBtn = LocalPlayer.PlayerGui["Elite Pirate"].Dialogue.Accept
-						_G._GenesisDispatchGuiButton(acceptBtn, false)
+						_G._GenesisDispatchGuiButton(acceptBtn)
 					end)
 				end
 			end)
@@ -17378,7 +17660,7 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
-				_G._GenesisDispatchGuiButton(acceptBtn, false)
+				_G._GenesisDispatchGuiButton(acceptBtn)
 			end)
 		end
 	end)
@@ -17639,7 +17921,7 @@ local function run(B, T, P, DfT, ...)
 	end)
 
 	spawn(function()
-		while task.wait(0.1) do
+		while task.wait(0.01) do
 			pcall(function()
 				if not GetSetting("autoStoreFruits") then
 					return
@@ -17650,83 +17932,40 @@ local function run(B, T, P, DfT, ...)
 				local eatFruitGui = LocalPlayer.PlayerGui:FindFirstChild("EatFruitBecky")
 				local dialogue = eatFruitGui and eatFruitGui:FindFirstChild("Dialogue")
 				local collectBtn = dialogue and dialogue:FindFirstChild("Collect")
-				_G._GenesisDispatchGuiButton(collectBtn, false)
+				_G._GenesisDispatchGuiButton(collectBtn)
 			end)
 		end
 	end)
 
-	_G._GenesisBoundedUiClickStates = {}
-
-	_G._GenesisResetBoundedUiClick = function(key)
-		_G._GenesisBoundedUiClickStates[key] = nil
-	end
-
-	_G._GenesisClickVisibleButton = function(key, button, maxAttempts, interval)
-		if not _G._GenesisIsVisibleGuiButton(button) then
-			return false, "not_visible"
-		end
-
-		local clickState = _G._GenesisBoundedUiClickStates[key]
-		if not clickState or clickState.Button ~= button then
-			clickState = { Button = button, Attempts = 0, LastClick = 0 }
-			_G._GenesisBoundedUiClickStates[key] = clickState
-		end
-		if clickState.Attempts >= maxAttempts then
-			return false, "exhausted"
-		end
-
-		local now = tick()
-		if now - clickState.LastClick < interval then
-			return false, "cooldown"
-		end
-
-		clickState.Attempts = clickState.Attempts + 1
-		clickState.LastClick = now
-		local fired, method = _G._GenesisDispatchGuiButton(button, false)
-		if not fired then
-			return false, method
-		end
-		return true, clickState.Attempts >= maxAttempts and "exhausted" or method
-	end
-
 	spawn(function()
-		while task.wait(0.1) do
+		while task.wait(0.01) do
 			pcall(function()
 				if not GetSetting("autoThirdSea") then
-					_G._GenesisResetBoundedUiClick("thirdSeaSquid")
-					_G._GenesisResetBoundedUiClick("thirdSeaSummon")
 					return
 				end
 
 				local state = _G.thirdSeaState
-				local guiName, clickKey
+				local guiName
 				if state == "squid_mission" or state == "finished" then
 					guiName = "The Squid"
-					clickKey = "thirdSeaSquid"
-					_G._GenesisResetBoundedUiClick("thirdSeaSummon")
 				elseif state == "summon_kraken" then
 					guiName = "Summon Tentacle"
-					clickKey = "thirdSeaSummon"
-					_G._GenesisResetBoundedUiClick("thirdSeaSquid")
 				else
-					_G._GenesisResetBoundedUiClick("thirdSeaSquid")
-					_G._GenesisResetBoundedUiClick("thirdSeaSummon")
 					return
 				end
 
 				local gui = LocalPlayer.PlayerGui:FindFirstChild(guiName)
 				local dialogue = gui and gui:FindFirstChild("Dialogue")
 				local accept = dialogue and dialogue:FindFirstChild("Accept")
-				_G._GenesisClickVisibleButton(clickKey, accept, 8, 0.25)
+				_G._GenesisDispatchGuiButton(accept)
 			end)
 		end
 	end)
 
 	spawn(function()
-		while task.wait(0.1) do
+		while task.wait(0.01) do
 			pcall(function()
 				if not GetSetting("autoDailyQuest") or _G.dailyQuestState ~= "get_quest" then
-					_G._GenesisResetBoundedUiClick("dailyQuest")
 					return
 				end
 
@@ -17736,10 +17975,16 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
-				local button = dialogue:FindFirstChild("QuestAccept")
-					or dialogue:FindFirstChild("Quest 1")
-					or dialogue:FindFirstChild("Quest 2")
-				_G._GenesisClickVisibleButton("dailyQuest", button, 8, 0.25)
+				-- Existing but hidden buttons must not mask the currently active stage.
+				local button = nil
+				for _, buttonName in ipairs({ "QuestAccept", "Quest 1", "Quest 2" }) do
+					local candidate = dialogue:FindFirstChild(buttonName)
+					if _G._GenesisIsVisibleGuiButton(candidate) then
+						button = candidate
+						break
+					end
+				end
+				_G._GenesisDispatchGuiButton(button)
 			end)
 		end
 	end)
@@ -17994,7 +18239,7 @@ local function run(B, T, P, DfT, ...)
 							local height = GetSetting("distance") or 8
 							local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
 							if applyFarmFix then
-								applyFarmFix(targetCF)
+								applyFarmFix(targetCF, hrp)
 							else
 								tp(targetCF)
 							end
@@ -18171,12 +18416,7 @@ local function run(B, T, P, DfT, ...)
 					end
 				end
 
-				_G._GenesisClickVisibleButton(
-					"buyStyle_" .. tostring(_G._GenesisStylePurchaseGeneration),
-					accept,
-					8,
-					0.25
-				)
+				_G._GenesisDispatchGuiButton(accept)
 			end)
 		end
 	end)
@@ -19286,7 +19526,7 @@ local function run(B, T, P, DfT, ...)
 			if not accept or not accept:IsA("GuiButton") then
 				return false
 			end
-			return _G._GenesisDispatchGuiButton(accept, false)
+			return _G._GenesisDispatchGuiButton(accept)
 		end)
 		return ok and fired == true
 	end
@@ -19376,10 +19616,10 @@ local function run(B, T, P, DfT, ...)
 		local height = GetSetting("distance") or 8
 		local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
 		if updateFarmFix then
-			updateFarmFix(targetCF)
+			updateFarmFix(targetCF, hrp)
 		end
 		if applyFarmFix and not _G.farmFixThread then
-			applyFarmFix(targetCF)
+			applyFarmFix(targetCF, hrp)
 		end
 		_G.pos_skill = hrp.CFrame
 		click()
@@ -20433,9 +20673,8 @@ local function run(B, T, P, DfT, ...)
 			attemptCount = attemptCount + 1
 			_G.Raid._difficultyAttemptsByGui[chooseMap] = attemptCount
 
-			-- First try the direct signal. If the same verified popup remains after
-			-- three seconds, subsequent bounded attempts use the enlarged hitbox.
-			local fired = _G._GenesisDispatchGuiButton(button, attemptCount > 1)
+			-- Re-dispatch the same validated choice only if this exact popup remains.
+			local fired = _G._GenesisDispatchGuiButton(button)
 			if not fired then
 				return false
 			end
