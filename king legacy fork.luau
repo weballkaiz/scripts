@@ -94,7 +94,10 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 	}, { __index = baseTask })
 
 	local function unloadGenesis()
-		if not runtime.active and not runtime.cleaning then
+		if runtime.cleaning then
+			return true, "Genesis unload is already in progress"
+		end
+		if not runtime.active then
 			return true, "Genesis is already unloaded"
 		end
 
@@ -123,6 +126,13 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal.isProgressingBusoV2 = false
 		sharedGlobal.isProgressingObservationV2 = false
 		sharedGlobal.thirdSeaProgressionActive = false
+		sharedGlobal._GenesisPriorityOwner = "unloaded"
+		sharedGlobal._GenesisPriorityDetail = nil
+		if type(sharedGlobal._GenesisDungeonCommit) == "table" then
+			sharedGlobal._GenesisDungeonCommit.latched = false
+			sharedGlobal._GenesisDungeonCommit.stage = "outside"
+			sharedGlobal._GenesisDungeonCommit.entered = false
+		end
 
 		local cleanupFunctions = {
 			sharedGlobal._stopFishing,
@@ -166,6 +176,9 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 			pcall(sharedGlobal.HakiV2.stopLock)
 		end
 		if type(sharedGlobal.Raid) == "table" then
+			if type(sharedGlobal.Raid.stopCombat) == "function" then
+				pcall(sharedGlobal.Raid.stopCombat)
+			end
 			if type(sharedGlobal.Raid.stopDodge) == "function" then
 				pcall(sharedGlobal.Raid.stopDodge)
 			end
@@ -278,6 +291,7 @@ local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
+local TextService = game:GetService("TextService")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -5316,8 +5330,8 @@ function GenesisX:CreateLabel(parent, config)
 	local label = Instance.new("TextLabel")
 	label.Name = "Text"
 	label.BackgroundTransparency = 1
-	label.Size = UDim2.new(1, 0, 0, 0) -- starts with zero height
-	label.AutomaticSize = Enum.AutomaticSize.Y -- grows with the text
+	label.Size = UDim2.new(1, 0, 0, self:S(16))
+	label.AutomaticSize = Enum.AutomaticSize.None
 	label.Font = self:GetFontSemibold()
 	label.Text = text
 	label.TextColor3 = color
@@ -5328,27 +5342,62 @@ function GenesisX:CreateLabel(parent, config)
 	label.ZIndex = 13
 	label.Parent = frame
 
-	-- The frame follows the label with padding.
+	-- Explicit measurement is more reliable than nested AutomaticSize for long,
+	-- wrapped labels. In particular, Roblox can otherwise report a one-line
+	-- TextBounds height while the label is inside an auto-sized section.
+	local lastMeasuredWidth = -1
+	local lastMeasuredText = nil
+	local measuring = false
 	local function updateHeight()
-		if not label or not label.Parent then
+		if measuring or not label or not label.Parent or not frame or not frame.Parent then
 			return
 		end
-		local textH = label.TextBounds.Y
-		if textH <= 0 then
-			textH = self:S(16)
+
+		local availableWidth = math.floor(label.AbsoluteSize.X + 0.5)
+		if availableWidth <= 1 then
+			availableWidth = math.floor(frame.AbsoluteSize.X - padH * 2 + 0.5)
 		end
+		if availableWidth <= 1 then
+			return
+		end
+		if availableWidth == lastMeasuredWidth and label.Text == lastMeasuredText then
+			return
+		end
+
+		measuring = true
+		lastMeasuredWidth = availableWidth
+		lastMeasuredText = label.Text
+		local widthLimit = wrapped and availableWidth or 100000
+		local ok, bounds = pcall(function()
+			return TextService:GetTextSize(
+				tostring(label.Text),
+				label.TextSize,
+				label.Font,
+				Vector2.new(widthLimit, 100000)
+			)
+		end)
+		local textH = ok and bounds and math.ceil(bounds.Y) or math.ceil(label.TextBounds.Y)
+		textH = math.max(textH, self:S(16))
+		label.Size = UDim2.new(1, 0, 0, textH)
 		local currentSize = frame.Size
-		frame.Size = UDim2.new(
+		local targetSize = UDim2.new(
 			currentSize.X.Scale,
 			currentSize.X.Offset,
 			currentSize.Y.Scale,
 			math.max(minHeight, textH + padV * 2)
 		)
+		if frame.Size ~= targetSize then
+			frame.Size = targetSize
+		end
+		measuring = false
 	end
 
-	label:GetPropertyChangedSignal("TextBounds"):Connect(updateHeight)
-	label:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateHeight)
-	task.delay(0.1, updateHeight)
+	frame:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateHeight)
+	label:GetPropertyChangedSignal("Text"):Connect(function()
+		lastMeasuredText = nil
+		task.defer(updateHeight)
+	end)
+	task.defer(updateHeight)
 
 	return {
 		Frame = frame,
@@ -6755,7 +6804,6 @@ local function run(B, T, P, DfT, ...)
 			autoRaidBoss_LordOfSaber = true,
 			autoSKHD = true,
 			autoGhostShip = true,
-			autoRaceIsland = true,
 			autoConquest = true,
 			auto_dungeon_v2 = true,
 			autoFish = true,
@@ -6836,6 +6884,9 @@ local function run(B, T, P, DfT, ...)
 		farmMethod = { "Default (Smart)", "farmMethod" },
 		dungeon_select = { "Easy", "dungeon_select" },
 		auto_dungeon_v2 = { false, "auto_dungeon_v2" },
+		-- Gates only a new dungeon entry; a visible picker or active dungeon is
+		-- already committed and keeps absolute priority until it ends.
+		stopDungeonNearSeaEvent = { true, "stopDungeonNearSeaEvent" },
 		dodge_v2 = { true, "dodge_v2" },
 		ope_method_dungeon = { true, "ope_method_dungeon" },
 		dungeon_method = { "Stand Above Mobs", "dungeon_method" },
@@ -7016,6 +7067,10 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	LoadSettings()
+	-- Race islands are manual destinations now. Keep the legacy key readable so
+	-- old save files remain compatible, but never let a saved toggle resume the
+	-- removed background teleporter.
+	_G.Setting.autoRaceIsland[1] = false
 
 	-- If the setting was already saved as true, queue it now (after LoadSettings).
 	task.defer(function()
@@ -7098,6 +7153,25 @@ local function run(B, T, P, DfT, ...)
 	_G.ghostChestAttemptState = setmetatable({}, { __mode = "k" })
 	_G.ghostChestExhaustedNotified = setmetatable({}, { __mode = "k" })
 	_G.lastWhirlpoolNotified = false
+	_G._GenesisPriorityOwner = "resolving"
+	_G._GenesisPriorityDetail = "startup"
+	_G._GenesisPriorityUpdatedAt = os.clock()
+	_G._GenesisPriorityRank = {
+		dungeon_committed = 0,
+		major_sea_event = 1,
+		world_raid_boss = 2,
+		serpent = 3,
+		galleon = 4,
+		dungeon_entry = 5,
+		fishing = 6,
+	}
+	_G._GenesisDungeonCommit = {
+		latched = false,
+		stage = "outside",
+		latchedAt = 0,
+		lastEvidenceAt = 0,
+		entered = false,
+	}
 
 	_G.lootState = {
 		SeaKing = { active = false, startTime = 0, duration = 0, source = nil },
@@ -7123,6 +7197,228 @@ local function run(B, T, P, DfT, ...)
 		SeaKing = false,
 		GhostShip = false,
 	}
+
+	_G._GenesisGetVisibleDungeonPicker = function()
+		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+		local chooseMap = playerGui and playerGui:FindFirstChild("ChooseMap")
+		local frame = chooseMap and chooseMap:FindFirstChild("ChooseMapFrame")
+		if not chooseMap or not frame then
+			return nil, nil
+		end
+		if chooseMap:IsA("ScreenGui") and not chooseMap.Enabled then
+			return nil, nil
+		end
+		if frame:IsA("GuiObject") and not frame.Visible then
+			return nil, nil
+		end
+		return chooseMap, frame
+	end
+
+	_G._GenesisGetSeaEventCountdown = function()
+		if game.PlaceId ~= 15759515082 then
+			return nil, nil
+		end
+		local rawValue = ReplicatedStorage:GetAttribute("ThirdSeaMonsterSpawnText")
+		local timerText = tostring(rawValue or "--:--")
+		local normalized = string.upper(timerText)
+		if
+			string.find(normalized, "SET SAIL", 1, true)
+			or string.find(normalized, "UNUSUAL", 1, true)
+			or string.find(normalized, "HUNT IT DOWN", 1, true)
+		then
+			return 0, timerText
+		end
+
+		-- The replicated attribute has used both a bare clock and a clock embedded in
+		-- status text. Parse the clock wherever it appears so a harmless wording
+		-- change cannot accidentally reopen dungeon entry inside the 15-minute gate.
+		local hours, minutes, seconds = string.match(timerText, "(%d+):(%d+):(%d+)")
+		if hours then
+			return tonumber(hours) * 3600 + tonumber(minutes) * 60 + tonumber(seconds), timerText
+		end
+		minutes, seconds = string.match(timerText, "(%d+):(%d+)")
+		if minutes then
+			return tonumber(minutes) * 60 + tonumber(seconds), timerText
+		end
+		local minuteValue = string.match(timerText, "(%d+)%s*[mM]")
+		local secondValue = string.match(timerText, "(%d+)%s*[sS]")
+		if minuteValue or secondValue then
+			return (tonumber(minuteValue) or 0) * 60 + (tonumber(secondValue) or 0), timerText
+		end
+		return nil, timerText
+	end
+
+	_G._GenesisIsSeaEventNear = function()
+		if GetSetting("stopDungeonNearSeaEvent") == false then
+			return false, nil, nil
+		end
+		local seconds, timerText = _G._GenesisGetSeaEventCountdown()
+		return seconds ~= nil and seconds <= 15 * 60, seconds, timerText
+	end
+
+	_G._GenesisUpdateDungeonCommit = function()
+		local state = _G._GenesisDungeonCommit
+		local now = os.clock()
+		local picker = _G._GenesisGetVisibleDungeonPicker()
+		if picker then
+			if not state.latched or state.stage ~= "picker" then
+				state.latchedAt = now
+			end
+			state.latched = true
+			state.stage = "picker"
+			state.lastEvidenceAt = now
+			state.entered = false
+			return true, state.stage
+		end
+
+		local inDungeon = false
+		if _G.Raid and type(_G.Raid.checkInRaid) == "function" then
+			local ok, result = pcall(_G.Raid.checkInRaid)
+			inDungeon = ok and result == true
+		else
+			local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+			inDungeon = playerGui and playerGui:FindFirstChild("DungeonUI") ~= nil or false
+		end
+		if inDungeon then
+			if not state.latched then
+				state.latchedAt = now
+			end
+			state.latched = true
+			state.stage = "active"
+			state.lastEvidenceAt = now
+			state.entered = true
+			return true, state.stage
+		end
+
+		if state.latched then
+			local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+			local loading = playerGui and playerGui:FindFirstChild("LoadingGUI")
+			local grace = state.entered and 4 or 45
+			if loading and now - state.latchedAt <= 90 then
+				state.stage = "transition"
+				state.lastEvidenceAt = now
+				return true, state.stage
+			end
+			if now - state.lastEvidenceAt <= grace then
+				state.stage = "transition"
+				return true, state.stage
+			end
+		end
+
+		state.latched = false
+		state.stage = "outside"
+		state.latchedAt = 0
+		state.lastEvidenceAt = 0
+		state.entered = false
+		return false, state.stage
+	end
+
+	_G._GenesisCancelDungeonEntry = function(reason)
+		local committed = _G._GenesisUpdateDungeonCommit()
+		if committed then
+			return false
+		end
+		local raid = _G.Raid
+		if raid then
+			raid._entryGeneration = (raid._entryGeneration or 0) + 1
+			raid._entryBusy = false
+			raid._mainLoopBusy = false
+			raid._entryCancelReason = reason or "priority_changed"
+			if type(raid.stopCombat) == "function" then
+				pcall(raid.stopCombat)
+			end
+			if type(raid.clearDungeonFarm) == "function" then
+				pcall(raid.clearDungeonFarm)
+			end
+			if type(raid.stopDodge) == "function" then
+				pcall(raid.stopDodge)
+			end
+			if type(raid.stopOrbit) == "function" then
+				pcall(raid.stopOrbit)
+			end
+		end
+		return true
+	end
+
+	_G._GenesisSetPriorityOwner = function(owner, detail)
+		owner = owner or "idle"
+		-- The picker can appear between the resolver's first state check and a leaf
+		-- activity returning. Revalidate at the ownership boundary so that narrow
+		-- race cannot publish (or retain) an outside owner after entry is committed.
+		if owner ~= "dungeon_committed" and _G._GenesisPriorityOwner == "dungeon_entry" then
+			local committed, stage = _G._GenesisUpdateDungeonCommit()
+			if committed then
+				owner = "dungeon_committed"
+				detail = stage
+				_G.allowCombat = false
+				if _G.isFishing or _G.fishingToolCaptured then
+					pcall(stopFishing)
+				end
+				pcall(removeFarmFix)
+				pcall(stopSeaEventBypass)
+				pcall(removeChestLootFix)
+				if removeConquestPosition then
+					pcall(removeConquestPosition)
+				end
+				if type(_G._stopAbyssalAcquisition) == "function" then
+					pcall(_G._stopAbyssalAcquisition)
+				end
+			end
+		end
+		local previous = _G._GenesisPriorityOwner
+		if previous == "dungeon_entry" and owner ~= "dungeon_entry" and owner ~= "dungeon_committed" then
+			_G._GenesisCancelDungeonEntry("preempted_by_" .. owner)
+		end
+
+		local previousWasEvent = previous == "major_sea_event" or previous == "serpent" or previous == "galleon"
+		local nextIsEvent = owner == "major_sea_event" or owner == "serpent" or owner == "galleon"
+		if previousWasEvent and not nextIsEvent then
+			if type(_G._stopSeaEventBypass) == "function" then
+				pcall(_G._stopSeaEventBypass)
+			end
+			_G.seaEventActive = false
+			_G.currentEventName = "None"
+			_G.currentEventHealth = 0
+			_G.currentEventMaxHealth = 0
+		end
+
+		_G._GenesisPriorityOwner = owner
+		_G._GenesisPriorityDetail = detail
+		_G._GenesisPriorityUpdatedAt = os.clock()
+	end
+
+	_G._GenesisDungeonOwnsAutomation = function()
+		local committed, stage = _G._GenesisUpdateDungeonCommit()
+		if committed then
+			return true, stage
+		end
+		local owner = _G._GenesisPriorityOwner
+		if owner == "dungeon_entry" then
+			return true, "entry"
+		end
+		if owner == "resolving" and GetSetting("auto_dungeon_v2") then
+			return true, "resolving"
+		end
+		return false, "outside"
+	end
+
+	_G._GenesisCanStartDungeon = function()
+		if not GetSetting("auto_dungeon_v2") then
+			return false, "disabled"
+		end
+		local committed, stage = _G._GenesisUpdateDungeonCommit()
+		if committed then
+			return true, stage
+		end
+		local nearEvent, _, timerText = _G._GenesisIsSeaEventNear()
+		if nearEvent then
+			return false, "sea_event_near:" .. tostring(timerText)
+		end
+		if _G._GenesisPriorityOwner ~= "dungeon_entry" then
+			return false, "owned_by:" .. tostring(_G._GenesisPriorityOwner)
+		end
+		return true, "entry"
+	end
 
 	_GBackPosition = nil
 
@@ -7635,7 +7931,11 @@ local function run(B, T, P, DfT, ...)
 
 	spawn(function()
 		while task.wait(0.03) do
-			_G._GenesisDispatchM1IfReady()
+			local dispatch = _G._GenesisDispatchM1IfReady
+			if type(dispatch) ~= "function" then
+				break
+			end
+			dispatch()
 		end
 	end)
 
@@ -7951,7 +8251,7 @@ local function run(B, T, P, DfT, ...)
 		if _G.isProgressingBusoV2 or _G.isProgressingObservationV2 then
 			return true
 		end
-		if GetSetting("auto_dungeon_v2") then
+		if _G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation() then
 			return true
 		end
 		local keys = {
@@ -7977,7 +8277,6 @@ local function run(B, T, P, DfT, ...)
 			"autoRaidBoss_LordOfSaber",
 			"autoSKHD",
 			"autoGhostShip",
-			"autoRaceIsland",
 			"autoConquest",
 			"autoKillKraken",
 			"autoKillDrakenfyr",
@@ -8091,6 +8390,9 @@ local function run(B, T, P, DfT, ...)
 			local start = tick()
 			while tick() - start < duration do
 				task.wait(0.5)
+				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+					break
+				end
 
 				-- Immediate kill switch if autoSKHD was disabled.
 				if not GetSetting("autoSKHD") then
@@ -8157,6 +8459,9 @@ local function run(B, T, P, DfT, ...)
 			_G.lootState[eventType] = { active = false }
 			_G.lootThreads[eventType] = nil
 
+			if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+				return
+			end
 			if not GetSetting("autoSKHD") then
 				return
 			end
@@ -8613,7 +8918,9 @@ local function run(B, T, P, DfT, ...)
 			or _G.collectingPearls
 			or _G.isProgressingBusoV2
 			or _G.isProgressingObservationV2
-			or (GetSetting("auto_dungeon_v2") and _G.Raid and _G.Raid.inraid)
+			-- An enabled dungeon that is currently preempted (for example by the
+			-- near-event gate) does not own this movement controller.
+			or (_G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation())
 	end
 
 	trackGenesisConnection(RunService.Heartbeat:Connect(function()
@@ -9127,7 +9434,7 @@ local function run(B, T, P, DfT, ...)
 	local raidPriority = {
 		[4520749081] = { "Expert Swordman" },
 		[6381829480] = { "Ms. Mother", "King Samurai" },
-		[15759515082] = { "Pteranodon", "Bushido Ape", "Lord of Saber" },
+		[15759515082] = { "Pteranodon", "Lord of Saber", "Bushido Ape" },
 	}
 
 	local lastRaidCheck = 0
@@ -9143,9 +9450,9 @@ local function run(B, T, P, DfT, ...)
 			{ name = "King Samurai", key = "autoRaidBoss_KingSamurai" },
 		},
 		[15759515082] = {
-			{ name = "Bushido Ape", key = "autoRaidBoss_BushidoApe" },
-			{ name = "Lord of Saber", key = "autoRaidBoss_LordOfSaber" },
 			{ name = "Pteranodon", key = "autoHuntPtero" },
+			{ name = "Lord of Saber", key = "autoRaidBoss_LordOfSaber" },
+			{ name = "Bushido Ape", key = "autoRaidBoss_BushidoApe" },
 		},
 	}
 
@@ -9173,7 +9480,9 @@ local function run(B, T, P, DfT, ...)
 		if not _G.anyRaidBossSelected() then
 			return nil, nil
 		end
-		if _G.storingFruit or _G.seaEventActive then
+		-- The central resolver calls this only after the major-sea-event phase.
+		-- A stale lower-priority event flag must not hide a newly spawned raid boss.
+		if _G.storingFruit then
 			return nil, nil
 		end
 
@@ -9837,6 +10146,9 @@ local function run(B, T, P, DfT, ...)
 		if not mob or not mob.Parent then
 			return false
 		end
+		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+			return false
+		end
 		local mobHRP = getMobHRP(mob)
 		if not mobHRP then
 			return false
@@ -9911,6 +10223,12 @@ local function run(B, T, P, DfT, ...)
 			stopSeaEventBypass()
 			return "handoff"
 		end
+		-- Restoring the Primary weapon can yield while the entrance timer finishes.
+		-- Recheck the irreversible picker boundary before any outside movement.
+		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+			stopSeaEventBypass()
+			return "dungeon"
+		end
 
 		if _seaEventTarget == mob then
 			return "ancorado"
@@ -9976,13 +10294,23 @@ local function run(B, T, P, DfT, ...)
 		if type(state) ~= "table" then
 			return false
 		end
+		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+			if type(_G._stopAbyssalAcquisition) == "function" then
+				_G._stopAbyssalAcquisition()
+			end
+			return true
+		end
 		if not locator or not locator.Parent or typeof(locatorCFrame) ~= "CFrame" then
-			_G._stopAbyssalAcquisition()
+			if type(_G._stopAbyssalAcquisition) == "function" then
+				_G._stopAbyssalAcquisition()
+			end
 			return false
 		end
 
 		if state.locator ~= locator then
-			_G._stopAbyssalAcquisition()
+			if type(_G._stopAbyssalAcquisition) == "function" then
+				_G._stopAbyssalAcquisition()
+			end
 			state.locator = locator
 			state.startedAt = os.clock()
 		end
@@ -10004,6 +10332,12 @@ local function run(B, T, P, DfT, ...)
 
 		if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("abyssal_locator") then
 			_G.currentEventName = "Abyssal Tyrant (Switching Loadout)"
+			return true
+		end
+		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+			if type(_G._stopAbyssalAcquisition) == "function" then
+				_G._stopAbyssalAcquisition()
+			end
 			return true
 		end
 
@@ -10270,14 +10604,16 @@ local function run(B, T, P, DfT, ...)
 	_G.findSeaKingChestPosition = findSeaKingChestPosition
 	_G.findHydraChestPosition = findHydraChestPosition
 
-	local function checkSea1Events()
-		if _G.isLootingChests then
+	local function checkSea1Events(phase)
+		phase = phase or "all"
+		local wantsSerpent = phase == "all" or phase == "serpent"
+		if _G.isLootingChests and wantsSerpent then
 			return true
 		end
 
 		local hasEvent = false
 
-		if GetSetting("autoHuntSerpent") then
+		if wantsSerpent and GetSetting("autoHuntSerpent") then
 			local serpent = findSerpent()
 			if isValidMob(serpent) then
 				removeFarmFix()
@@ -10305,6 +10641,9 @@ local function run(B, T, P, DfT, ...)
 				if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("serpent_submerged") then
 					return true
 				end
+				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+					return true
+				end
 				removeFarmFix()
 				stopSeaEventBypass()
 				_G.currentEventName = "Serpent (Submerged)"
@@ -10318,7 +10657,7 @@ local function run(B, T, P, DfT, ...)
 			end
 		end
 
-		if not hasEvent then
+		if not hasEvent and wantsSerpent then
 			_G.seaEventActive = false
 			_G.currentEventName = "None"
 			_G.currentEventHealth = 0
@@ -10329,40 +10668,53 @@ local function run(B, T, P, DfT, ...)
 		return hasEvent
 	end
 
-	local function checkSea2Events()
+	local function checkSea2Events(phase)
+		phase = phase or "all"
+		local wantsMajor = phase == "all" or phase == "major"
+		local wantsSerpent = phase == "all" or phase == "serpent"
+		local wantsGalleon = phase == "all" or phase == "galleon"
 		-- If looting is active and the mob respawned, cancel immediately.
 		if _G.isLootingChests then
-			local sk = findSeaKingMob()
-			if sk and sk:FindFirstChild("Humanoid") and sk.Humanoid.Health > 0 and _G.lootState.SeaKing.active then
-				removeChestLootFix()
-				_G.isLootingChests = false
-				_G.lootState.SeaKing = { active = false }
-				if _G.lootThreads.SeaKing then
-					_G.lootThreads.SeaKing = nil
+			local majorLooting = _G.lootState.SeaKing.active or _G.lootState.Hydra.active
+			if phase == "all" or (majorLooting and wantsMajor) or (not majorLooting and wantsGalleon) then
+				if majorLooting then
+					local sk = findSeaKingMob()
+					if sk
+						and sk:FindFirstChild("Humanoid")
+						and sk.Humanoid.Health > 0
+						and _G.lootState.SeaKing.active
+					then
+						removeChestLootFix()
+						_G.isLootingChests = false
+						_G.lootState.SeaKing = { active = false }
+						if _G.lootThreads.SeaKing then
+							_G.lootThreads.SeaKing = nil
+						end
+					end
+					local hydra = findHydraMob()
+					if
+						hydra
+						and hydra:FindFirstChild("Humanoid")
+						and hydra.Humanoid.Health > 0
+						and _G.lootState.Hydra.active
+					then
+						removeChestLootFix()
+						_G.isLootingChests = false
+						_G.lootState.Hydra = { active = false }
+						if _G.lootThreads.Hydra then
+							_G.lootThreads.Hydra = nil
+						end
+					end
 				end
+				return true
 			end
-			local hydra = findHydraMob()
-			if
-				hydra
-				and hydra:FindFirstChild("Humanoid")
-				and hydra.Humanoid.Health > 0
-				and _G.lootState.Hydra.active
-			then
-				removeChestLootFix()
-				_G.isLootingChests = false
-				_G.lootState.Hydra = { active = false }
-				if _G.lootThreads.Hydra then
-					_G.lootThreads.Hydra = nil
-				end
-			end
-			return true
 		end
 
 		local autoSKHD = GetSetting("autoSKHD")
 		local autoGhostShip = GetSetting("autoGhostShip")
 
 		-- Serpent is independent (it does not require SK/HD or Ghost Ship).
-		if GetSetting("autoHuntSerpent") then
+		if wantsSerpent and GetSetting("autoHuntSerpent") then
 			local serpent = findSerpent()
 			if isValidMob(serpent) then
 				removeFarmFix()
@@ -10393,6 +10745,9 @@ local function run(B, T, P, DfT, ...)
 				if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("serpent_submerged") then
 					return true
 				end
+				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+					return true
+				end
 				removeFarmFix()
 				stopSeaEventBypass()
 				_G.currentEventName = "Serpent (Submerged)"
@@ -10406,7 +10761,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		-- === HYDRA / SEA KING (only with autoSKHD, independent of Serpent) ===
-		if autoSKHD then
+		if wantsMajor and autoSKHD then
 			-- === HYDRA ===
 			local hydraMob = findHydraMob()
 			local hydraIsland = findHydraIsland()
@@ -10437,18 +10792,26 @@ local function run(B, T, P, DfT, ...)
 						if not GetSetting("autoSKHD") then
 							return
 						end
+						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+							return
+						end
 
 						-- Reserve looting before moving so fishing cannot recreate its
 						-- position lock between the death observation and this teleport.
 						_G.isLootingChests = true
 						local handoffDeadline = os.clock() + 12
 						while
-							_G._GenesisPrepareCombatFromFishing
+							(not _G._GenesisUpdateDungeonCommit or not _G._GenesisUpdateDungeonCommit())
+							and _G._GenesisPrepareCombatFromFishing
 							and not _G._GenesisPrepareCombatFromFishing("hydra_loot")
 							and GetSetting("autoSKHD")
 							and os.clock() < handoffDeadline
 						do
 							task.wait(0.1)
+						end
+						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+							_G.isLootingChests = false
+							return
 						end
 						if _G._GenesisPrepareCombatFromFishing and fishingOwnsWeaponSlot() then
 							_G.isLootingChests = false
@@ -10505,6 +10868,10 @@ local function run(B, T, P, DfT, ...)
 						if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("hydra_loot") then
 							return true
 						end
+						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+							_G.isLootingChests = false
+							return true
+						end
 						tp(CFrame.new(chestPos))
 						applyChestLootFix(CFrame.new(chestPos))
 						startLootTimer("Hydra", 20)
@@ -10549,16 +10916,24 @@ local function run(B, T, P, DfT, ...)
 						if not GetSetting("autoSKHD") then
 							return
 						end
+						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+							return
+						end
 
 						_G.isLootingChests = true
 						local handoffDeadline = os.clock() + 12
 						while
-							_G._GenesisPrepareCombatFromFishing
+							(not _G._GenesisUpdateDungeonCommit or not _G._GenesisUpdateDungeonCommit())
+							and _G._GenesisPrepareCombatFromFishing
 							and not _G._GenesisPrepareCombatFromFishing("sea_king_loot")
 							and GetSetting("autoSKHD")
 							and os.clock() < handoffDeadline
 						do
 							task.wait(0.1)
+						end
+						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+							_G.isLootingChests = false
+							return
 						end
 						if _G._GenesisPrepareCombatFromFishing and fishingOwnsWeaponSlot() then
 							_G.isLootingChests = false
@@ -10617,6 +10992,10 @@ local function run(B, T, P, DfT, ...)
 						if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("sea_king_loot") then
 							return true
 						end
+						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+							_G.isLootingChests = false
+							return true
+						end
 						tp(CFrame.new(chestPos))
 						applyChestLootFix(CFrame.new(chestPos))
 						startLootTimer("SeaKing", 20)
@@ -10634,8 +11013,39 @@ local function run(B, T, P, DfT, ...)
 		end -- autoSKHD hydra/sk
 
 		-- === GHOST SHIP (independent of SK/HD and Serpent) ===
-		if autoGhostShip then
+		if wantsGalleon and autoGhostShip then
 			local ghostShip = findGhostShip()
+			local function getGhostLootAbortReason()
+				-- Once Ghost Ship chest collection starts, it is a short atomic
+				-- transaction. Outside bosses and sea events wait for it to finish;
+				-- only an irreversible dungeon transition may preempt automation.
+				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+					return "dungeon"
+				end
+				-- Turning the feature off remains an immediate manual kill switch.
+				if not GetSetting("autoGhostShip") then
+					return "disabled"
+				end
+				return nil
+			end
+
+			local function waitDuringGhostLoot(seconds, chest, chestCF, holdPosition)
+				local deadline = os.clock() + seconds
+				repeat
+					local abortReason = getGhostLootAbortReason()
+					if abortReason then
+						return abortReason
+					end
+					if not chest or not chest.Parent or not chest:IsDescendantOf(Workspace) then
+						return "collected"
+					end
+					if holdPosition then
+						updateFarmFix(chestCF)
+					end
+					task.wait(0.1)
+				until os.clock() >= deadline
+				return nil
+			end
 
 			local chestList = {}
 			local allChestEntries = {}
@@ -10661,10 +11071,28 @@ local function run(B, T, P, DfT, ...)
 			end
 
 			if #chestList > 0 then
+				local lootAbortReason = nil
 				_G.seaEventActive = true
 				_G.isLootingChests = true
 				_G.currentEventName = "Ghost Ship (Looting)"
-				if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("ghost_ship_loot") then
+				local handoffDeadline = os.clock() + 12
+				while
+					not getGhostLootAbortReason()
+					and _G._GenesisPrepareCombatFromFishing
+					and not _G._GenesisPrepareCombatFromFishing("ghost_ship_loot")
+					and os.clock() < handoffDeadline
+				do
+					task.wait(0.1)
+				end
+				lootAbortReason = getGhostLootAbortReason()
+				if lootAbortReason then
+					_G.isLootingChests = false
+					return true
+				end
+				if _G._GenesisPrepareCombatFromFishing and fishingOwnsWeaponSlot() then
+					-- Collection has not started yet. Release the provisional flag and
+					-- retry cleanly instead of stranding the looting guard forever.
+					_G.isLootingChests = false
 					return true
 				end
 				-- A prior level-farm lock can otherwise pull the player back during
@@ -10672,7 +11100,8 @@ local function run(B, T, P, DfT, ...)
 				removeFarmFix()
 
 				for _, chestEntry in ipairs(chestList) do
-					if not GetSetting("autoGhostShip") then
+					lootAbortReason = getGhostLootAbortReason()
+					if lootAbortReason then
 						break
 					end
 
@@ -10680,8 +11109,8 @@ local function run(B, T, P, DfT, ...)
 					local chestPart = chestEntry.Part
 					local attempts = _G.ghostChestAttemptState[chest] or 0
 					while attempts < 5 do
-						if
-							not GetSetting("autoGhostShip")
+						lootAbortReason = getGhostLootAbortReason()
+						if lootAbortReason
 							or not chest
 							or not chest.Parent
 							or not chest:IsDescendantOf(Workspace)
@@ -10699,33 +11128,46 @@ local function run(B, T, P, DfT, ...)
 
 						attempts = attempts + 1
 						_G.ghostChestAttemptState[chest] = attempts
-						local chestCF = chestPart.CFrame
+						-- Preserve the webhook-only collector's proven sequence: arrive five
+						-- studs above the chest, allow one second for natural contact, then
+						-- hold that position for one second. Repeat only if replication still
+						-- shows the same chest, with a hard cap of five real attempts.
+						removeFarmFix()
+						local chestCF = chestPart.CFrame * CFrame.new(0, 5, 0)
 						root.CFrame = chestCF
-						applyFarmFix(chestCF)
-						updateFarmFix(chestCF)
-
-						-- This is an acquisition attempt, not merely a teleport pulse. Touch
-						-- the chest exactly as the character would and then wait for the
-						-- server-replicated chest instance to disappear.
-						if type(firetouchinterest) == "function" then
-							pcall(firetouchinterest, root, chestPart, 0)
-							task.wait(0.08)
-							pcall(firetouchinterest, root, chestPart, 1)
+						lootAbortReason = waitDuringGhostLoot(1, chest, chestCF, false)
+						if lootAbortReason == "collected" then
+							lootAbortReason = nil
+							break
+						elseif lootAbortReason then
+							break
 						end
 
-						local verifyDeadline = os.clock() + 0.7
-						repeat
-							if not chest.Parent or not chest:IsDescendantOf(Workspace) then
-								break
-							end
-							updateFarmFix(chestCF)
-							task.wait(0.05)
-						until os.clock() >= verifyDeadline
+						applyFarmFix(chestCF)
+						updateFarmFix(chestCF)
+						lootAbortReason = waitDuringGhostLoot(1, chest, chestCF, true)
+						if lootAbortReason == "collected" then
+							lootAbortReason = nil
+							break
+						elseif lootAbortReason then
+							break
+						end
+					end
+					if lootAbortReason then
+						break
 					end
 				end
 
 				removeFarmFix()
 				_G.isLootingChests = false
+				if lootAbortReason then
+					-- A committed dungeon takes control on the next resolver step. Manual
+					-- disable likewise ends the transaction without resetting attempt counts.
+					return true
+				end
+				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+					return true
+				end
 				if not GetSetting("autoGhostShip") then
 					return true
 				end
@@ -10788,6 +11230,9 @@ local function run(B, T, P, DfT, ...)
 					_G.ghostShipDiedConnected = true
 					trackGenesisConnection(ghostShip.Humanoid.Died:Connect(function()
 						_G.ghostShipDiedConnected = false
+						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+							return
+						end
 						_G.postEventTimers.GhostShip.active = true
 						_G.postEventTimers.GhostShip.startTime = tick()
 						_G.isLootingChests = true
@@ -10818,17 +11263,23 @@ local function run(B, T, P, DfT, ...)
 			end
 		end
 
-		removeFarmFix()
-		_G.currentEventName = "None"
-		_G.currentEventHealth = 0
-		_G.currentEventMaxHealth = 0
-		_G.seaEventActive = false
-		stopSeaEventBypass()
+		if phase == "all" or phase == "galleon" then
+			removeFarmFix()
+			_G.currentEventName = "None"
+			_G.currentEventHealth = 0
+			_G.currentEventMaxHealth = 0
+			_G.seaEventActive = false
+			stopSeaEventBypass()
+		end
 		return false
 	end
 
-	local function checkSea3Events()
-		if _G.isLootingChests then
+	local function checkSea3Events(phase)
+		phase = phase or "all"
+		local wantsMajor = phase == "all" or phase == "major"
+		local wantsSerpent = phase == "all" or phase == "serpent"
+		local wantsGalleon = phase == "all" or phase == "galleon"
+		if _G.isLootingChests and wantsGalleon then
 			stopSeaEventBypass()
 			return true
 		end
@@ -10846,7 +11297,11 @@ local function run(B, T, P, DfT, ...)
 			if not mob or not isValidMob(mob) then
 				return false
 			end
-			if _G._GenesisAbyssalAcquisition and _G._GenesisAbyssalAcquisition.locator then
+			if
+				_G._GenesisAbyssalAcquisition
+				and _G._GenesisAbyssalAcquisition.locator
+				and type(_G._stopAbyssalAcquisition) == "function"
+			then
 				_G._stopAbyssalAcquisition()
 			end
 			removeFarmFix()
@@ -10919,14 +11374,14 @@ local function run(B, T, P, DfT, ...)
 			return nil
 		end
 
-		if GetSetting("autoHuntSerpent") then
+		if wantsSerpent and GetSetting("autoHuntSerpent") then
 			local serpent = findMobByType("Serpent")
 			if serpent then
 				return attackMob(serpent, "Serpent")
 			end
 		end
 
-		if GetSetting("autoKillGalleons") then
+		if wantsGalleon and GetSetting("autoKillGalleons") then
 			for _, monster in pairs(Workspace.SeaMonster:GetChildren()) do
 				if string.find(monster.Name, "Galleon") and isValidMob(monster) then
 					return attackMob(monster, monster.Name)
@@ -10934,74 +11389,80 @@ local function run(B, T, P, DfT, ...)
 			end
 		end
 
-		if GetSetting("autoKillKraken") then
+		if wantsMajor and GetSetting("autoKillKraken") then
 			local kraken = findMobByType("Tentacle") or findMobByType("FuryTentacle")
 			if kraken then
 				return attackMob(kraken, "Kraken")
 			end
 		end
 
-		if GetSetting("autoKillDrakenfyr") then
+		if wantsMajor and GetSetting("autoKillDrakenfyr") then
 			local drakenfyr = findMobByType("ThirdSeaDragon")
 			if drakenfyr then
 				return attackMob(drakenfyr, "Drakenfyr")
 			end
 		end
 
-		if GetSetting("autoKillAbyssalTyrant") then
-			local abyssal = findAbyssalTyrant()
-			if abyssal then
-				return attackMob(abyssal, "Abyssal Tyrant")
-			end
+		if wantsMajor then
+			if GetSetting("autoKillAbyssalTyrant") then
+				local abyssal = findAbyssalTyrant()
+				if abyssal then
+					return attackMob(abyssal, "Abyssal Tyrant")
+				end
 
-			-- The boss model is deliberately absent until a player approaches the
-			-- globally replicated compass marker. The marker itself is authoritative;
-			-- Legacy Pose only toggles the compass UI that renders it.
-			local acquisition = _G._GenesisAbyssalAcquisition
-			local locator, locatorCFrame = nil, nil
-			local now = os.clock()
-			if type(acquisition) == "table" then
-				if acquisition.locator and acquisition.locator.Parent and now < acquisition.nextLocatorCheckAt then
-					locator = acquisition.locator
-					locatorCFrame = acquisition.locatorCFrame
-				elseif now >= acquisition.nextLocatorCheckAt then
-					acquisition.nextLocatorCheckAt = now + acquisition.locatorPollInterval
-					locator, locatorCFrame = _G._GenesisFindAbyssalLocator()
+				-- The boss model is deliberately absent until a player approaches the
+				-- globally replicated compass marker. The marker itself is authoritative;
+				-- Legacy Pose only toggles the compass UI that renders it.
+				local acquisition = _G._GenesisAbyssalAcquisition
+				local locator, locatorCFrame = nil, nil
+				local now = os.clock()
+				if type(acquisition) == "table" then
+					if acquisition.locator and acquisition.locator.Parent and now < acquisition.nextLocatorCheckAt then
+						locator = acquisition.locator
+						locatorCFrame = acquisition.locatorCFrame
+					elseif now >= acquisition.nextLocatorCheckAt then
+						acquisition.nextLocatorCheckAt = now + acquisition.locatorPollInterval
+						locator, locatorCFrame = _G._GenesisFindAbyssalLocator()
+					end
+				end
+				if locator then
+					return _G._GenesisApproachAbyssalLocator(locator, locatorCFrame)
+				end
+				if acquisition and acquisition.locator and type(_G._stopAbyssalAcquisition) == "function" then
+					_G._stopAbyssalAcquisition()
+				end
+			else
+				if type(_G._stopAbyssalAcquisition) == "function" then
+					_G._stopAbyssalAcquisition()
 				end
 			end
-			if locator then
-				return _G._GenesisApproachAbyssalLocator(locator, locatorCFrame)
-			end
-			if acquisition and acquisition.locator then
-				_G._stopAbyssalAcquisition()
-			end
-		else
-			_G._stopAbyssalAcquisition()
 		end
 
-		if GetSetting("autoKillDeepseaCrusher") then
+		if wantsMajor and GetSetting("autoKillDeepseaCrusher") then
 			local deepsea = findMobByType("ThirdSeaEldritch") or findMobByType("Crab") or findMobByType("Eldritch")
 			if deepsea then
 				return attackMob(deepsea, "Deepsea Crusher")
 			end
 		end
 
-		stopSeaEventBypass()
-		_G.seaEventActive = false
-		_G.currentEventName = "None"
-		_G.currentEventHealth = 0
-		_G.currentEventMaxHealth = 0
+		if phase == "all" or phase == "galleon" then
+			stopSeaEventBypass()
+			_G.seaEventActive = false
+			_G.currentEventName = "None"
+			_G.currentEventHealth = 0
+			_G.currentEventMaxHealth = 0
+		end
 		return false
 	end
 
-	local function checkRaceIsland()
-		if not GetSetting("autoRaceIsland") then
-			return false
+	_G._GenesisFindRaceIsland = function()
+		local islandFolder = Workspace:FindFirstChild("Island")
+		if not islandFolder then
+			return nil, nil, nil
 		end
-
-		for _, island in pairs(Workspace.Island:GetChildren()) do
+		for _, island in ipairs(islandFolder:GetChildren()) do
 			local name = island.Name
-			if
+			local isRaceIsland =
 				string.find(name, "Human")
 				or string.find(name, "Animal")
 				or string.find(name, "Fish")
@@ -11010,52 +11471,95 @@ local function run(B, T, P, DfT, ...)
 				or string.find(name, "Angel")
 				or string.find(name, "Gale")
 				or string.find(name, "SeaKing")
-			then
-				if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("race_island") then
-					_G.currentRaceIsland = name
-					_G.currentEventName = "Race: " .. name
-					_G.seaEventActive = true
-					return true
+			if isRaceIsland then
+				local part = island:IsA("BasePart") and island or nil
+				if not part then
+					local elevator = island:FindFirstChild("Elevator", true)
+					if elevator and elevator:IsA("BasePart") then
+						part = elevator
+					end
 				end
-				removeFarmFix()
-				_G.currentRaceIsland = name
-				_G.currentEventName = "Race: " .. name
-				_G.seaEventActive = true
-
-				local part = island:FindFirstChildWhichIsA("BasePart")
-					or island:FindFirstChild("Elevator")
-					or island:FindFirstChild("MeshPart")
-				if part then
+				if not part then
+					local meshPart = island:FindFirstChild("MeshPart", true)
+					if meshPart and meshPart:IsA("BasePart") then
+						part = meshPart
+					end
+				end
+				part = part or island:FindFirstChildWhichIsA("BasePart", true)
+				local baseCFrame = nil
+				if part and part:IsA("BasePart") then
+					baseCFrame = part.CFrame
+				elseif island:IsA("Model") then
+					local ok, pivot = pcall(island.GetPivot, island)
+					baseCFrame = ok and pivot or nil
+				end
+				if typeof(baseCFrame) == "CFrame" then
 					local yOffset = string.find(name, "Gale") and 1000 or 26
-					tp(part.CFrame * CFrame.new(0, yOffset, 0))
-					return true
+					local destination = baseCFrame * CFrame.new(0, yOffset, 0)
+					local position = destination.Position
+					if
+						position.X == position.X
+						and position.Y == position.Y
+						and position.Z == position.Z
+						and math.abs(position.X) < 10000000
+						and math.abs(position.Y) < 10000000
+						and math.abs(position.Z) < 10000000
+					then
+						return island, destination, getDisplayRaceName(name)
+					end
 				end
 			end
 		end
-		return false
+		return nil, nil, nil
 	end
 
-	local function checkSeaEvents()
-		if _G.isLootingChests then
-			if _G.farmFixThread or _G.farmFixBodyPos then
-				removeFarmFix()
-			end
-			return true
+	_G._GenesisTeleportToRaceIsland = function()
+		if game.PlaceId ~= 15759515082 then
+			return false, "Race Islands are only available in the Third Sea."
 		end
+		local committed = _G._GenesisUpdateDungeonCommit()
+		if committed then
+			return false, "A dungeon currently owns movement."
+		end
+		local island, destination, displayName = _G._GenesisFindRaceIsland()
+		if not island or typeof(destination) ~= "CFrame" then
+			return false, "No Race Island is currently available."
+		end
+		if _G.isFishing or _G.fishingToolCaptured then
+			stopFishing()
+		end
+		removeFarmFix()
+		stopSeaEventBypass()
+		if removeConquestPosition then
+			removeConquestPosition()
+		end
+		local root = GetRoot(LocalPlayer.Character)
+		if not root then
+			return false, "Character root is unavailable."
+		end
+		local moved = pcall(function()
+			root.CFrame = destination
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end)
+		if not moved then
+			return false, "Race Island teleport failed."
+		end
+		_G.currentRaceIsland = island.Name
+		return true, displayName
+	end
 
-		if checkRaceIsland() then
-			_G.lastEventCheck = tick()
-			return true
-		end
+	local function checkSeaEvents(phase)
+		phase = phase or "all"
 
 		local foundEvent = false
 
 		if game.PlaceId == 4520749081 then
-			foundEvent = checkSea1Events()
+			foundEvent = checkSea1Events(phase)
 		elseif game.PlaceId == 6381829480 then
-			foundEvent = checkSea2Events()
+			foundEvent = checkSea2Events(phase)
 		elseif game.PlaceId == 15759515082 then
-			foundEvent = checkSea3Events()
+			foundEvent = checkSea3Events(phase)
 		end
 
 		if foundEvent then
@@ -11064,6 +11568,7 @@ local function run(B, T, P, DfT, ...)
 
 		return foundEvent
 	end
+	_G._GenesisCheckSeaEvents = checkSeaEvents
 
 	local _originalKeyboard = keyboard
 	keyboard = function(key)
@@ -12334,6 +12839,9 @@ local function run(B, T, P, DfT, ...)
 				if not smartHopOn then
 					return
 				end
+				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+					return
+				end
 				if _G.isLootingChests then
 					return
 				end
@@ -13003,23 +13511,116 @@ local function run(B, T, P, DfT, ...)
 		Size = UDim2.new(0, 640, 0, 390),
 	})
 
-	local MainTab = Window:CreateTab({ Name = "Main", Icon = "lucide-swords" })
-	local StatsTab = Window:CreateTab({ Name = "Skills", Icon = "lucide-settings-2" })
-	local EventsTab = Window:CreateTab({ Name = "Events", Icon = "lucide-waves" })
-	local ShopTab = Window:CreateTab({ Name = "Shop", Icon = "lucide-shopping-cart" })
-	local ServerTab = Window:CreateTab({ Name = "Server", Icon = "lucide-server" })
-	local TeleportTab = Window:CreateTab({ Name = "Teleport", Icon = "lucide-target" })
-	local AutoTab = Window:CreateTab({ Name = "Auto", Icon = "lucide-terminal" })
-	local RaidTab = Window:CreateTab({ Name = "Raid", Icon = "lucide-skull" })
+	local uiSections = {}
+	uiSections.FarmTab = Window:CreateTab({ Name = "Farm", Icon = "lucide-swords" })
+	uiSections.CombatTab = Window:CreateTab({ Name = "Combat", Icon = "lucide-shield" })
+	uiSections.EventsTab = Window:CreateTab({ Name = "Events", Icon = "lucide-waves" })
+	uiSections.DungeonTab = Window:CreateTab({ Name = "Dungeon", Icon = "lucide-skull" })
+	uiSections.ProgressTab = Window:CreateTab({ Name = "Progress", Icon = "lucide-trending-up" })
+	uiSections.ItemsTab = Window:CreateTab({ Name = "Items", Icon = "lucide-shopping-cart" })
+	uiSections.TeleportTab = Window:CreateTab({ Name = "Teleport", Icon = "lucide-map-pin" })
+	uiSections.ServerTab = Window:CreateTab({ Name = "Server", Icon = "lucide-server" })
+	uiSections.SettingsTab = Window:CreateTab({ Name = "Settings", Icon = "lucide-settings-2" })
 
-	Window:CreateSection(MainTab.Left, "Farm Settings", GenesisX.Theme.Warning, "lucide-settings")
+	local function createUiSection(parent, text, icon)
+		local section = Window:CreateSection(parent, {
+			Text = text,
+			Icon = icon,
+		})
+		return section.Content
+	end
 
-	SomeRandomLabel = Window:CreateLabel(MainTab.Left, {
-		Text = "sh: thanks for use our script!\010\226\128\148 use; / on the chat.\010\226\128\148 youll like it!",
-		Color = SpectrumX.Theme.Success,
+	-- Farm is ordered by the same ownership/priority model used by the backend.
+	uiSections.farmGeneral = createUiSection(uiSections.FarmTab.Left, "General", "lucide-settings")
+	uiSections.farmLevel = createUiSection(uiSections.FarmTab.Left, "Level", "lucide-trending-up")
+	uiSections.farmMaterial = createUiSection(uiSections.FarmTab.Left, "Materials", "lucide-package")
+	uiSections.farmBoss = createUiSection(uiSections.FarmTab.Left, "Bosses", "lucide-swords")
+	if game.PlaceId == 6381829480 then
+		uiSections.farmSpecialBoss = createUiSection(uiSections.FarmTab.Right, "Special Bosses", "lucide-crown")
+	end
+	uiSections.farmNearby = createUiSection(uiSections.FarmTab.Right, "Nearby Targets", "lucide-locate-fixed")
+	if game.PlaceId == 15759515082 then
+		uiSections.farmPearl = createUiSection(uiSections.FarmTab.Right, "Pearls", "lucide-gem")
+	end
+	uiSections.farmFishing = createUiSection(uiSections.FarmTab.Right, "Fishing", "lucide-waves")
+
+	uiSections.combatHaki = createUiSection(uiSections.CombatTab.Left, "Haki", "lucide-shield")
+	uiSections.combatSkills = createUiSection(uiSections.CombatTab.Left, "Skills", "lucide-swords")
+	uiSections.combatRace = createUiSection(uiSections.CombatTab.Right, "Race Ability", "lucide-activity")
+	uiSections.combatUtility = createUiSection(uiSections.CombatTab.Right, "Movement & Fruit Methods", "lucide-move")
+
+	if game.PlaceId == 6381829480 or game.PlaceId == 15759515082 then
+		uiSections.eventMajor = createUiSection(uiSections.EventsTab.Left, "Major Sea Events", "lucide-waves")
+	end
+	uiSections.eventRaid = createUiSection(uiSections.EventsTab.Left, "World & Raid Bosses", "lucide-crown")
+	uiSections.eventSerpent = createUiSection(uiSections.EventsTab.Left, "Serpent", "lucide-refresh-cw")
+	if game.PlaceId == 6381829480 or game.PlaceId == 15759515082 then
+		uiSections.eventGalleon = createUiSection(uiSections.EventsTab.Left, "Galleons", "lucide-sailboat")
+	end
+	uiSections.eventStatus = createUiSection(uiSections.EventsTab.Right, "Live Status", "lucide-activity")
+	uiSections.eventPriority = createUiSection(uiSections.EventsTab.Right, "Automation Priority", "lucide-list-ordered")
+	uiSections.eventConquest = createUiSection(uiSections.EventsTab.Right, "Crew Conquest", "lucide-flag")
+	Window:CreateLabel(uiSections.eventPriority, {
+		Text = "Active Dungeon > Major Sea Events > World/Raid Bosses > Serpent > Galleons > Dungeon Entry > Fishing",
+		Color = SpectrumX.Theme.TextSecondary,
+		Wrapped = true,
 	})
 
-	Window:CreateMultiDropdown(MainTab.Left, {
+	uiSections.dungeonEntry = createUiSection(uiSections.DungeonTab.Left, "Entry", "lucide-log-in")
+	uiSections.dungeonSafety = createUiSection(uiSections.DungeonTab.Left, "Safety", "lucide-shield")
+	uiSections.dungeonLoadout = createUiSection(uiSections.DungeonTab.Right, "Loadout & Attacks", "lucide-swords")
+	uiSections.dungeonPosition = createUiSection(uiSections.DungeonTab.Right, "Positioning", "lucide-locate-fixed")
+	uiSections.dungeonGuide = createUiSection(uiSections.DungeonTab.Right, "Shared Combat Settings", "lucide-info")
+
+	if game.PlaceId == 4520749081 then
+		uiSections.progressSea = createUiSection(uiSections.ProgressTab.Left, "Second Sea", "lucide-waves")
+	elseif game.PlaceId == 6381829480 then
+		uiSections.progressSea = createUiSection(uiSections.ProgressTab.Left, "Third Sea", "lucide-waves")
+	end
+	if game.PlaceId == 6381829480 then
+		uiSections.progressHaki = createUiSection(uiSections.ProgressTab.Left, "Haki V2", "lucide-shield")
+	end
+	if game.PlaceId == 15759515082 then
+		uiSections.progressDaily = createUiSection(uiSections.ProgressTab.Left, "Daily Quests", "lucide-calendar-check")
+	end
+	uiSections.progressStats = createUiSection(uiSections.ProgressTab.Right, "Stat Distribution", "lucide-signal-high")
+	uiSections.progressPassives = createUiSection(uiSections.ProgressTab.Right, "Passives", "lucide-book")
+	uiSections.progressPlayer = createUiSection(uiSections.ProgressTab.Right, "Player Utilities", "lucide-gamepad")
+
+	uiSections.itemFruits = createUiSection(uiSections.ItemsTab.Left, "Fruit Automation", "lucide-apple")
+	uiSections.itemKeys = createUiSection(uiSections.ItemsTab.Left, "Keys", "lucide-key")
+	uiSections.itemRandomFruit = createUiSection(uiSections.ItemsTab.Left, "Random Fruits", "lucide-japanese-yen")
+	uiSections.itemMaterials = createUiSection(uiSections.ItemsTab.Right, "Material Dealer", "lucide-leaf")
+	uiSections.itemStyles = createUiSection(uiSections.ItemsTab.Right, "Fighting Styles", "lucide-moon")
+
+	uiSections.teleportIslands = createUiSection(uiSections.TeleportTab.Left, "Island Teleports", "lucide-map")
+	uiSections.teleportLocations = createUiSection(uiSections.TeleportTab.Right, "Location Teleports", "lucide-map-pin")
+	if game.PlaceId == 15759515082 then
+		uiSections.teleportRace = createUiSection(uiSections.TeleportTab.Right, "Race Island", "lucide-flag")
+	end
+
+	uiSections.settingsDisplay = createUiSection(uiSections.SettingsTab.Left, "Display & Performance", "lucide-gauge")
+	uiSections.settingsPersistence = createUiSection(uiSections.SettingsTab.Left, "Teleport Persistence", "lucide-refresh-cw")
+	uiSections.settingsScript = createUiSection(uiSections.SettingsTab.Right, "Script Control", "lucide-power")
+	Window:CreateLabel(uiSections.settingsScript, {
+		Text = "Stops Genesis workers, disconnects tracked events, releases movement locks, and removes the UI. Saved settings are kept.",
+		Color = SpectrumX.Theme.TextSecondary,
+		Wrapped = true,
+	})
+	Window:CreateButton(uiSections.settingsScript, {
+		Text = "Unload Script",
+		Style = "danger",
+		Callback = function()
+			local runtime = getGenesisRuntimeState()
+			if runtime and type(runtime.unload) == "function" then
+				runtime.unload()
+			else
+				warn("[GENESIS HUB] No active runtime was found to unload.")
+			end
+		end,
+	})
+
+	Window:CreateMultiDropdown(uiSections.farmGeneral, {
 		Label = "Select Tools",
 		Options = { "Mele", "Sword", "Fruit" },
 		Default = GetSetting("selectedTools") or { "Mele" },
@@ -13028,7 +13629,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateDropdown(MainTab.Left, {
+	Window:CreateDropdown(uiSections.farmGeneral, {
 		Label = "Farm Method",
 		Options = { "Default (Smart)", "Sigma (Smooth)" },
 		Default = GetSetting("farmMethod") or "Default (Smart)",
@@ -13044,7 +13645,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSlider(MainTab.Left, {
+	Window:CreateSlider(uiSections.farmGeneral, {
 		Text = "Tool Switch Speed (sec)",
 		Min = 0.1,
 		Max = 2,
@@ -13055,7 +13656,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSlider(MainTab.Left, {
+	Window:CreateSlider(uiSections.farmGeneral, {
 		Text = "Farm Distance",
 		Min = 1,
 		Max = 50,
@@ -13065,7 +13666,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(MainTab.Left, {
+	Window:CreateToggle(uiSections.farmMaterial, {
 		Text = "Auto Take Quest",
 		Default = GetSetting("getQuestMaterial") or false,
 		Callback = function(state)
@@ -13073,9 +13674,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(MainTab.Left, "Haki Settings", GenesisX.Theme.Warning, "lucide-settings")
-
-	Window:CreateToggle(MainTab.Left, {
+	Window:CreateToggle(uiSections.combatHaki, {
 		Text = "Buso (Armament)",
 		Default = GetSetting("buso"),
 		Callback = function(state)
@@ -13083,7 +13682,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(MainTab.Left, {
+	Window:CreateToggle(uiSections.combatHaki, {
 		Text = "Ken (Observation)",
 		Default = GetSetting("ken"),
 		Callback = function(state)
@@ -13091,7 +13690,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(MainTab.Left, {
+	Window:CreateToggle(uiSections.combatHaki, {
 		Text = "Hao (Conqueror's)",
 		Default = GetSetting("hao"),
 		Callback = function(state)
@@ -13099,9 +13698,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(MainTab.Left, "Funny Settings", GenesisX.Theme.Warning, "lucide-settings")
-
-	Window:CreateToggle(MainTab.Left, {
+	Window:CreateToggle(uiSections.combatUtility, {
 		Text = "Walk On Water",
 		Default = GetSetting("walkOnWater"),
 		Callback = function(state)
@@ -13109,7 +13706,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(MainTab.Left, {
+	Window:CreateToggle(uiSections.combatUtility, {
 		Text = "V Method (Zoan & Ope)",
 		Default = GetSetting("opeMethod") or false,
 		Callback = function(state)
@@ -13117,17 +13714,15 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(MainTab.Left, "Race Settings", GenesisX.Theme.Warning, "lucide-settings")
-
-	Window:CreateToggle(MainTab.Left, {
-		Text = "Auto Active Race",
+	Window:CreateToggle(uiSections.combatRace, {
+		Text = "Auto Activate Race",
 		Default = GetSetting("autoRaceV3") or false,
 		Callback = function(state)
 			saveAndApply("autoRaceV3", state)
 		end,
 	})
 
-	Window:CreateSlider(MainTab.Left, {
+	Window:CreateSlider(uiSections.combatRace, {
 		Text = "HP% to Activate Race",
 		Min = 1,
 		Max = 100,
@@ -13138,15 +13733,13 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateLabel(MainTab.Left, {
+	Window:CreateLabel(uiSections.combatRace, {
 		Text = "\240\159\146\161 It is recommended that you have the Sea Beast Race.",
 		Color = SpectrumX.Theme.TextSecondary,
 		Size = UDim2.new(1, 0, 0, 40),
 	})
 
-	Window:CreateSection(MainTab.Right, "Some Misc Function", GenesisX.Theme.Warning, "lucide-refresh-cw")
-
-	Window:CreateToggle(MainTab.Right, {
+	Window:CreateToggle(uiSections.settingsPersistence, {
 		Text = "Auto Execute (After Server Switch)",
 		Default = GetSetting("autoExecuteAfterTeleport") or false,
 		Callback = function(state)
@@ -13175,9 +13768,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(MainTab.Right, "Level Farm", GenesisX.Theme.Danger, "lucide-swords")
-
-	Window:CreateToggle(MainTab.Right, {
+	Window:CreateToggle(uiSections.farmLevel, {
 		Text = "Auto Farm Level",
 		Default = GetSetting("auto_farm") or false,
 		Callback = function(state)
@@ -13185,12 +13776,10 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(MainTab.Right, "Material Farm", GenesisX.Theme.Danger, "lucide-swords")
-
 	local materialOptions = getMaterialsForCurrentSea()
 	local defaultMaterial = GetSetting("material") or materialOptions[1] or "Leather"
 
-	Window:CreateDropdown(MainTab.Right, {
+	Window:CreateDropdown(uiSections.farmMaterial, {
 		Label = "Select Material",
 		Options = materialOptions,
 		Default = defaultMaterial,
@@ -13199,7 +13788,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(MainTab.Right, {
+	Window:CreateToggle(uiSections.farmMaterial, {
 		Text = "Farm Material",
 		Default = GetSetting("farmmaterial") or false,
 		Callback = function(state)
@@ -13207,12 +13796,10 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(MainTab.Right, "Boss Farm", GenesisX.Theme.Danger, "lucide-swords")
-
 	local bossOptions, bossDataTable = getBossesForDropdown()
 	local defaultBoss = GetSetting("selectedBoss") or (bossOptions[1] or "Select Boss")
 
-	Window:CreateDropdown(MainTab.Right, {
+	Window:CreateDropdown(uiSections.farmBoss, {
 		Label = "Select Boss",
 		Options = bossOptions,
 		Default = defaultBoss,
@@ -13225,7 +13812,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(MainTab.Right, {
+	Window:CreateToggle(uiSections.farmBoss, {
 		Text = "Auto Farm Selected Boss",
 		Default = GetSetting("autoFarmBoss") or false,
 		Callback = function(state)
@@ -13250,9 +13837,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(MainTab.Right, "Fishing Farm", GenesisX.Theme.Warning, "lucide-swords")
-
-	local fishPositionLabel = Window:CreateLabel(MainTab.Right, {
+	local fishPositionLabel = Window:CreateLabel(uiSections.farmFishing, {
 		Text = "Pos: Not Set",
 		Color = SpectrumX.Theme.TextSecondary,
 		Size = UDim2.new(1, 0, 0, 25),
@@ -13275,7 +13860,7 @@ local function run(B, T, P, DfT, ...)
 		end)
 	end
 
-	Window:CreateButton(MainTab.Right, {
+	Window:CreateButton(uiSections.farmFishing, {
 		Text = "Save Fishing Position",
 		Callback = function()
 			local root = GetRoot(LocalPlayer.Character)
@@ -13300,7 +13885,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(MainTab.Right, {
+	Window:CreateToggle(uiSections.farmFishing, {
 		Text = "Auto Fish (Perfect Catch)",
 		Default = GetSetting("autoFish") or false,
 		Callback = function(state)
@@ -13308,7 +13893,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(MainTab.Right, {
+	Window:CreateToggle(uiSections.farmFishing, {
 		Text = "In Serpent Whirlpool",
 		Default = GetSetting("inSerpentWhirlpool") or false,
 		Callback = function(state)
@@ -13316,7 +13901,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(MainTab.Right, {
+	Window:CreateToggle(uiSections.farmFishing, {
 		Text = "Fish Between Boss Spawns",
 		Default = GetSetting("fishWhenNotSpawned") or false,
 		Callback = function(state)
@@ -13324,9 +13909,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(MainTab.Right, "Alternative Farm", GenesisX.Theme.Warning, "lucide-swords")
-
-	Window:CreateToggle(MainTab.Right, {
+	Window:CreateToggle(uiSections.farmBoss, {
 		Text = "Auto Farm Bounty (Legit)",
 		Default = GetSetting("easybounty") or false,
 		Callback = function(state)
@@ -13340,9 +13923,7 @@ local function run(B, T, P, DfT, ...)
 	})
 
 	if game.PlaceId == 15759515082 then
-		Window:CreateSection(MainTab.Right, "Pearl Farm", GenesisX.Theme.Warning, "lucide-swords")
-
-		Window:CreateToggle(MainTab.Right, {
+		Window:CreateToggle(uiSections.farmPearl, {
 			Text = "Auto Collect Pearl",
 			Default = GetSetting("autoCollectPearl") or false,
 			Callback = function(state)
@@ -13351,9 +13932,7 @@ local function run(B, T, P, DfT, ...)
 		})
 	end
 
-	Window:CreateSection(MainTab.Right, "Utilities Farm", GenesisX.Theme.Warning, "lucide-swords")
-
-	Window:CreateSlider(MainTab.Right, {
+	Window:CreateSlider(uiSections.farmNearby, {
 		Text = "Detection Distance",
 		Min = 50,
 		Max = 10000,
@@ -13363,7 +13942,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(MainTab.Right, {
+	Window:CreateToggle(uiSections.farmBoss, {
 		Text = "Auto Kill All Bosses",
 		Default = GetSetting("allboss") or false,
 		Callback = function(state)
@@ -13371,7 +13950,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(MainTab.Right, {
+	Window:CreateToggle(uiSections.farmNearby, {
 		Text = "Auto Kill Nearby Mobs",
 		Default = GetSetting("autoKillMobs") or false,
 		Callback = function(state)
@@ -13379,51 +13958,49 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(StatsTab.Left, "Skills Settings", GenesisX.Theme.Warning, "lucide-shield")
-
-	Window:CreateToggle(StatsTab.Left, {
+	Window:CreateToggle(uiSections.combatSkills, {
 		Text = "Skill Z",
 		Default = GetSetting("z"),
 		Callback = function(state)
 			saveAndApply("z", state)
 		end,
 	})
-	Window:CreateToggle(StatsTab.Left, {
+	Window:CreateToggle(uiSections.combatSkills, {
 		Text = "Skill X",
 		Default = GetSetting("x"),
 		Callback = function(state)
 			saveAndApply("x", state)
 		end,
 	})
-	Window:CreateToggle(StatsTab.Left, {
+	Window:CreateToggle(uiSections.combatSkills, {
 		Text = "Skill C",
 		Default = GetSetting("c"),
 		Callback = function(state)
 			saveAndApply("c", state)
 		end,
 	})
-	Window:CreateToggle(StatsTab.Left, {
+	Window:CreateToggle(uiSections.combatSkills, {
 		Text = "Skill V",
 		Default = GetSetting("v"),
 		Callback = function(state)
 			saveAndApply("v", state)
 		end,
 	})
-	Window:CreateToggle(StatsTab.Left, {
+	Window:CreateToggle(uiSections.combatSkills, {
 		Text = "Skill F",
 		Default = GetSetting("f"),
 		Callback = function(state)
 			saveAndApply("f", state)
 		end,
 	})
-	Window:CreateToggle(StatsTab.Left, {
+	Window:CreateToggle(uiSections.combatSkills, {
 		Text = "Skill B",
 		Default = GetSetting("b"),
 		Callback = function(state)
 			saveAndApply("b", state)
 		end,
 	})
-	Window:CreateToggle(StatsTab.Left, {
+	Window:CreateToggle(uiSections.combatSkills, {
 		Text = "Skill E",
 		Default = GetSetting("e"),
 		Callback = function(state)
@@ -13431,9 +14008,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(StatsTab.Right, "Statistics Points", GenesisX.Theme.Warning, "lucide-signal-high")
-
-	Window:CreateNumberInput(StatsTab.Right, {
+	Window:CreateNumberInput(uiSections.progressStats, {
 		Label = "Point Quantity",
 		Default = GetSetting("distributeValue") or 1,
 		Min = 1,
@@ -13443,7 +14018,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(StatsTab.Right, {
+	Window:CreateToggle(uiSections.progressStats, {
 		Text = "Auto Distribute",
 		Default = GetSetting("autoDistribute") or false,
 		Callback = function(state)
@@ -13451,7 +14026,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(StatsTab.Right, {
+	Window:CreateToggle(uiSections.progressStats, {
 		Text = "In Melee",
 		Default = GetSetting("autoMelee") or false,
 		Callback = function(state)
@@ -13459,7 +14034,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(StatsTab.Right, {
+	Window:CreateToggle(uiSections.progressStats, {
 		Text = "In Defense",
 		Default = GetSetting("autoDefense") or false,
 		Callback = function(state)
@@ -13467,7 +14042,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(StatsTab.Right, {
+	Window:CreateToggle(uiSections.progressStats, {
 		Text = "In Sword",
 		Default = GetSetting("autoSword") or false,
 		Callback = function(state)
@@ -13475,7 +14050,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(StatsTab.Right, {
+	Window:CreateToggle(uiSections.progressStats, {
 		Text = "In Fruit",
 		Default = GetSetting("autoFruit") or false,
 		Callback = function(state)
@@ -13483,65 +14058,55 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(EventsTab.Right, "Raid Bosses Spawn Status", GenesisX.Theme.Warning, "lucide-waves")
-
-	raidStatusLabel = Window:CreateLabel(EventsTab.Right, {
+	raidStatusLabel = Window:CreateLabel(uiSections.eventStatus, {
 		Text = "Spawned: None",
 		Color = SpectrumX.Theme.TextSecondary,
 		Wrapped = true,
 	})
 
 	if game.PlaceId == 15759515082 then
-		Window:CreateSection(EventsTab.Right, "Race Island Spawn Status", GenesisX.Theme.Warning, "lucide-waves")
-
-		RaceIslandStatusLabel = Window:CreateLabel(EventsTab.Right, {
+		RaceIslandStatusLabel = Window:CreateLabel(uiSections.eventStatus, {
 			Text = "Race Island:",
 			Color = SpectrumX.Theme.TextSecondary,
 			Size = UDim2.new(1, 0, 0, 25),
 		})
 	end
 
-	Window:CreateSection(EventsTab.Right, "Serpent & Whirlpool Spawn Status", GenesisX.Theme.Warning, "lucide-waves")
-
-	local serpentTimerLabel = Window:CreateLabel(EventsTab.Right, {
+	local serpentTimerLabel = Window:CreateLabel(uiSections.eventStatus, {
 		Text = "Serpent: --:--",
 		Color = SpectrumX.Theme.TextSecondary,
 		Wrapped = true,
 	})
 
-	Window:CreateSection(EventsTab.Right, "Sea Events Spawn Status", GenesisX.Theme.Warning, "lucide-waves")
-
 	if game.PlaceId == 6381829480 then
-		SeaKingTimerLabel = Window:CreateLabel(EventsTab.Right, {
+		SeaKingTimerLabel = Window:CreateLabel(uiSections.eventStatus, {
 			Text = "Sea King: --:--",
 			Color = SpectrumX.Theme.Warning,
 			Size = UDim2.new(1, 0, 0, 20),
 		})
 
-		GhostShipTimerLabel = Window:CreateLabel(EventsTab.Right, {
+		GhostShipTimerLabel = Window:CreateLabel(uiSections.eventStatus, {
 			Text = "Ghost Ship: --:--",
 			Color = SpectrumX.Theme.Warning,
 			Size = UDim2.new(1, 0, 0, 20),
 		})
 	elseif game.PlaceId == 15759515082 then
-		Sea3EventsTimerLabel = Window:CreateLabel(EventsTab.Right, {
+		Sea3EventsTimerLabel = Window:CreateLabel(uiSections.eventStatus, {
 			Text = "Set Sail: --:--",
 			Color = SpectrumX.Theme.Warning,
 			Size = UDim2.new(1, 0, 0, 25),
 		})
 
-		GalleonStatusLabel = Window:CreateLabel(EventsTab.Right, {
+		GalleonStatusLabel = Window:CreateLabel(uiSections.eventStatus, {
 			Text = "Galleon: \240\159\148\180 Spawns Soon",
 			Color = SpectrumX.Theme.Warning,
 			Size = UDim2.new(1, 0, 0, 25),
 		})
 	end
 
-	Window:CreateSection(EventsTab.Left, "Raid Bosses", GenesisX.Theme.Warning, "lucide-skull")
-
 	local bosses = raidBossSettings[game.PlaceId] or {}
 	for _, boss in ipairs(bosses) do
-		Window:CreateToggle(EventsTab.Left, {
+		Window:CreateToggle(uiSections.eventRaid, {
 			Text = "Auto Kill " .. boss.name,
 			Default = GetSetting(boss.key) or false,
 			Callback = function(state)
@@ -13550,9 +14115,7 @@ local function run(B, T, P, DfT, ...)
 		})
 	end
 
-	Window:CreateSection(EventsTab.Left, "Sea Events", GenesisX.Theme.Warning, "lucide-skull")
-
-	Window:CreateToggle(EventsTab.Left, {
+	Window:CreateToggle(uiSections.eventSerpent, {
 		Text = "Auto Kill Serpent",
 		Default = GetSetting("autoHuntSerpent") or false,
 		Callback = function(state)
@@ -13561,7 +14124,7 @@ local function run(B, T, P, DfT, ...)
 	})
 
 	if game.PlaceId == 6381829480 then
-		Window:CreateToggle(EventsTab.Left, {
+		Window:CreateToggle(uiSections.eventMajor, {
 			Text = "Auto Kill Sea King & Hydra",
 			Default = GetSetting("autoSKHD") or false,
 			Callback = function(state)
@@ -13569,29 +14132,37 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateToggle(EventsTab.Left, {
+		Window:CreateToggle(uiSections.eventGalleon, {
 			Text = "Auto Kill Ghost Ship",
 			Default = GetSetting("autoGhostShip") or false,
 			Callback = function(state)
 				saveAndApply("autoGhostShip", state)
 			end,
 		})
+
+		Window:CreateToggle(uiSections.eventGalleon, {
+			Text = "Auto Hop After Ghost Ship Loot",
+			Default = GetSetting("autoHopSeaBosses") or false,
+			Callback = function(state)
+				saveAndApply("autoHopSeaBosses", state)
+			end,
+		})
 	elseif game.PlaceId == 15759515082 then
-		Window:CreateToggle(EventsTab.Left, {
+		Window:CreateToggle(uiSections.eventMajor, {
 			Text = "Auto Kill Kraken",
 			Default = GetSetting("autoKillKraken") or false,
 			Callback = function(state)
 				saveAndApply("autoKillKraken", state)
 			end,
 		})
-		Window:CreateToggle(EventsTab.Left, {
+		Window:CreateToggle(uiSections.eventMajor, {
 			Text = "Auto Kill Drakenfyr",
 			Default = GetSetting("autoKillDrakenfyr") or false,
 			Callback = function(state)
 				saveAndApply("autoKillDrakenfyr", state)
 			end,
 		})
-		Window:CreateToggle(EventsTab.Left, {
+		Window:CreateToggle(uiSections.eventMajor, {
 			Text = "Auto Kill Abyssal Tyrant",
 			Default = GetSetting("autoKillAbyssalTyrant") or false,
 			Callback = function(state)
@@ -13601,30 +14172,18 @@ local function run(B, T, P, DfT, ...)
 				end
 			end,
 		})
-		Window:CreateToggle(EventsTab.Left, {
+		Window:CreateToggle(uiSections.eventMajor, {
 			Text = "Auto Kill Deepsea Crusher",
 			Default = GetSetting("autoKillDeepseaCrusher") or false,
 			Callback = function(state)
 				saveAndApply("autoKillDeepseaCrusher", state)
 			end,
 		})
-		Window:CreateToggle(EventsTab.Left, {
+		Window:CreateToggle(uiSections.eventGalleon, {
 			Text = "Auto Kill Galleons",
 			Default = GetSetting("autoKillGalleons") or false,
 			Callback = function(state)
 				saveAndApply("autoKillGalleons", state)
-			end,
-		})
-	end
-
-	if game.PlaceId == 15759515082 then
-		Window:CreateSection(EventsTab.Left, "Race", GenesisX.Theme.Warning, "lucide-waves")
-
-		Window:CreateToggle(EventsTab.Left, {
-			Text = "Teleport to Race Island",
-			Default = GetSetting("autoRaceIsland") or false,
-			Callback = function(state)
-				saveAndApply("autoRaceIsland", state)
 			end,
 		})
 	end
@@ -13634,8 +14193,8 @@ local function run(B, T, P, DfT, ...)
 		_smartHopHasAccess = hasSmartHopAccess() == true
 	end)
 
-	local smartHopSection = Window:CreateSection(EventsTab.Right, {
-		Text = "Events & Bosses Finder (Premium Only)",
+	local smartHopSection = Window:CreateSection(uiSections.ServerTab.Right, {
+		Text = "Smart Hop (Premium)",
 		Icon = "lucide-crown",
 		Locked = not _smartHopHasAccess,
 	})
@@ -13768,9 +14327,7 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
-	Window:CreateSection(ShopTab.Left, "Key Shopping", GenesisX.Theme.Warning, "lucide-key")
-
-	Window:CreateDropdown(ShopTab.Left, {
+	Window:CreateDropdown(uiSections.itemKeys, {
 		Label = "Select Key Type",
 		Options = { "Copper Key", "Iron Key", "Gold Key", "Platinum Key" },
 		Default = GetSetting("key1") or "Copper Key",
@@ -13779,7 +14336,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSlider(ShopTab.Left, {
+	Window:CreateSlider(uiSections.itemKeys, {
 		Text = "Amount to Buy",
 		Min = 1,
 		Max = 99,
@@ -13789,7 +14346,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(ShopTab.Left, {
+	Window:CreateToggle(uiSections.itemKeys, {
 		Text = "Auto Buy Keys",
 		Default = GetSetting("buykey") or false,
 		Callback = function(state)
@@ -13797,9 +14354,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(ShopTab.Left, "Random Fruits", GenesisX.Theme.Warning, "lucide-japanese-yen")
-
-	Window:CreateDropdown(ShopTab.Left, {
+	Window:CreateDropdown(uiSections.itemRandomFruit, {
 		Label = "Key for Random",
 		Options = { "Copper Key", "Iron Key", "Gold Key", "Platinum Key" },
 		Default = GetSetting("key2") or "Copper Key",
@@ -13808,7 +14363,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(ShopTab.Left, {
+	Window:CreateToggle(uiSections.itemRandomFruit, {
 		Text = "Random Fruit x1",
 		Default = GetSetting("random1") or false,
 		Callback = function(state)
@@ -13816,7 +14371,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(ShopTab.Left, {
+	Window:CreateToggle(uiSections.itemRandomFruit, {
 		Text = "Random Fruit x3",
 		Default = GetSetting("random3") or false,
 		Callback = function(state)
@@ -13824,7 +14379,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(ShopTab.Left, {
+	Window:CreateToggle(uiSections.itemRandomFruit, {
 		Text = "Random Fruit x10",
 		Default = GetSetting("random10") or false,
 		Callback = function(state)
@@ -13832,9 +14387,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(ShopTab.Right, "Material Dealer", GenesisX.Theme.Warning, "lucide-leaf")
-
-	Window:CreateButton(ShopTab.Right, {
+	Window:CreateButton(uiSections.itemMaterials, {
 		Text = "Open Material Shop",
 		Callback = function()
 			pcall(function()
@@ -13845,7 +14398,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	local materialDropdown = Window:CreateMultiDropdown(ShopTab.Right, {
+	local materialDropdown = Window:CreateMultiDropdown(uiSections.itemMaterials, {
 		Label = "Select Materials",
 		Options = {
 			"Dragon's Orb",
@@ -13892,7 +14445,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateButton(ShopTab.Right, {
+	Window:CreateButton(uiSections.itemMaterials, {
 		Text = "Select All",
 		Callback = function()
 			local allMaterials = {
@@ -13947,7 +14500,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateButton(ShopTab.Right, {
+	Window:CreateButton(uiSections.itemMaterials, {
 		Text = "Clear All",
 		Callback = function()
 			if materialDropdown and materialDropdown.SetValues then
@@ -13962,25 +14515,18 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSlider(ShopTab.Right, {
-		Text = "Buy Quantity",
-		Min = 1,
-		Max = 1,
-		Default = GetSetting("materialBuyCount") or 1,
-		Callback = function(value)
-			saveAndApply("materialBuyCount", value)
-		end,
+	Window:CreateLabel(uiSections.itemMaterials, {
+		Text = "Purchase Quantity: 1",
+		Color = SpectrumX.Theme.TextSecondary,
 	})
 
-	Window:CreateToggle(ShopTab.Right, {
+	Window:CreateToggle(uiSections.itemMaterials, {
 		Text = "Auto Buy Selected Materials",
 		Default = GetSetting("autoBuyMaterials") or false,
 		Callback = function(state)
 			saveAndApply("autoBuyMaterials", state)
 		end,
 	})
-
-	Window:CreateSection(ShopTab.Right, "Styles Shop", GenesisX.Theme.Warning, "lucide-moon")
 
 	local styles = {
 		{ name = "Electro", npc = "ElectroShop", tool = "Electro" },
@@ -14013,7 +14559,7 @@ local function run(B, T, P, DfT, ...)
 	local prevPosition = nil
 
 	for _, style in pairs(styles) do
-		Window:CreateButton(ShopTab.Right, {
+		Window:CreateButton(uiSections.itemStyles, {
 			Text = "Buy " .. style.name,
 			Callback = function()
 				if hasStyle(style.tool) then
@@ -14039,9 +14585,7 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	if game.PlaceId == 6381829480 then
-		Window:CreateSection(AutoTab.Left, "Third Sea", GenesisX.Theme.Warning, "lucide-waves")
-
-		Window:CreateToggle(AutoTab.Left, {
+		Window:CreateToggle(uiSections.progressSea, {
 			Text = "Auto Third Sea",
 			Default = GetSetting("autoThirdSea") or false,
 			Callback = function(state)
@@ -14053,9 +14597,9 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		local labelNivel = Window:CreateLabel(AutoTab.Left, { Text = " \226\128\148 Level: 0/4000" })
-		local labelHeart = Window:CreateLabel(AutoTab.Left, { Text = " \226\128\148 Heart of Sea: 0" })
-		local labelStatus = Window:CreateLabel(AutoTab.Left, { Text = " \226\128\148 Third Sea Not Unlocked" })
+		local labelNivel = Window:CreateLabel(uiSections.progressSea, { Text = "Level: 0/4000" })
+		local labelHeart = Window:CreateLabel(uiSections.progressSea, { Text = "Heart of Sea: 0" })
+		local labelStatus = Window:CreateLabel(uiSections.progressSea, { Text = "Third Sea Not Unlocked" })
 
 		spawn(function()
 			while task.wait(1) do
@@ -14103,9 +14647,8 @@ local function run(B, T, P, DfT, ...)
 		end)
 	end
 
-	if game.PlaceId == 6381829480 then
-		Window:CreateSection(AutoTab.Left, "Third Sea", GenesisX.Theme.Warning, "lucide-waves")
-		Window:CreateToggle(AutoTab.Left, {
+	if game.PlaceId == 4520749081 then
+		Window:CreateToggle(uiSections.progressSea, {
 			Text = "Auto Second Sea",
 			Default = GetSetting("autoSecondSea") or false,
 			Callback = function(state)
@@ -14115,12 +14658,10 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	if game.PlaceId == 6381829480 then
-		Window:CreateSection(AutoTab.Left, "Haki V2 Unlock", GenesisX.Theme.Warning, "lucide-shield")
+		local kenV2StatusLabel = Window:CreateLabel(uiSections.progressHaki, { Text = "Ken V2: Idle" })
+		local busoV2StatusLabel = Window:CreateLabel(uiSections.progressHaki, { Text = "Buso V2: Idle" })
 
-		local kenV2StatusLabel = Window:CreateLabel(AutoTab.Left, { Text = "Ken V2: Idle" })
-		local busoV2StatusLabel = Window:CreateLabel(AutoTab.Left, { Text = "Buso V2: Idle" })
-
-		Window:CreateToggle(AutoTab.Left, {
+		Window:CreateToggle(uiSections.progressHaki, {
 			Text = "Auto Unlock Buso V2",
 			Default = GetSetting("autoBusoV2") or false,
 			Callback = function(state)
@@ -14132,7 +14673,7 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateToggle(AutoTab.Left, {
+		Window:CreateToggle(uiSections.progressHaki, {
 			Text = "Auto Unlock Ken V2 (Observation)",
 			Default = GetSetting("autoKenV2") or false,
 			Callback = function(state)
@@ -14157,9 +14698,7 @@ local function run(B, T, P, DfT, ...)
 			end
 		end)
 
-		Window:CreateSection(AutoTab.Right, "Boss Farm", GenesisX.Theme.Warning, "lucide-swords")
-
-		Window:CreateToggle(AutoTab.Right, {
+		Window:CreateToggle(uiSections.farmSpecialBoss, {
 			Text = "Auto Farm Kaido",
 			Default = GetSetting("autoFarmKaido") or false,
 			Callback = function(state)
@@ -14167,7 +14706,7 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateToggle(AutoTab.Right, {
+		Window:CreateToggle(uiSections.farmSpecialBoss, {
 			Text = "Auto Farm Crimson Demon",
 			Default = GetSetting("autoCrimsonDemon") or false,
 			Callback = function(state)
@@ -14175,7 +14714,7 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateToggle(AutoTab.Right, {
+		Window:CreateToggle(uiSections.farmSpecialBoss, {
 			Text = "Auto Farm Ice King",
 			Default = GetSetting("autoIceKing") or false,
 			Callback = function(state)
@@ -14183,7 +14722,7 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateToggle(AutoTab.Right, {
+		Window:CreateToggle(uiSections.farmSpecialBoss, {
 			Text = "Auto Farm Dark Beard",
 			Default = GetSetting("autoDarkBeard") or false,
 			Callback = function(state)
@@ -14192,10 +14731,8 @@ local function run(B, T, P, DfT, ...)
 		})
 	end
 
-	Window:CreateSection(AutoTab.Left, "Other Automation", GenesisX.Theme.Warning, "lucide-bot")
-
 	if game.PlaceId == 15759515082 then
-		Window:CreateToggle(AutoTab.Left, {
+		Window:CreateToggle(uiSections.progressDaily, {
 			Text = "Auto Daily Quest",
 			Default = GetSetting("autoDailyQuest") or false,
 			Callback = function(state)
@@ -14208,9 +14745,7 @@ local function run(B, T, P, DfT, ...)
 		})
 	end
 
-	Window:CreateSection(AutoTab.Right, "Fruits", GenesisX.Theme.Warning, "lucide-apple")
-
-	Window:CreateToggle(AutoTab.Right, {
+	Window:CreateToggle(uiSections.itemFruits, {
 		Text = "Bring Fruits (Auto Collect)",
 		Default = GetSetting("bringFruits") or false,
 		Callback = function(state)
@@ -14218,7 +14753,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(AutoTab.Right, {
+	Window:CreateToggle(uiSections.itemFruits, {
 		Text = "Auto Store Fruits",
 		Default = GetSetting("autoStoreFruits") or false,
 		Callback = function(state)
@@ -14226,10 +14761,8 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(AutoTab.Right, "Performance", GenesisX.Theme.Warning, "lucide-gauge")
-
-	Window:CreateToggle(AutoTab.Right, {
-		Text = "Hide Notify (Good)",
+	Window:CreateToggle(uiSections.settingsDisplay, {
+		Text = "Hide Game Notifications",
 		Default = GetSetting("hideNotify") or false,
 		Callback = function(state)
 			saveAndApply("hideNotify", state)
@@ -14237,16 +14770,14 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(AutoTab.Right, {
-		Text = "Black Screen (Smooth)",
+	Window:CreateToggle(uiSections.settingsDisplay, {
+		Text = "Black Screen",
 		Default = GetSetting("blackScreen") or false,
 		Callback = function(state)
 			saveAndApply("blackScreen", state)
 			applyBlackScreen(state)
 		end,
 	})
-
-	Window:CreateSection(TeleportTab.Left, "Island Teleport", GenesisX.Theme.Warning, "lucide-map")
 
 	local islandDropdown = nil
 	local currentSeaIslands = {}
@@ -14265,14 +14796,14 @@ local function run(B, T, P, DfT, ...)
 		end
 	end
 
-	islandDropdown = Window:CreateDropdown(TeleportTab.Left, {
+	islandDropdown = Window:CreateDropdown(uiSections.teleportIslands, {
 		Label = "Islands List",
 		Options = islandsBySea[game.PlaceId] or {},
 		Default = (islandsBySea[game.PlaceId] or {})[1] or "",
 		Callback = function(selected) end,
 	})
 
-	Window:CreateButton(TeleportTab.Left, {
+	Window:CreateButton(uiSections.teleportIslands, {
 		Text = "Teleport To Island",
 		Style = "accent",
 		Callback = function()
@@ -14297,7 +14828,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateButton(TeleportTab.Left, {
+	Window:CreateButton(uiSections.teleportIslands, {
 		Text = "Teleport Back",
 		Style = "default",
 		Callback = function()
@@ -14311,7 +14842,25 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(TeleportTab.Left, "Location Teleports", GenesisX.Theme.Warning, "lucide-map-pin")
+	if game.PlaceId == 15759515082 then
+		Window:CreateButton(uiSections.teleportRace, {
+			Text = "Teleport to Race Island",
+			Style = "info",
+			Callback = function()
+				local root = GetRoot(LocalPlayer.Character)
+				local returnPosition = root and root.CFrame or nil
+				local ok, result = _G._GenesisTeleportToRaceIsland()
+				if ok then
+					_GBackPosition = returnPosition
+				end
+				SpectrumX:Notify({
+					Text = ok and ("Teleported to " .. tostring(result) .. " Race Island.") or tostring(result),
+					Type = ok and "success" or "warning",
+					Duration = 4,
+				})
+			end,
+		})
+	end
 
 	do
 		local locationTeleportOptions = {
@@ -14336,14 +14885,14 @@ local function run(B, T, P, DfT, ...)
 				),
 			},
 		}
-		local locationDropdown = Window:CreateDropdown(TeleportTab.Left, {
+		local locationDropdown = Window:CreateDropdown(uiSections.teleportLocations, {
 			Label = "Locations List",
 			Options = locationTeleportOptions,
 			Default = locationTeleportOptions[1],
 			Callback = function(selected) end,
 		})
 
-		Window:CreateButton(TeleportTab.Left, {
+		Window:CreateButton(uiSections.teleportLocations, {
 			Text = "Teleport To Location",
 			Style = "accent",
 			Callback = function()
@@ -14371,15 +14920,13 @@ local function run(B, T, P, DfT, ...)
 		})
 	end
 
-	Window:CreateSection(TeleportTab.Left, "Crew", GenesisX.Theme.Warning, "lucide-flag")
-
-	local conquestStatusLabel = Window:CreateLabel(TeleportTab.Left, {
+	local conquestStatusLabel = Window:CreateLabel(uiSections.eventConquest, {
 		Text = "Conquest: Idle",
 		Color = SpectrumX.Theme.TextSecondary,
 		Wrapped = true,
 	})
 
-	Window:CreateToggle(TeleportTab.Left, {
+	Window:CreateToggle(uiSections.eventConquest, {
 		Text = "Auto Conquest",
 		Default = GetSetting("autoConquest") or false,
 		Callback = function(state)
@@ -14387,7 +14934,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(TeleportTab.Left, {
+	Window:CreateToggle(uiSections.eventConquest, {
 		Text = "Auto Hop For Conquest",
 		Default = GetSetting("autoHopConquest") or false,
 		Callback = function(state)
@@ -14395,9 +14942,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(TeleportTab.Right, "Passives", GenesisX.Theme.Warning, "lucide-book")
-
-	Window:CreateDropdown(TeleportTab.Right, {
+	Window:CreateDropdown(uiSections.progressPassives, {
 		Label = "Select Book",
 		Options = { "Fate Book", "Essence Book", "Fortune Tales", "Chronicles Lore" },
 		Default = GetSetting("selectedPassiveBook") or "Chronicles Lore",
@@ -14406,7 +14951,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateMultiDropdown(TeleportTab.Right, {
+	Window:CreateMultiDropdown(uiSections.progressPassives, {
 		Label = "Target Passives",
 		Options = passiveOptions,
 		Default = GetSetting("selectedPassives") or {},
@@ -14415,7 +14960,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(TeleportTab.Right, {
+	Window:CreateToggle(uiSections.progressPassives, {
 		Text = "Auto Get Passives",
 		Default = GetSetting("autoGetPassives") or false,
 		Callback = function(state)
@@ -14462,8 +15007,7 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
-	Window:CreateSection(TeleportTab.Right, "Gamepasses", GenesisX.Theme.Warning, "lucide-gamepad")
-	Window:CreateDropdown(TeleportTab.Right, {
+	Window:CreateDropdown(uiSections.progressPlayer, {
 		Label = "Select Animation",
 		Options = { "Standard", "Annoy", "Egoistic", "Protagonist", "Undead", "Bashful", "Brawny" },
 		Default = GetSetting("selectedAnimation") or "Standard",
@@ -14472,7 +15016,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateToggle(TeleportTab.Right, {
+	Window:CreateToggle(uiSections.progressPlayer, {
 		Text = "Legacy Pose",
 		Default = GetSetting("freeLegacyPose") or false,
 		Callback = function(state)
@@ -14886,15 +15430,15 @@ local function run(B, T, P, DfT, ...)
 		end)
 	end
 
-	Window:CreateSection(ServerTab.Left, "Job ID System", GenesisX.Theme.Warning, "lucide-share")
+	local serverJobContent = createUiSection(uiSections.ServerTab.Left, "Job ID", "lucide-share")
 
-	Window:CreateLabel(ServerTab.Left, {
+	Window:CreateLabel(serverJobContent, {
 		Text = "Current Job ID:",
 		Color = GenesisX.Theme.TextSecondary,
 		Size = UDim2.new(1, 0, 0, 20),
 	})
 
-	local currentJobIdLabel = Window:CreateLabel(ServerTab.Left, {
+	local currentJobIdLabel = Window:CreateLabel(serverJobContent, {
 		Text = "Loading...",
 		Color = GenesisX.Theme.Info,
 		Size = UDim2.new(1, 0, 0, 40),
@@ -14908,7 +15452,7 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
-	Window:CreateButton(ServerTab.Left, {
+	Window:CreateButton(serverJobContent, {
 		Text = "Copy Current Job ID",
 		Callback = function()
 			pcall(function()
@@ -14918,9 +15462,9 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(ServerTab.Left, "Manual Connection", GenesisX.Theme.Warning, "lucide-gem")
+	local serverManualContent = createUiSection(uiSections.ServerTab.Left, "Manual Connection", "lucide-gem")
 
-	Window:CreateInput(ServerTab.Left, {
+	Window:CreateInput(serverManualContent, {
 		Label = "Enter Target Job ID",
 		Default = GetSetting("targetJobId") or "",
 		Placeholder = "Paste Job ID here...",
@@ -14929,7 +15473,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateButton(ServerTab.Left, {
+	Window:CreateButton(serverManualContent, {
 		Text = "Join Target Server",
 		Callback = function()
 			local targetJobId = GetSetting("targetJobId")
@@ -14960,31 +15504,31 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(ServerTab.Left, "Quick Actions", GenesisX.Theme.Warning, "lucide-ghost")
+	local serverQuickContent = createUiSection(uiSections.ServerTab.Left, "Quick Actions", "lucide-refresh-cw")
 
-	Window:CreateButton(ServerTab.Left, {
+	Window:CreateButton(serverQuickContent, {
 		Text = "Rejoin Current Server",
 		Callback = function()
 			TeleportService:Teleport(game.PlaceId, LocalPlayer)
 		end,
 	})
 
-	Window:CreateButton(ServerTab.Left, {
+	Window:CreateButton(serverQuickContent, {
 		Text = "Server Hop (Random)",
 		Callback = function()
 			serverHop()
 		end,
 	})
 
-	Window:CreateSection(ServerTab.Right, "Event Servers (Live)", GenesisX.Theme.Warning, "lucide-folder-tree")
+	local serverBrowserContent = createUiSection(uiSections.ServerTab.Right, "Event Server Browser", "lucide-folder-tree")
 
-	statusLabel = Window:CreateLabel(ServerTab.Right, {
+	statusLabel = Window:CreateLabel(serverBrowserContent, {
 		Text = "Click Refresh to load",
 		Color = GenesisX.Theme.TextSecondary,
 		Size = UDim2.new(1, 0, 0, 25),
 	})
 
-	Window:CreateButton(ServerTab.Right, {
+	Window:CreateButton(serverBrowserContent, {
 		Text = "Refresh List",
 		Callback = function()
 			_G.lastServerFetch = 0
@@ -14993,7 +15537,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(ServerTab.Right, "Filters", GenesisX.Theme.Warning, "lucide-glass")
+	local serverFilterContent = createUiSection(uiSections.ServerTab.Right, "Filters", "lucide-filter")
 
 	local filterOptions = { "All", "SeaEvent" }
 	if game.PlaceId == 6381829480 then
@@ -15019,7 +15563,7 @@ local function run(B, T, P, DfT, ...)
 		table.insert(filterOptions, "Fruit")
 	end
 
-	Window:CreateDropdown(ServerTab.Right, {
+	Window:CreateDropdown(serverFilterContent, {
 		Label = "Filter by Event",
 		Options = filterOptions,
 		Default = "All",
@@ -15029,7 +15573,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 
-	Window:CreateSection(ServerTab.Right, "Available Servers (up to 50)", GenesisX.Theme.Warning, "lucide-globe")
+	local serverListContent = createUiSection(uiSections.ServerTab.Right, "Available Servers (up to 50)", "lucide-globe")
 
 	_G.serverSlotData = {}
 
@@ -15040,7 +15584,7 @@ local function run(B, T, P, DfT, ...)
 	for i = 1, SERVER_LIST_MAX do
 		_G.serverSlotData[i] = nil
 
-		local card = Window:CreateLabelToggleSubTitle(ServerTab.Right, {
+		local card = Window:CreateLabelToggleSubTitle(serverListContent, {
 			Title = "Slot " .. i .. " - Empty",
 			TitleColor = GenesisX.Theme.TextMuted,
 			Subtitles = {
@@ -16020,7 +16564,10 @@ local function run(B, T, P, DfT, ...)
 		then
 			return true
 		end
-		if GetSetting("auto_dungeon_v2") and _G.Raid and _G.Raid.inraid then
+		-- Reserve the fishing position and Primary slot only while dungeon entry is
+		-- actually selected or already committed. A merely enabled, preempted toggle
+		-- must allow the lower-priority fishing fallback to run.
+		if _G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation() then
 			return true
 		end
 		if hasEnabledBossTarget() then
@@ -16193,8 +16740,6 @@ local function run(B, T, P, DfT, ...)
 	end))
 
 	-- Dispatches only to a button that belongs to a currently visible GUI tree.
-	-- The interaction itself deliberately mirrors the known-good baseline: make
-	-- the exact button cover the fixed click point, then send a real mouse press.
 	_G._GenesisIsVisibleGuiButton = function(button)
 		if not button or not button:IsA("GuiButton") or not button.Parent then
 			return false
@@ -16217,56 +16762,22 @@ local function run(B, T, P, DfT, ...)
 			return false, "not_visible"
 		end
 
-		if not VirtualInputManager then
+		-- These game dialogs are wired through MouseButton1Click. Dispatch the
+		-- exact validated signal directly so mobile GUI insets cannot shift a
+		-- virtual pointer onto another control. This is intentionally one path:
+		-- no blind coordinate fallback and no input-spam loop.
+		if type(firesignal) ~= "function" then
 			return false, "unsupported"
 		end
+		local clickOk = pcall(firesignal, button.MouseButton1Click)
 
-		local originalSize = button.Size
-		local originalPosition = button.Position
-		local clickX = nil
-		local clickY = nil
-		local mouseDown = false
-		local clickOk = pcall(function()
-			-- Keep the baseline geometry exactly. Applying it on both sides of a
-			-- heartbeat also prevents a UI layout pass from replacing it before input.
-			button.Size = UDim2.new(10, 0, 10, 0)
-			button.Position = UDim2.new(-1.9, 0, -5.5, 0)
-			RunService.Heartbeat:Wait()
-
-			if not _G._GenesisIsVisibleGuiButton(button) then
-				error("button_hidden_during_dispatch")
-			end
-
-			button.Size = UDim2.new(10, 0, 10, 0)
-			button.Position = UDim2.new(-1.9, 0, -5.5, 0)
-			local camera = Workspace.CurrentCamera
-			if not camera then
-				error("camera_unavailable")
-			end
-
-			local viewport = camera.ViewportSize
-			clickX = viewport.X - 20
-			clickY = viewport.Y / 15
-			mouseDown = true
-			VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 0)
-			task.wait(0.01)
-			VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
-			mouseDown = false
-			RunService.Heartbeat:Wait()
-		end)
-
-		-- Never leave the virtual mouse held if the button disappears mid-click.
-		if mouseDown and clickX and clickY then
-			pcall(function()
-				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
-			end)
+		if not clickOk then
+			return false, "click_failed"
 		end
-		pcall(function()
-			button.Size = originalSize
-			button.Position = originalPosition
-		end)
-
-		return clickOk, clickOk and "baseline_click" or "click_failed"
+		-- firesignal schedules connected callbacks; they are not guaranteed to run
+		-- before this call returns. Treat successful dispatch as sent and let each
+		-- workflow verify its actual state transition.
+		return true, "firesignal"
 	end
 
 	spawn(function()
@@ -16563,18 +17074,79 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
+	_G._GenesisRunRaidBossAutomation = function()
+		updateRaidCache()
+		updateRaidStatusLabel()
+
+		if
+			cachedTarget
+			and cachedTarget.Parent
+			and cachedTarget:FindFirstChild("HumanoidRootPart")
+			and cachedTarget.Humanoid.Health > 0
+		then
+			if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+				return true, cachedBossName
+			end
+			if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("raid_boss") then
+				return true, cachedBossName
+			end
+			if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+				return true, cachedBossName
+			end
+			pcall(function()
+				local hrp = cachedTarget.HumanoidRootPart
+				if hrp then
+					getDownwardCFrame(hrp.CFrame)
+					local height = GetSetting("distance") or 8
+					local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
+					updateFarmFix(targetCF, hrp)
+					if not _G.farmFixThread then
+						applyFarmFix(targetCF, hrp)
+					end
+				end
+				_G.pos_skill = cachedTarget.HumanoidRootPart.CFrame
+				usetool()
+				buso()
+				ken()
+				click()
+				autoskill()
+				handleOpeMethod()
+			end)
+			return true, cachedBossName
+		end
+		removeFarmFix()
+		return false, nil
+	end
+
 	_G._GenesisAutomationStepBusy = false
 	_G._GenesisRunAutomationStep = function()
-		if _G.isLootingChests then
+		-- A visible difficulty picker is already committed: leaving the circle can no
+		-- longer cancel entry. Treat that transition and the loaded dungeon exactly
+		-- like an active dungeon, even when the toggle is subsequently switched off.
+		local dungeonCommitted, dungeonStage = _G._GenesisUpdateDungeonCommit()
+		if dungeonCommitted then
+			_G._GenesisSetPriorityOwner("dungeon_committed", dungeonStage)
+			_G.allowCombat = false
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
 			end
 			if _G.isFishing or _G.fishingToolCaptured then
 				stopFishing()
 			end
+			if _G.farmFixThread or _G.farmFixBodyPos then
+				pcall(removeFarmFix)
+			end
+			if removeChestLootFix then
+				pcall(removeChestLootFix)
+			end
+			if type(_G._stopAbyssalAcquisition) == "function" then
+				pcall(_G._stopAbyssalAcquisition)
+			end
 			return
 		end
+
 		if _G.storingFruit then
+			_G._GenesisSetPriorityOwner("fruit_transaction", "storing")
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
 			end
@@ -16586,6 +17158,7 @@ local function run(B, T, P, DfT, ...)
 
 		-- Highest priority: Buso V2 / Ken V2 (unlock automations).
 		if _G.isProgressingBusoV2 or _G.isProgressingObservationV2 then
+			_G._GenesisSetPriorityOwner("haki_progression", _G.isProgressingBusoV2 and "buso_v2" or "ken_v2")
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
 			end
@@ -16599,31 +17172,64 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		-- Inside a dungeon with Auto Dungeon ON: let the Raid-tab loop run.
-		if GetSetting("auto_dungeon_v2") and _G.Raid and _G.Raid.inraid then
+		-- Resolve independent event classes in explicit priority order. The phase
+		-- calls retain the known-good leaf combat implementations; only ownership and
+		-- dispatch order are centralized here.
+		if checkSeaEvents("major") then
+			_G._GenesisSetPriorityOwner("major_sea_event", _G.currentEventName)
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
-			end
-			if _G.isFishing or _G.fishingToolCaptured then
-				stopFishing()
-			end
-			if _G.farmFixThread then
-				pcall(removeFarmFix)
 			end
 			return
 		end
 
-		-- Sea events / raid islands always remain independently available. Auto
-		-- Third Sea yields only when a real event is found; it must never disable
-		-- the generic Galleon/Ghost Ship dispatcher.
-		if checkSeaEvents() then
+		local hasRaidBoss, raidBossName = _G._GenesisRunRaidBossAutomation()
+		if hasRaidBoss then
+			_G._GenesisSetPriorityOwner("world_raid_boss", raidBossName)
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
 			end
 			return
+		end
+
+		if checkSeaEvents("serpent") then
+			_G._GenesisSetPriorityOwner("serpent", _G.currentEventName)
+			if _G.conquestActive and removeConquestPosition then
+				removeConquestPosition()
+			end
+			return
+		end
+
+		if checkSeaEvents("galleon") then
+			_G._GenesisSetPriorityOwner("galleon", _G.currentEventName)
+			if _G.conquestActive and removeConquestPosition then
+				removeConquestPosition()
+			end
+			return
+		end
+
+		-- Enabling Auto Dungeon is only a request. It owns movement after every
+		-- higher phase is absent and while the near-event gate permits a new entry.
+		if GetSetting("auto_dungeon_v2") then
+			local nearSeaEvent, _, timerText = _G._GenesisIsSeaEventNear()
+			if not nearSeaEvent then
+				_G._GenesisSetPriorityOwner("dungeon_entry", "waiting_for_picker")
+				if _G.conquestActive and removeConquestPosition then
+					removeConquestPosition()
+				end
+				if fishingOwnsWeaponSlot() then
+					_G._GenesisPrepareCombatFromFishing("dungeon_entry")
+				end
+				if _G.farmFixThread or _G.farmFixBodyPos then
+					pcall(removeFarmFix)
+				end
+				return
+			end
+			_G._GenesisSetPriorityOwner("dungeon_paused", "sea_event_near:" .. tostring(timerText))
 		end
 
 		if _G.collectingPearls then
+			_G._GenesisSetPriorityOwner("pearl_collection", "collecting")
 			if _G.isFishing or _G.fishingToolCaptured then
 				stopFishing()
 			end
@@ -16637,6 +17243,7 @@ local function run(B, T, P, DfT, ...)
 		-- A flag capture uses its own BodyPosition/BodyGyro. Do not let normal
 		-- farming create a second movement controller until it has released them.
 		if _G.conquestActive then
+			_G._GenesisSetPriorityOwner("conquest", "capturing")
 			if _G.isFishing or _G.fishingToolCaptured then
 				stopFishing()
 			end
@@ -16656,6 +17263,7 @@ local function run(B, T, P, DfT, ...)
 		-- enabled and usable. This closes the half-second startup window in which a
 		-- frame-rate Auto Farm pass could equip the sword before isFishing became true.
 		if typeof(fishingDestination) == "CFrame" then
+			_G._GenesisSetPriorityOwner("fishing", "available")
 			_G.allowCombat = false
 			if _G.farmFixThread or _G.farmFixBodyPos then
 				removeFarmFix()
@@ -16664,6 +17272,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		if fishingOwnsWeaponSlot() then
+			_G._GenesisSetPriorityOwner("fishing_handoff", "restoring_weapon")
 			_G._GenesisPrepareCombatFromFishing("automation")
 			return
 		end
@@ -16671,11 +17280,14 @@ local function run(B, T, P, DfT, ...)
 		-- Do not let combat start while the Primary slot is still being switched
 		-- back from Basic Rod to the weapon that fishing replaced.
 		if _G.fishingToolCaptured or _G.fishingLoadoutBusy then
+			_G._GenesisSetPriorityOwner("fishing_handoff", "restoring_weapon")
 			stopFishing()
 			return
 		end
 
+		_G._GenesisSetPriorityOwner("other_combat", "normal_automation")
 		if not _G.isAnyCombatActive() then
+			_G._GenesisSetPriorityOwner("idle", nil)
 			_G.allowCombat = false
 			if _G.farmFixThread or _G.farmFixBodyPos then
 				pcall(removeFarmFix)
@@ -17161,41 +17773,6 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		do
-			updateRaidCache()
-			updateRaidStatusLabel()
-
-			if
-				cachedTarget
-				and cachedTarget.Parent
-				and cachedTarget:FindFirstChild("HumanoidRootPart")
-				and cachedTarget.Humanoid.Health > 0
-			then
-				pcall(function()
-					local hrp = cachedTarget.HumanoidRootPart
-					if hrp then
-						getDownwardCFrame(hrp.CFrame)
-						local height = GetSetting("distance") or 8
-						local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-						updateFarmFix(targetCF, hrp)
-						if not _G.farmFixThread then
-							applyFarmFix(targetCF, hrp)
-						end
-					end
-					_G.pos_skill = cachedTarget.HumanoidRootPart.CFrame
-					usetool()
-					buso()
-					ken()
-					click()
-					autoskill()
-					handleOpeMethod()
-				end)
-				return
-			else
-				removeFarmFix()
-			end
-		end
-
 		if GetSetting("autoDailyQuest") and _G.dailyQuestState == "kill" then
 			local target = _G.dailyQuestTarget
 			if
@@ -17621,6 +18198,12 @@ local function run(B, T, P, DfT, ...)
 				if not GetSetting("autoRaceV3") then
 					return
 				end
+				-- Auto Dungeon has its own bounded R attempt and activation tracking.
+				-- Let that path make the decision while a dungeon is active so the two
+				-- workers cannot send the same key independently.
+				if GetSetting("auto_dungeon_v2") and _G.Raid and _G.Raid.inraid then
+					return
+				end
 
 				local character = LocalPlayer.Character
 				if not character then
@@ -17643,6 +18226,10 @@ local function run(B, T, P, DfT, ...)
 
 				if healthPercent <= triggerPercent and not UserInputService:GetFocusedTextBox() then
 					local now = tick()
+					local dungeonRace = _G.Raid and _G.Raid.raceAbility
+					if dungeonRace and now < (dungeonRace.cooldownUntil or 0) then
+						return
+					end
 					if now - (_G.lastRaceAbilityAttempt or 0) >= 1.5 then
 						_G.lastRaceAbilityAttempt = now
 						VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
@@ -18070,6 +18657,8 @@ local function run(B, T, P, DfT, ...)
 	end)
 
 	spawn(function()
+		local lastCollectButton = nil
+		local lastCollectAttempt = 0
 		while task.wait(0.01) do
 			pcall(function()
 				if not GetSetting("autoStoreFruits") then
@@ -18081,7 +18670,43 @@ local function run(B, T, P, DfT, ...)
 				local eatFruitGui = LocalPlayer.PlayerGui:FindFirstChild("EatFruitBecky")
 				local dialogue = eatFruitGui and eatFruitGui:FindFirstChild("Dialogue")
 				local collectBtn = dialogue and dialogue:FindFirstChild("Collect")
-				_G._GenesisDispatchGuiButton(collectBtn)
+				if not _G._GenesisIsVisibleGuiButton(collectBtn) then
+					return
+				end
+
+				local now = os.clock()
+				if collectBtn == lastCollectButton and now - lastCollectAttempt < 0.1 then
+					return
+				end
+				lastCollectButton = collectBtn
+				lastCollectAttempt = now
+
+				-- Restore the webhook-only build's known-good Collect interaction.
+				-- The button is enlarged only after its exact GUI path and visible
+				-- ancestry are validated, then it receives real mouse input. This is
+				-- intentionally the sole Collect path; firesignal is not a fallback.
+				collectBtn.Size = UDim2.new(10, 0, 10, 0)
+				collectBtn.Position = UDim2.new(-1.9, 0, -5.5, 0)
+				RunService.RenderStepped:Wait()
+				if
+					not GetSetting("autoStoreFruits")
+					or not _G.storingFruit
+					or collectBtn ~= dialogue:FindFirstChild("Collect")
+					or not _G._GenesisIsVisibleGuiButton(collectBtn)
+				then
+					return
+				end
+
+				local camera = Workspace.CurrentCamera
+				if not camera then
+					return
+				end
+				local screenSize = camera.ViewportSize
+				local clickX = math.max(0, screenSize.X - 20)
+				local clickY = math.max(0, screenSize.Y / 15)
+				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 0)
+				task.wait(0.01)
+				VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
 			end)
 		end
 	end)
@@ -19109,26 +19734,8 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
-				local raceFound = false
-				local raceDisplayName = ""
-				for _, island in pairs(Workspace.Island:GetChildren()) do
-					local name = island.Name
-					if
-						string.find(name, "Human")
-						or string.find(name, "Animal")
-						or string.find(name, "Fish")
-						or string.find(name, "Sky")
-						or string.find(name, "Demon")
-						or string.find(name, "Angel")
-						or string.find(name, "Gale")
-						or string.find(name, "SeaKing")
-					then
-						raceFound = true
-						raceDisplayName = getDisplayRaceName(name)
-						break
-					end
-				end
-				if raceFound then
+				local raceIsland, _, raceDisplayName = _G._GenesisFindRaceIsland()
+				if raceIsland then
 					RaceIslandStatusLabel.SetText("Race Island: \240\159\159\162 | " .. raceDisplayName)
 					RaceIslandStatusLabel.Label.TextColor3 = SpectrumX.Theme.Success
 				else
@@ -20244,6 +20851,8 @@ local function run(B, T, P, DfT, ...)
 	_G.Raid.boss_dungeon = false
 	_G.Raid.current_target = nil
 	_G.Raid.dodge_active = false
+	_G.Raid.dodge_render_step_name = "GenesisDungeonDodge_" .. tostring(LocalPlayer.UserId)
+	_G.Raid.dodge_gyro = nil
 	_G.Raid.last_tool_switch = 0
 	_G.Raid.last_buso = 0
 	_G.Raid.last_ken = 0
@@ -20254,8 +20863,92 @@ local function run(B, T, P, DfT, ...)
 	_G.Raid.is_zoan = false
 	_G.Raid.transformed = false
 	_G.Raid._mainLoopBusy = false
-	_G.Raid.farmFix = { pos = nil, gyro = nil, thread = nil, target = nil }
+	_G.Raid._entryBusy = false
+	_G.Raid._entryGeneration = 0
+	_G.Raid._loadoutBusy = false
+	_G.Raid._loadoutGeneration = 0
+	_G.Raid._floorSettleUntil = 0
+	_G.Raid.farmFix = {
+		pos = nil,
+		gyro = nil,
+		thread = nil,
+		target = nil,
+		root = nil,
+		generation = 0,
+		bound = false,
+		renderStepName = "GenesisDungeonFarm_" .. tostring(LocalPlayer.UserId),
+	}
 	_G.Raid.orbit = { active = false, thread = nil, angle = 0, target = nil, radius = 18 }
+	_G.Raid.attackState = {
+		generation = 0,
+		jobs = {},
+		nextJobId = 0,
+		-- The known-good dungeon baseline issued one valid M1 every render step.
+		-- Keep this implementation bounded, but do not throttle it down to roughly
+		-- ten attacks per second: four in-flight requests at a 25 ms cadence retain
+		-- responsive damage without recreating the baseline's invalid FS/SW/DF spam.
+		-- A live Hard-dungeon trial measured about 20 valid M1s/second with this bound
+		-- and no request timeouts, versus roughly 11/second with two in flight.
+		m1Interval = 0.025,
+		m1Lease = 0.8,
+		requestedUntil = 0,
+		lastM1 = 0,
+		m1InFlight = 0,
+		maxM1InFlight = 4,
+		skillInterval = 0.08,
+		lastSkillDispatch = 0,
+		skillInFlight = 0,
+		maxSkillInFlight = 1,
+		skillCursor = 0,
+		skillReadyAt = {},
+		toolReadyAt = 0,
+		opeToolUntil = 0,
+		m1Dispatched = 0,
+		skillsDispatched = 0,
+		m1ByTool = {},
+		skillsByTool = {},
+		lastM1Tool = nil,
+		lastSkillId = nil,
+		timedOut = 0,
+		lastTimeoutAt = nil,
+		lastError = nil,
+		remoteJobs = {},
+		nextRemoteJobId = 0,
+		remoteInFlight = 0,
+		maxRemoteInFlight = 6,
+		remoteTimeout = 1.25,
+		remoteCompleted = 0,
+		remoteTimedOut = 0,
+		remoteRejected = 0,
+		remoteTimeoutBySkill = {},
+		maxRemoteLatency = 0,
+		lastRemoteError = nil,
+	}
+	_G.Raid.skillDataCache = {}
+	_G.Raid.dungeonBounds = { model = nil, center = nil, size = nil, checkedAt = 0 }
+	_G.Raid.lastHealth = nil
+	_G.Raid.lastDamageAt = 0
+	_G.Raid.lastDamageAmount = 0
+	_G.Raid.raceAbility = {
+		lastAttempt = 0,
+		pendingUntil = 0,
+		activeUntil = 0,
+		cooldownUntil = 0,
+		auraSeen = false,
+		auraEnded = false,
+		auraLastSeenAt = 0,
+		auraCheckedAt = 0,
+		auraCached = false,
+		auraObject = nil,
+		healthBefore = nil,
+		humanoid = nil,
+		hudWasPresent = false,
+		inputBusy = false,
+		attempts = 0,
+		confirmed = 0,
+		lastResult = "idle",
+	}
+	_G.Raid.opeState = { phase = "idle", lastToggle = 0, ownedRoom = false }
 	_G.Raid.effectFirstSeen = {}
 	_G.Raid.EFFECT_MAX_AGE = 2.2
 	_G.Raid.attackPatterns = {
@@ -20278,6 +20971,11 @@ local function run(B, T, P, DfT, ...)
 		"darkball",
 		"blackhole",
 		"firemoth",
+		-- Chaos Crab attacks without a generic "warning" wrapper.
+		"crabs1",
+		"circ",
+		"pillar_exp",
+		"waterball",
 		"letterbox",
 		"camrigwithletterbox",
 	}
@@ -20292,73 +20990,141 @@ local function run(B, T, P, DfT, ...)
 		"Heartbreaker Queen",
 		"Veyzor",
 	}
-	_G.Raid.floorCFrames = {
-		[1] = CFrame.new(2173, 32, 1239),
-		[2] = CFrame.new(2173, 32, 1239),
-		[3] = CFrame.new(2173, 32, 1239),
-		[4] = CFrame.new(2173, 32, 1239),
-		[5] = CFrame.new(2173, 32, 1239),
-	}
-	_G.Raid.cf_ope_down = CFrame.new(2173.194, 32.324, 1239.675)
-	_G.Raid.cf_ope_up = CFrame.new(2258.188, 57.054, 1145.245)
-
 	_G.Raid.getRoot = function(char)
 		return char and char:FindFirstChild("HumanoidRootPart")
 	end
 
+	_G.Raid.downwardCFrame = function(position)
+		-- CFrame.new(position, position - Y) has an undefined roll because its
+		-- default up vector is parallel to the look direction. Build a stable basis
+		-- explicitly so LookVector remains exactly (0, -1, 0).
+		return CFrame.fromMatrix(
+			position,
+			Vector3.new(1, 0, 0),
+			Vector3.new(0, 0, -1),
+			Vector3.new(0, 1, 0)
+		)
+	end
+
 	_G.Raid.tp = function(cf)
-		pcall(function()
+		if typeof(cf) ~= "CFrame" then
+			return false
+		end
+		local ok = pcall(function()
 			LocalPlayer.Character.HumanoidRootPart.CFrame = cf
 		end)
+		return ok
 	end
 
 	_G.Raid.tooltip = function(toolTip)
-		for _, tool in pairs(LocalPlayer.Backpack:GetChildren()) do
+		local character = LocalPlayer.Character
+		local humanoid = character and character:FindFirstChild("Humanoid")
+		local backpack = LocalPlayer:FindFirstChild("Backpack")
+		if not character or not humanoid or not backpack then
+			return nil
+		end
+
+		local equipped = _G.Raid.getEquippedTool and _G.Raid.getEquippedTool()
+		if equipped and equipped.ToolTip == toolTip then
+			if toolTip ~= "Sword" or not string.find(string.lower(equipped.Name), "rod", 1, true) then
+				return equipped
+			end
+		end
+
+		local candidates = {}
+		for _, tool in ipairs(backpack:GetChildren()) do
 			if tool:IsA("Tool") and tool.ToolTip == toolTip then
-				local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
-				if hum then
-					hum:EquipTool(tool)
+				if toolTip ~= "Sword" or not string.find(string.lower(tool.Name), "rod", 1, true) then
+					table.insert(candidates, tool)
 				end
 			end
 		end
-	end
+		table.sort(candidates, function(a, b)
+			return a.Name < b.Name
+		end)
 
-	_G.Raid.click = function()
-		local now = tick()
-		if now - (_G.Raid.last_click or 0) < 0.1 then
-			return
-		end
-		_G.Raid.last_click = now
-		local pos = _G.pos_skill
-		if not pos then
-			return
-		end
-		local char = LocalPlayer.Character
-		if not char then
-			return
-		end
-		for _, tool in pairs(char:GetChildren()) do
-			if tool:IsA("Tool") then
-				local prefix = "SW_"
-				if tool.ToolTip == "Combat" then
-					prefix = "FS_"
-				elseif tool.ToolTip == "Fruit Power" then
-					prefix = "DF_"
+		local chosen = nil
+		if toolTip == "Sword" then
+			local preferredName = _G.lastEquippedSwordName
+				or _G.fishingPreviousWeaponName
+				or GetSetting("lastEquippedSwordName")
+			for _, candidate in ipairs(candidates) do
+				if candidate.Name == preferredName then
+					chosen = candidate
+					break
 				end
-				pcall(function()
-					ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(
-						prefix .. tool.Name .. "_M1",
-						{ MouseHit = pos }
-					)
-				end)
 			end
 		end
+		chosen = chosen or candidates[1]
+		if not chosen then
+			return nil
+		end
+
+		humanoid:EquipTool(chosen)
+		if chosen.Parent ~= character then
+			return nil
+		end
+		if toolTip == "Sword" and _G._GenesisRememberSword then
+			_G._GenesisRememberSword(chosen)
+		end
+		_G.Raid.attackState.toolReadyAt = os.clock() + 0.08
+		return chosen
 	end
 
-	_G.Raid.keyboard = function(key)
-		VirtualInputManager:SendKeyEvent(true, key, false, game)
-		task.wait(0.05)
-		VirtualInputManager:SendKeyEvent(false, key, false, game)
+	_G.Raid.finishAttackJob = function(job, timedOut, err)
+		if not job or job.finished then
+			return
+		end
+		job.finished = true
+		local state = _G.Raid.attackState
+		state.jobs[job.id] = nil
+		if job.kind == "m1" then
+			state.m1InFlight = math.max(0, state.m1InFlight - 1)
+		else
+			state.skillInFlight = math.max(0, state.skillInFlight - 1)
+		end
+		if timedOut then
+			state.timedOut = state.timedOut + 1
+			state.lastTimeoutAt = os.clock()
+		end
+		-- A bounded request timeout is recovery telemetry, not a fatal automation
+		-- error. Preserve lastError for actual implementation failures.
+		if err and not timedOut then
+			state.lastError = tostring(err)
+		end
+	end
+
+	_G.Raid.startAttackJob = function(kind, callback, timeout)
+		local state = _G.Raid.attackState
+		local counterName = kind == "m1" and "m1InFlight" or "skillInFlight"
+		local maximum = kind == "m1" and state.maxM1InFlight or state.maxSkillInFlight
+		if state[counterName] >= maximum then
+			return false
+		end
+
+		state.nextJobId = state.nextJobId + 1
+		local job = {
+			id = state.nextJobId,
+			kind = kind,
+			generation = state.generation,
+			finished = false,
+			thread = nil,
+		}
+		state.jobs[job.id] = job
+		state[counterName] = state[counterName] + 1
+		job.thread = task.spawn(function()
+			local ok, err = pcall(callback)
+			_G.Raid.finishAttackJob(job, false, ok and nil or err)
+		end)
+		task.delay(timeout or 3, function()
+			if not job.finished then
+				if job.thread then
+					pcall(task.cancel, job.thread)
+				end
+				_G.Raid.finishAttackJob(job, true, "attack request timed out")
+			end
+		end)
+		return true
 	end
 
 	_G.Raid.getEquippedTool = function()
@@ -20366,12 +21132,206 @@ local function run(B, T, P, DfT, ...)
 		if not char then
 			return nil
 		end
-		for _, tool in pairs(char:GetChildren()) do
-			if tool:IsA("Tool") then
+		for _, tool in ipairs(char:GetChildren()) do
+			if tool:IsA("Tool")
+				and (tool.ToolTip == "Sword" or tool.ToolTip == "Combat" or tool.ToolTip == "Fruit Power")
+			then
 				return tool
 			end
 		end
 		return nil
+	end
+
+	_G.Raid.isUsableDungeonTool = function(tool, wantedTip)
+		if not tool or not tool:IsA("Tool") or (wantedTip and tool.ToolTip ~= wantedTip) then
+			return false
+		end
+		return tool.ToolTip ~= "Sword" or not string.find(string.lower(tool.Name), "rod", 1, true)
+	end
+
+	_G.Raid.getConfiguredToolTips = function()
+		local configured = GetSetting("dungeon_outside_tools") or { "Combat", "Fruit Power" }
+		local result, seen = {}, {}
+		for key, value in pairs(configured) do
+			local tip = (type(key) == "string" and value == true) and key or value
+			if tip == "Mele" then
+				tip = "Combat"
+			elseif tip == "Fruit" then
+				tip = "Fruit Power"
+			end
+			if (tip == "Sword" or tip == "Combat" or tip == "Fruit Power") and not seen[tip] then
+				seen[tip] = true
+				table.insert(result, tip)
+			end
+		end
+		return result
+	end
+
+	_G.Raid.findToolByTip = function(toolTip)
+		local character = LocalPlayer.Character
+		local backpack = LocalPlayer:FindFirstChild("Backpack")
+		local current = _G.Raid.getEquippedTool()
+		if _G.Raid.isUsableDungeonTool(current, toolTip) then
+			return current
+		end
+
+		local candidates = {}
+		for _, container in ipairs({ character, backpack }) do
+			if container then
+				for _, tool in ipairs(container:GetChildren()) do
+					if _G.Raid.isUsableDungeonTool(tool, toolTip) then
+						table.insert(candidates, tool)
+					end
+				end
+			end
+		end
+		table.sort(candidates, function(a, b)
+			return a.Name < b.Name
+		end)
+
+		if toolTip == "Sword" then
+			local preferredName = _G.lastEquippedSwordName
+				or _G.fishingPreviousWeaponName
+				or GetSetting("lastEquippedSwordName")
+			for _, candidate in ipairs(candidates) do
+				if candidate.Name == preferredName then
+					return candidate
+				end
+			end
+		end
+		return candidates[1]
+	end
+
+	_G.Raid.getConfiguredTools = function()
+		local result = {}
+		for _, tip in ipairs(_G.Raid.getConfiguredToolTips()) do
+			local tool = _G.Raid.findToolByTip(tip)
+			if tool then
+				table.insert(result, tool)
+			end
+		end
+		return result
+	end
+
+	_G.Raid.getBaseCombatTool = function()
+		local enabled = {}
+		for _, tip in ipairs(_G.Raid.getConfiguredToolTips()) do
+			enabled[tip] = true
+		end
+		-- Swords and fighting styles expose a real M1. Fruit tools such as Dough
+		-- do not, so a fruit must not replace the persistent basic-attack weapon.
+		for _, preferredTip in ipairs({ "Sword", "Combat" }) do
+			if enabled[preferredTip] then
+				local tool = _G.Raid.findToolByTip(preferredTip)
+				if tool then
+					return tool
+				end
+			end
+		end
+		return nil
+	end
+
+	_G.Raid.hasConfiguredBasicAttack = function()
+		for _, tip in ipairs(_G.Raid.getConfiguredToolTips()) do
+			if tip == "Sword" or tip == "Combat" then
+				return true
+			end
+		end
+		return false
+	end
+
+	_G.Raid.ensureBaseCombatTool = function()
+		-- Opening/closing an Ope room is the only remote-cast operation that must
+		-- temporarily own the character's hand. Do not immediately evict OpOp while
+		-- its Z request is being dispatched.
+		if os.clock() < (_G.Raid.attackState.opeToolUntil or 0) then
+			return nil
+		end
+		local tool = _G.Raid.getBaseCombatTool()
+		local character = LocalPlayer.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local backpack = LocalPlayer:FindFirstChild("Backpack")
+		if not tool or not humanoid or not backpack then
+			return nil
+		end
+		if tool.Parent ~= character then
+			if tool.Parent ~= backpack then
+				return nil
+			end
+			humanoid:EquipTool(tool)
+			if tool.Parent ~= character then
+				return nil
+			end
+			_G.Raid.attackState.toolReadyAt = os.clock() + 0.08
+		end
+		if tool.ToolTip == "Sword" and _G._GenesisRememberSword then
+			_G._GenesisRememberSword(tool)
+		end
+		return tool
+	end
+
+	_G.Raid.bootstrapBaseCombatTool = function(timeoutSeconds, shouldContinue)
+		local existing = _G.Raid.ensureBaseCombatTool()
+		if existing then
+			return existing
+		end
+
+		local enabled = {}
+		for _, tip in ipairs(_G.Raid.getConfiguredToolTips()) do
+			enabled[tip] = true
+		end
+
+		-- A sword may be selected in the game's Primary slot without its Tool being
+		-- replicated into Character/Backpack yet. Restore the exact remembered sword
+		-- through the same validated inventory transaction used by fishing.
+		if enabled.Sword then
+			local preferredName = _G._GenesisWaitForLastEquippedSwordName
+				and _G._GenesisWaitForLastEquippedSwordName(timeoutSeconds or 4, shouldContinue)
+				or _G.lastEquippedSwordName
+			if _G._GenesisIsUsableSwordName(preferredName) then
+				local selected = selectPrimaryWeapon(preferredName, timeoutSeconds or 4, shouldContinue)
+				local character = LocalPlayer.Character
+				local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+				if selected and humanoid and selected.Parent ~= character then
+					humanoid:EquipTool(selected)
+				end
+				if _G._GenesisIsSwordTool(selected) and selected.Parent == character then
+					_G._GenesisRememberSword(selected)
+					_G.Raid.attackState.toolReadyAt = os.clock() + 0.08
+					return selected
+				end
+			end
+		end
+
+		-- Combat styles do not use the Primary sword slot and can be equipped
+		-- directly if the user selected one as the dungeon M1 source.
+		if enabled.Combat then
+			return _G.Raid.ensureBaseCombatTool()
+		end
+		return nil
+	end
+
+	_G.Raid.beginLoadoutBootstrap = function()
+		if _G.Raid._loadoutBusy or not GetSetting("auto_dungeon_v2") then
+			return false
+		end
+		_G.Raid._loadoutBusy = true
+		_G.Raid._loadoutGeneration = (_G.Raid._loadoutGeneration or 0) + 1
+		local generation = _G.Raid._loadoutGeneration
+		task.spawn(function()
+			local ok, err = pcall(function()
+				_G.Raid.bootstrapBaseCombatTool(4, function()
+					return GetSetting("auto_dungeon_v2") and _G.Raid._loadoutGeneration == generation
+				end)
+			end)
+			if not ok then
+				_G.Raid.attackState.lastError = "dungeon loadout bootstrap failed: " .. tostring(err)
+			end
+			if _G.Raid._loadoutGeneration == generation then
+				_G.Raid._loadoutBusy = false
+			end
+		end)
+		return true
 	end
 
 	_G.Raid.getSkillPrefix = function(tool)
@@ -20389,66 +21349,352 @@ local function run(B, T, P, DfT, ...)
 		return "SW_"
 	end
 
-	_G.Raid.remoteSkill = function(key)
-		local tool = _G.Raid.getEquippedTool()
-		if not tool then
-			return
-		end
-		local skillName = _G.Raid.getSkillPrefix(tool) .. tool.Name .. "_" .. key
-		local pos = _G.pos_skill
-		if not pos then
-			return
-		end
-		pcall(function()
-			ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(
-				skillName,
-				{ MouseHit = pos, Type = "Down" }
-			)
-			task.wait(0.05)
-			ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(
-				skillName,
-				{ MouseHit = pos, Type = "Up" }
-			)
-		end)
+	_G.Raid.keyboard = function(key)
+		VirtualInputManager:SendKeyEvent(true, key, false, game)
+		task.wait(0.06)
+		VirtualInputManager:SendKeyEvent(false, key, false, game)
 	end
 
-	_G.Raid.castSkill = function(key)
-		local method = GetSetting("dungeon_cast_method") or "Remote (Aimbot)"
-		if method == "Remote (Aimbot)" then
-			_G.Raid.remoteSkill(key)
-		else
-			_G.Raid.keyboard(key)
+	_G.Raid.finishRemoteJob = function(job, timedOut, err)
+		if not job or job.finished then
+			return
 		end
+		job.finished = true
+		local state = _G.Raid.attackState
+		state.remoteJobs[job.id] = nil
+		state.remoteInFlight = math.max(0, state.remoteInFlight - 1)
+		local latency = os.clock() - job.startedAt
+		state.maxRemoteLatency = math.max(state.maxRemoteLatency or 0, latency)
+		if timedOut then
+			state.remoteTimedOut = state.remoteTimedOut + 1
+			state.remoteTimeoutBySkill[job.skillName] = (state.remoteTimeoutBySkill[job.skillName] or 0) + 1
+		elseif err then
+			state.lastRemoteError = tostring(err)
+		else
+			state.remoteCompleted = state.remoteCompleted + 1
+		end
+	end
+
+	_G.Raid.invokeSkillPhase = function(skillName, args, phase)
+		local state = _G.Raid.attackState
+		if state.remoteInFlight >= state.maxRemoteInFlight then
+			state.remoteRejected = state.remoteRejected + 1
+			return false
+		end
+
+		state.nextRemoteJobId = state.nextRemoteJobId + 1
+		local job = {
+			id = state.nextRemoteJobId,
+			skillName = skillName,
+			phase = phase,
+			startedAt = os.clock(),
+			finished = false,
+			thread = nil,
+		}
+		state.remoteJobs[job.id] = job
+		state.remoteInFlight = state.remoteInFlight + 1
+		job.thread = task.spawn(function()
+			local ok, err = pcall(function()
+				ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(skillName, args)
+			end)
+			_G.Raid.finishRemoteJob(job, false, ok and nil or err)
+		end)
+		task.delay(state.remoteTimeout, function()
+			if not job.finished then
+				if job.thread then
+					pcall(task.cancel, job.thread)
+				end
+				_G.Raid.finishRemoteJob(job, true, "skill phase timed out")
+			end
+		end)
+		return true
+	end
+
+	_G.Raid.remoteSkill = function(tool, key, pos)
+		local skillName = _G.Raid.getSkillPrefix(tool) .. tool.Name .. "_" .. key
+		if not _G.Raid.invokeSkillPhase(skillName, { MouseHit = pos, Type = "Down" }, "Down") then
+			error("skill phase pool is full")
+		end
+		task.wait(0.06)
+		if not _G.Raid.invokeSkillPhase(skillName, { MouseHit = pos, Type = "Up" }, "Up") then
+			error("skill phase pool is full")
+		end
+	end
+
+	_G.Raid.remoteOpeToggle = function(tool, pos, phase)
+		local skillName = "DF_" .. tool.Name .. "_Z"
+		if not _G.Raid.invokeSkillPhase(skillName, { MouseHit = pos, Type = "Down" }, "Down") then
+			error("Ope Z down phase pool is full")
+		end
+
+		-- OpOp's real client does not tap Z like an ordinary skill. When opening a
+		-- room it holds the Down phase until OpeRoom<player> replicates, bounded by
+		-- ten seconds, and only then releases Up. A fixed 0.06-second tap commonly
+		-- leaves the dungeon worker parked without a usable room.
+		if phase == "opening" then
+			local deadline = os.clock() + 10
+			repeat
+				task.wait()
+			until _G.Raid.getOpeRoom()
+				or os.clock() >= deadline
+				or not GetSetting("auto_dungeon_v2")
+				or not tool.Parent
+		else
+			-- With an existing room, the real client reaches its release condition on
+			-- the next heartbeat; closing must not inherit the ten-second open hold.
+			task.wait()
+		end
+
+		-- Keep the release bounded but give it a brief chance to acquire a phase
+		-- slot if the Down invocation has not retired from the pool yet.
+		local releaseDeadline = os.clock() + 0.5
+		repeat
+			if _G.Raid.invokeSkillPhase(skillName, { MouseHit = pos, Type = "Up" }, "Up") then
+				return
+			end
+			task.wait()
+		until os.clock() >= releaseDeadline
+		error("Ope Z up phase pool remained full")
+	end
+
+	_G.Raid.getSkillData = function(tool)
+		if not tool then
+			return nil
+		end
+		local cacheKey = tool.ToolTip .. "|" .. tool.Name
+		local cached = _G.Raid.skillDataCache[cacheKey]
+		if cached ~= nil then
+			return cached ~= false and cached or nil
+		end
+		local folderName = tool.ToolTip == "Sword" and "Swords"
+			or (tool.ToolTip == "Combat" and "Styles")
+			or (tool.ToolTip == "Fruit Power" and "Fruits")
+		local skillDataRoot = ReplicatedStorage:FindFirstChild("Chest")
+			and ReplicatedStorage.Chest:FindFirstChild("Modules")
+			and ReplicatedStorage.Chest.Modules:FindFirstChild("SkillData")
+		local folder = folderName and skillDataRoot and skillDataRoot:FindFirstChild(folderName)
+		local module = folder and folder:FindFirstChild(tool.Name .. "_Data")
+		local ok, data = false, nil
+		if module and module:IsA("ModuleScript") then
+			ok, data = pcall(require, module)
+		end
+		if not ok or type(data) ~= "table" then
+			_G.Raid.skillDataCache[cacheKey] = false
+			return nil
+		end
+		_G.Raid.skillDataCache[cacheKey] = data
+		return data
+	end
+
+	_G.Raid.getToolMastery = function(tool)
+		local stats = LocalPlayer:FindFirstChild("PlayerStats")
+		if not stats or not tool then
+			return nil
+		end
+		local statName = tool.ToolTip == "Sword" and "sword"
+			or (tool.ToolTip == "Combat" and "Melee")
+			or (tool.ToolTip == "Fruit Power" and "DF")
+		local stat = statName and stats:FindFirstChild(statName)
+		return stat and tonumber(stat.Value) or nil
+	end
+
+	_G.Raid.getSkillCooldown = function(tool, key, data)
+		local cooldown = tonumber(data and data[key]) or 1
+		local shortPrefix = tool.ToolTip == "Sword" and "SW"
+			or (tool.ToolTip == "Combat" and "FS")
+			or (tool.ToolTip == "Fruit Power" and "DF")
+		if shortPrefix and type(_G.GetCooldownClient) == "function" then
+			local ok, adjusted = pcall(_G.GetCooldownClient, shortPrefix .. key)
+			if ok and tonumber(adjusted) and tonumber(adjusted) > 0 then
+				cooldown = tonumber(adjusted)
+			end
+		end
+		return math.max(0.35, cooldown)
+	end
+
+	_G.Raid.dispatchM1 = function()
+		local state = _G.Raid.attackState
+		local now = os.clock()
+		if not GetSetting("auto_dungeon_v2")
+			or not _G.Raid.inraid
+			or _G.Raid.dodge_retreating
+			or now > state.requestedUntil
+			or now < state.toolReadyAt
+			or now < (state.opeToolUntil or 0)
+			or now - state.lastM1 < state.m1Interval
+		then
+			return false
+		end
+		local method = GetSetting("dungeon_cast_method") or "Remote (Aimbot)"
+		local tool = method == "Remote (Aimbot)" and _G.Raid.ensureBaseCombatTool()
+			or _G.Raid.getEquippedTool()
+		local pos = _G.pos_skill
+		local target = _G.Raid.current_target
+		local targetHumanoid = target and target:FindFirstChild("Humanoid")
+		if not tool or tool.Parent ~= LocalPlayer.Character or typeof(pos) ~= "CFrame"
+			or not targetHumanoid or targetHumanoid.Health <= 0
+		then
+			return false
+		end
+		-- Do not report fabricated fruit M1 calls as attacks. Dough, for example,
+		-- has skill remotes but no DF_DoughDough_M1 handler.
+		if method == "Remote (Aimbot)" and tool.ToolTip ~= "Sword" and tool.ToolTip ~= "Combat" then
+			return false
+		end
+		local prefix = _G.Raid.getSkillPrefix(tool)
+		local started = _G.Raid.startAttackJob("m1", function()
+			if method == "Remote (Aimbot)" then
+				ReplicatedStorage.Chest.Remotes.Functions.SkillAction:InvokeServer(
+					prefix .. tool.Name .. "_M1",
+					{ MouseHit = pos }
+				)
+			else
+				tool:Activate()
+			end
+		end, 2.5)
+		if started then
+			state.lastM1 = now
+			state.m1Dispatched = state.m1Dispatched + 1
+			state.lastM1Tool = tool.Name
+			state.m1ByTool[tool.Name] = (state.m1ByTool[tool.Name] or 0) + 1
+		end
+		return started
+	end
+
+	_G.Raid.click = function()
+		local state = _G.Raid.attackState
+		state.requestedUntil = os.clock() + state.m1Lease
+		return _G.Raid.dispatchM1()
 	end
 
 	_G.Raid.autoskill = function()
-		local now = tick()
-		if now - (_G.Raid.last_skill or 0) < 1 then
+		local state = _G.Raid.attackState
+		local now = os.clock()
+		if _G.Raid.dodge_retreating
+			or now < state.toolReadyAt
+			or now < (state.opeToolUntil or 0)
+			or now - state.lastSkillDispatch < state.skillInterval
+			or state.skillInFlight >= state.maxSkillInFlight
+		then
+			return false
+		end
+		local pos = _G.pos_skill
+		if typeof(pos) ~= "CFrame" then
+			return false
+		end
+
+		local method = GetSetting("dungeon_cast_method") or "Remote (Aimbot)"
+		if method == "Remote (Aimbot)"
+			and state.remoteInFlight > state.maxRemoteInFlight - 2
+		then
+			return false
+		end
+		local tools = {}
+		if method == "Remote (Aimbot)" then
+			-- Remote skills remain valid for configured Backpack tools. Keep the base
+			-- sword/style equipped for M1 instead of unequipping it for every fruit cast.
+			tools = _G.Raid.getConfiguredTools()
+		else
+			local equipped = _G.Raid.getEquippedTool()
+			if equipped then
+				table.insert(tools, equipped)
+			end
+		end
+
+		local keys = { "Z", "X", "C", "V", "F", "B", "E" }
+		local entries = {}
+		for _, tool in ipairs(tools) do
+			local data = _G.Raid.getSkillData(tool)
+			if data then
+				for _, key in ipairs(keys) do
+					table.insert(entries, { tool = tool, key = key, data = data })
+				end
+			end
+		end
+		if #entries == 0 then
+			return false
+		end
+
+		for _ = 1, #entries do
+			state.skillCursor = (state.skillCursor % #entries) + 1
+			local entry = entries[state.skillCursor]
+			local tool, key, data = entry.tool, entry.key, entry.data
+			local mastery = _G.Raid.getToolMastery(tool)
+			local enabled = GetSetting(string.lower(key))
+			local required = tonumber(data[key .. "Require"]) or 0
+			local skillId = _G.Raid.getSkillPrefix(tool) .. tool.Name .. "_" .. key
+			local isOpeZ = tool.Name == "OpOp" and key == "Z"
+			local opeBlocked = tool.Name == "OpOp"
+				and GetSetting("ope_method_dungeon")
+				and not _G.Raid.isOpeRoomUsable()
+			if enabled and tonumber(data[key]) and not isOpeZ and not opeBlocked
+				and (required <= 0 or (mastery and mastery >= required))
+				and now >= (state.skillReadyAt[skillId] or 0)
+			then
+				local started = _G.Raid.startAttackJob("skill", function()
+					if method == "Remote (Aimbot)" then
+						_G.Raid.remoteSkill(tool, key, pos)
+					else
+						_G.Raid.keyboard(key)
+					end
+				end, 3)
+				if started then
+					state.lastSkillDispatch = now
+					state.skillReadyAt[skillId] = now + _G.Raid.getSkillCooldown(tool, key, data) + 0.1
+					state.skillsDispatched = state.skillsDispatched + 1
+					state.lastSkillId = skillId
+					state.skillsByTool[tool.Name] = (state.skillsByTool[tool.Name] or 0) + 1
+				end
+				return started
+			end
+		end
+		return false
+	end
+
+	_G.Raid.stopCombat = function()
+		local state = _G.Raid.attackState
+		if not state then
 			return
 		end
-		_G.Raid.last_skill = now
-		if GetSetting("z") then
-			_G.Raid.castSkill("Z")
+		state.generation = state.generation + 1
+		state.requestedUntil = 0
+		for _, job in pairs(state.jobs) do
+			if job.thread then
+				pcall(task.cancel, job.thread)
+			end
+			job.finished = true
 		end
-		if GetSetting("x") then
-			_G.Raid.castSkill("X")
+		state.jobs = {}
+		state.m1InFlight = 0
+		state.skillInFlight = 0
+		for _, job in pairs(state.remoteJobs) do
+			if job.thread then
+				pcall(task.cancel, job.thread)
+			end
+			job.finished = true
 		end
-		if GetSetting("c") then
-			_G.Raid.castSkill("C")
-		end
-		if GetSetting("v") then
-			_G.Raid.castSkill("V")
-		end
-		if GetSetting("f") then
-			_G.Raid.castSkill("F")
-		end
-		if GetSetting("b") then
-			_G.Raid.castSkill("B")
-		end
-		if GetSetting("e") then
-			_G.Raid.castSkill("E")
+		state.remoteJobs = {}
+		state.remoteInFlight = 0
+		state.skillReadyAt = {}
+		state.opeToolUntil = 0
+		_G.Raid._loadoutGeneration = (_G.Raid._loadoutGeneration or 0) + 1
+		_G.Raid._loadoutBusy = false
+		_G.Raid.current_target = nil
+		_G.Raid._mainLoopBusy = false
+		if _G.Raid.clearDungeonFarm then
+			_G.Raid.clearDungeonFarm()
 		end
 	end
+
+	spawn(function()
+		while task.wait(0.015) do
+			pcall(function()
+				if GetSetting("auto_dungeon_v2") and _G.Raid.inraid then
+					_G.Raid.dispatchM1()
+				end
+			end)
+		end
+	end)
 
 	_G.Raid.buso = function()
 		if not GetSetting("buso") then
@@ -20467,11 +21713,26 @@ local function run(B, T, P, DfT, ...)
 		if not GetSetting("ken") then
 			return
 		end
-		pcall(function()
-			local kenOpen = Workspace.PlayerCharacters[LocalPlayer.Name].Services.KenOpen.Value
-			if not kenOpen and tick() - (_G.Raid.last_ken or 0) > 2 then
+		local ok, kenOpen = pcall(function()
+			return Workspace.PlayerCharacters[LocalPlayer.Name].Services.KenOpen.Value
+		end)
+		if not ok or kenOpen or _G.Raid._kenBusy or tick() - (_G.Raid.last_ken or 0) <= 2 then
+			return
+		end
+		_G.Raid.last_ken = tick()
+		_G.Raid._kenBusy = true
+		local finished = false
+		local invokeThread = task.spawn(function()
+			pcall(function()
 				ReplicatedStorage.Chest.Remotes.Functions.KenEvent:InvokeServer()
-				_G.Raid.last_ken = tick()
+			end)
+			finished = true
+			_G.Raid._kenBusy = false
+		end)
+		task.delay(3, function()
+			if not finished then
+				pcall(task.cancel, invokeThread)
+				_G.Raid._kenBusy = false
 			end
 		end)
 	end
@@ -20492,10 +21753,15 @@ local function run(B, T, P, DfT, ...)
 
 	_G.Raid.removeFarmFix = function()
 		local f = _G.Raid.farmFix
+		f.generation = (f.generation or 0) + 1
 		f.target = nil
-		if f.thread then
-			f.thread = nil
+		f.bound = false
+		if f.renderStepName then
+			pcall(function()
+				RunService:UnbindFromRenderStep(f.renderStepName)
+			end)
 		end
+		f.thread = nil
 		if f.pos then
 			pcall(function()
 				f.pos:Destroy()
@@ -20508,54 +21774,98 @@ local function run(B, T, P, DfT, ...)
 			end)
 			f.gyro = nil
 		end
+		local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
+		if humanoid then
+			humanoid.PlatformStand = false
+			humanoid.AutoRotate = true
+		end
+		f.root = nil
 	end
 
-	_G.Raid.applyFarmFix = function(targetCF)
+	_G.Raid.getFarmTargetCFrame = function(target, height)
+		if typeof(target) == "CFrame" then
+			return target
+		end
+		local part = nil
+		if typeof(target) == "Instance" then
+			if target:IsA("BasePart") then
+				part = target
+			elseif target:IsA("Model") then
+				part = target:FindFirstChild("HumanoidRootPart") or target.PrimaryPart
+			end
+		end
+		if not part or not part.Parent then
+			return nil
+		end
+		return _G.Raid.downwardCFrame(part.Position + Vector3.new(0, height or 8, 0))
+	end
+
+	_G.Raid.applyFarmFix = function(target, height)
 		local f = _G.Raid.farmFix
-		f.target = targetCF
-		if f.thread then
+		f.target = target
+		f.height = height or f.height or 8
+		if f.bound then
 			return
 		end
-		local root = _G.Raid.getRoot(LocalPlayer.Character)
-		if not root then
-			return
-		end
-		if not f.pos or not f.pos.Parent then
-			if f.pos then
-				f.pos:Destroy()
-			end
-			f.pos = Instance.new("BodyPosition")
-			f.pos.MaxForce = Vector3.new(1000000000, 1000000000, 1000000000)
-			f.pos.D = 100000
-			f.pos.P = 1000000
-			f.pos.Parent = root
-		end
-		if not f.gyro or not f.gyro.Parent then
-			if f.gyro then
-				f.gyro:Destroy()
-			end
-			f.gyro = Instance.new("BodyGyro")
-			f.gyro.MaxTorque = Vector3.new(1000000000, 1000000000, 1000000000)
-			f.gyro.D = 50000
-			f.gyro.P = 500000
-			f.gyro.Parent = root
-		end
-		f.thread = task.spawn(function()
-			while f.target do
-				if root and root.Parent then
+		f.generation = (f.generation or 0) + 1
+		local generation = f.generation
+		f.bound = true
+		f.thread = true -- compatibility/telemetry: the owner is a render-step binding.
+		local ok, err = pcall(function()
+			RunService:UnbindFromRenderStep(f.renderStepName)
+			RunService:BindToRenderStep(f.renderStepName, Enum.RenderPriority.Last.Value + 10, function()
+				if not f.bound
+					or f.generation ~= generation
+					or not f.target
+					or not GetSetting("auto_dungeon_v2")
+				then
+					return
+				end
+				local root = _G.Raid.getRoot(LocalPlayer.Character)
+				local targetCF = _G.Raid.getFarmTargetCFrame(f.target, f.height)
+				if not root or not targetCF then
+					return
+				end
+				if f.root ~= root then
 					if f.pos then
-						f.pos.Position = f.target.Position
+						pcall(function()
+							f.pos:Destroy()
+						end)
 					end
 					if f.gyro then
-						f.gyro.CFrame = f.target
+						pcall(function()
+							f.gyro:Destroy()
+						end)
 					end
-					root.CFrame = f.target
-					root.AssemblyLinearVelocity = Vector3.zero
-					root.AssemblyAngularVelocity = Vector3.zero
+					f.root = root
+					f.pos = Instance.new("BodyPosition")
+					f.pos.MaxForce = Vector3.new(1000000000, 1000000000, 1000000000)
+					f.pos.D = 100000
+					f.pos.P = 1000000
+					f.pos.Parent = root
+					f.gyro = Instance.new("BodyGyro")
+					f.gyro.MaxTorque = Vector3.new(1000000000, 1000000000, 1000000000)
+					f.gyro.D = 50000
+					f.gyro.P = 500000
+					f.gyro.Parent = root
 				end
-				task.wait(0.005)
-			end
+				local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
+				if humanoid then
+					humanoid.PlatformStand = true
+					humanoid.AutoRotate = false
+				end
+				f.pos.Position = targetCF.Position
+				f.gyro.CFrame = targetCF
+				root.CFrame = targetCF
+				root.AssemblyLinearVelocity = Vector3.zero
+				root.AssemblyAngularVelocity = Vector3.zero
+			end)
 		end)
+		if not ok then
+			f.bound = false
+			f.thread = nil
+			_G.Raid.attackState.lastError = "dungeon pose binding failed: " .. tostring(err)
+		end
 	end
 
 	_G.Raid.stopOrbit = function()
@@ -20589,8 +21899,7 @@ local function run(B, T, P, DfT, ...)
 		end
 		_G.Raid.stopOrbit()
 		_G.Raid.removeFarmFix()
-		local root = _G.Raid.getRoot(LocalPlayer.Character)
-		if not root then
+		if not _G.Raid.getRoot(LocalPlayer.Character) then
 			return
 		end
 		local hum = LocalPlayer.Character:FindFirstChild("Humanoid")
@@ -20601,7 +21910,7 @@ local function run(B, T, P, DfT, ...)
 		o.target = target
 		o.angle = math.random() * math.pi * 2
 		o.thread = task.spawn(function()
-			while o.active and o.target and o.target.Parent do
+			while o.active and o.target and o.target.Parent and GetSetting("auto_dungeon_v2") do
 				local hrp = o.target:FindFirstChild("HumanoidRootPart")
 				local humT = o.target:FindFirstChild("Humanoid")
 				if not hrp or not humT or humT.Health <= 0 then
@@ -20611,7 +21920,8 @@ local function run(B, T, P, DfT, ...)
 				local speed = GetSetting("orbit_speed") or 2.5
 				o.angle = o.angle + (speed * 0.03)
 				local offset = Vector3.new(math.cos(o.angle) * o.radius, height, math.sin(o.angle) * o.radius)
-				local cf = CFrame.new(hrp.Position + offset, hrp.Position)
+				local cf = _G.Raid.downwardCFrame(hrp.Position + offset)
+				local root = _G.Raid.getRoot(LocalPlayer.Character)
 				if root and root.Parent then
 					root.CFrame = cf
 					root.AssemblyLinearVelocity = Vector3.zero
@@ -20647,48 +21957,132 @@ local function run(B, T, P, DfT, ...)
 		else
 			_G.Raid.stopOrbit()
 			local height = GetSetting("dungeon_farm_height") or 8
-			local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-			_G.Raid.applyFarmFix(targetCF)
+			_G.Raid.applyFarmFix(targetMob, height)
 		end
 	end
 
-	_G.Raid.isDungeonBoss = function(mobName)
+	_G.Raid.isDungeonBoss = function(mob)
+		if typeof(mob) == "Instance" and mob:GetAttribute("Boss") == true then
+			return true
+		end
+		local mobName = typeof(mob) == "Instance" and mob.Name or tostring(mob or "")
 		for _, bossName in ipairs(_G.Raid.dungeonBosses) do
-			if string.find(mobName, bossName) then
+			if string.find(mobName, bossName, 1, true) then
 				return true
 			end
 		end
 		return false
+	end
+
+	_G.Raid.getDungeonModel = function()
+		local islandFolder = Workspace:FindFirstChild("Island")
+		if not islandFolder then
+			return nil
+		end
+		for _, island in ipairs(islandFolder:GetChildren()) do
+			if island:IsA("Model")
+				and string.match(island.Name, "^%(Real%) .+ Dungeon$")
+				and island:GetAttribute("Loaded") == true
+			then
+				return island
+			end
+		end
+		return nil
+	end
+
+	_G.Raid.refreshDungeonBounds = function(force)
+		local bounds = _G.Raid.dungeonBounds
+		local now = os.clock()
+		local model = _G.Raid.getDungeonModel()
+		if not force and bounds.model == model and now - (bounds.checkedAt or 0) < 0.75 then
+			return bounds.center, bounds.size, model
+		end
+		bounds.checkedAt = now
+		bounds.model = model
+		bounds.center = nil
+		bounds.size = nil
+		if model then
+			local ok, cf, size = pcall(model.GetBoundingBox, model)
+			if ok and typeof(cf) == "CFrame" and typeof(size) == "Vector3" then
+				bounds.center = cf.Position
+				bounds.size = size
+			end
+		end
+		return bounds.center, bounds.size, model
+	end
+
+	_G.Raid.isDungeonMobValid = function(mob)
+		if not mob or not mob:IsA("Model") or not mob.Parent then
+			return false
+		end
+		local humanoid = mob:FindFirstChild("Humanoid")
+		local root = mob:FindFirstChild("HumanoidRootPart")
+		if not humanoid or humanoid.Health <= 0 or not root then
+			return false
+		end
+		local center, size, model = _G.Raid.refreshDungeonBounds(false)
+		if not model or not center or not size then
+			return false
+		end
+		local delta = root.Position - center
+		local margin = 180
+		return math.abs(delta.X) <= size.X * 0.5 + margin
+			and math.abs(delta.Y) <= size.Y * 0.5 + margin
+			and math.abs(delta.Z) <= size.Z * 0.5 + margin
+	end
+
+	_G.Raid.selectTarget = function()
+		local folder = Workspace:FindFirstChild("MOB")
+		local playerRoot = _G.Raid.getRoot(LocalPlayer.Character)
+		if not folder or not playerRoot then
+			return nil, false
+		end
+		local current = _G.Raid.current_target
+		local currentValid = _G.Raid.isDungeonMobValid(current)
+		local currentBoss = currentValid and _G.Raid.isDungeonBoss(current)
+		local nearestBoss, nearestBossDistance = nil, math.huge
+		local nearestMob, nearestMobDistance = nil, math.huge
+		for _, mob in ipairs(folder:GetChildren()) do
+			if _G.Raid.isDungeonMobValid(mob) then
+				local root = mob:FindFirstChild("HumanoidRootPart")
+				local distanceToPlayer = (root.Position - playerRoot.Position).Magnitude
+				if _G.Raid.isDungeonBoss(mob) then
+					if distanceToPlayer < nearestBossDistance then
+						nearestBoss = mob
+						nearestBossDistance = distanceToPlayer
+					end
+				elseif distanceToPlayer < nearestMobDistance then
+					nearestMob = mob
+					nearestMobDistance = distanceToPlayer
+				end
+			end
+		end
+		if currentBoss then
+			return current, true
+		end
+		if nearestBoss then
+			return nearestBoss, true
+		end
+		if currentValid then
+			return current, false
+		end
+		return nearestMob, false
 	end
 
 	_G.Raid.hasMobsInFloor = function()
-		local folder = Workspace:FindFirstChild("MOB")
-		if not folder then
-			return false
-		end
-		for _, mob in pairs(folder:GetChildren()) do
-			if mob:IsA("Model") and mob:FindFirstChild("Humanoid") and mob.Humanoid.Health > 0 then
-				return true
-			end
-		end
-		return false
+		local target = _G.Raid.selectTarget()
+		return target ~= nil
 	end
 
 	_G.Raid.checkInRaid = function()
 		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
 		local hasDungeonUi = playerGui and playerGui:FindFirstChild("DungeonUI") ~= nil
+		local model = _G.Raid.getDungeonModel()
+		local root = _G.Raid.getRoot(LocalPlayer.Character)
 		local hasLoadedDungeon = false
-		local islandFolder = Workspace:FindFirstChild("Island")
-		if islandFolder then
-			for _, island in ipairs(islandFolder:GetChildren()) do
-				if island:IsA("Model")
-					and string.match(island.Name, "^%(Real%) .+ Dungeon$")
-					and island:GetAttribute("Loaded") == true
-				then
-					hasLoadedDungeon = true
-					break
-				end
-			end
+		if model and root then
+			local ok, modelCF = pcall(model.GetPivot, model)
+			hasLoadedDungeon = ok and (root.Position - modelCF.Position).Magnitude < 5000
 		end
 
 		-- DungeonUI is created from the server's DungeonUI effect. The loaded
@@ -20703,11 +22097,18 @@ local function run(B, T, P, DfT, ...)
 
 	_G.Raid.updateFloor = function()
 		local ok, floor = pcall(function()
+			local replicatedFloor = tonumber(ReplicatedStorage:GetAttribute("DungeonFloor"))
+			if replicatedFloor and replicatedFloor >= 1 and replicatedFloor <= 5 then
+				return replicatedFloor
+			end
 			local ui = LocalPlayer.PlayerGui:FindFirstChild("DungeonUI")
 			if not ui then
 				return _G.Raid.current_floor
 			end
-			local label = ui:FindFirstChild("Floor", true) or ui:FindFirstChild("FloorLabel", true)
+			local dungeonFrame = ui:FindFirstChild("DungeonFrame")
+			local innerFrame = dungeonFrame and dungeonFrame:FindFirstChild("Frame")
+			local floorsFrame = innerFrame and innerFrame:FindFirstChild("FloorsFrame")
+			local label = floorsFrame and floorsFrame:FindFirstChild("TextLabel")
 			if label and label:IsA("TextLabel") then
 				local n = tonumber(string.match(label.Text or "", "%d+"))
 				if n then
@@ -20723,9 +22124,30 @@ local function run(B, T, P, DfT, ...)
 		return _G.Raid.current_floor
 	end
 
+	_G.Raid.getFloorCFrame = function(floor)
+		local model = _G.Raid.getDungeonModel()
+		local floorObject = model and model:FindFirstChild("Floor" .. tostring(floor), true)
+		if not floorObject then
+			return nil
+		end
+		local position = nil
+		if floorObject:IsA("BasePart") then
+			position = floorObject.Position
+		elseif floorObject:IsA("Model") then
+			local ok, cf = pcall(floorObject.GetPivot, floorObject)
+			position = ok and cf.Position or nil
+		end
+		if not position then
+			return nil
+		end
+		return _G.Raid.downwardCFrame(position + Vector3.new(0, 7, 0))
+	end
+
 	_G.Raid.teleportToFloor = function(floor)
-		local cf = _G.Raid.floorCFrames[floor] or _G.Raid.floorCFrames[1]
-		_G.Raid.tp(cf)
+		local cf = _G.Raid.getFloorCFrame(floor)
+		if cf then
+			_G.Raid.tp(cf)
+		end
 		return cf
 	end
 
@@ -20741,25 +22163,105 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	_G.Raid._difficultyAttemptsByGui = setmetatable({}, { __mode = "k" })
+	_G.Raid.difficultyTelemetry = {
+		requested = nil,
+		attempts = 0,
+		clickConfirmed = false,
+		lastDispatchReason = nil,
+		loadedModel = nil,
+		result = "idle",
+	}
+	_G.Raid.difficultyTelemetryHistory = {}
 
-	_G.Raid.selectDifficulty = function()
+	_G.Raid.archiveDifficultyTelemetry = function()
+		local telemetry = _G.Raid.difficultyTelemetry
+		if not telemetry
+			or not telemetry.result
+			or telemetry.result == "idle"
+			or telemetry.result == "waiting_for_picker"
+		then
+			return
+		end
+		table.insert(_G.Raid.difficultyTelemetryHistory, {
+			at = os.clock(),
+			requested = telemetry.requested,
+			attempts = telemetry.attempts,
+			clickConfirmed = telemetry.clickConfirmed,
+			lastDispatchReason = telemetry.lastDispatchReason,
+			loadedModel = telemetry.loadedModel,
+			result = telemetry.result,
+		})
+		while #_G.Raid.difficultyTelemetryHistory > 12 do
+			table.remove(_G.Raid.difficultyTelemetryHistory, 1)
+		end
+	end
+
+	_G.Raid.normalizeDifficulty = function(value)
+		value = string.lower(tostring(value or ""))
+		if value == "medium" or value == "normal" then
+			return "normal"
+		elseif value == "easy" or value == "hard" then
+			return value
+		end
+		return value
+	end
+
+	_G.Raid.getLoadedDungeonDifficulty = function()
+		local model = _G.Raid.getDungeonModel()
+		if not model then
+			return nil, nil
+		end
+		local name = string.match(model.Name, "^%(Real%) (.+) Dungeon$")
+		return name and _G.Raid.normalizeDifficulty(name) or nil, model
+	end
+
+	_G.Raid.selectDifficulty = function(entryGeneration)
 		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
 		if not playerGui then
 			return false
 		end
+		local function entryStillValid()
+			if not GetSetting("auto_dungeon_v2") then
+				return false
+			end
+			if entryGeneration ~= nil and _G.Raid._entryGeneration ~= entryGeneration then
+				return false
+			end
+			local committed = _G._GenesisUpdateDungeonCommit()
+			if committed then
+				return true
+			end
+			local canStart = _G._GenesisCanStartDungeon()
+			return canStart == true
+		end
+
+		local current = tostring(GetSetting("dungeon_select") or "Easy")
+		local requestedDifficulty = _G.Raid.normalizeDifficulty(current)
+		local telemetry = _G.Raid.difficultyTelemetry
+		_G.Raid.archiveDifficultyTelemetry()
+		telemetry.requested = current
+		telemetry.attempts = 0
+		telemetry.clickConfirmed = false
+		telemetry.lastDispatchReason = nil
+		telemetry.loadedModel = nil
+		telemetry.result = "waiting_for_picker"
 
 		-- The server creates ChooseMap only after the entrance circle's 20-second timer.
 		-- Wait for the actual GUI instead of assuming an exact countdown duration.
 		local chooseMap = nil
 		local deadline = os.clock() + 35
 		local nextRecenter = 0
-		while GetSetting("auto_dungeon_v2") and os.clock() < deadline do
+		while entryStillValid() and os.clock() < deadline do
 			if _G.Raid.checkInRaid() then
+				local loadedDifficulty, model = _G.Raid.getLoadedDungeonDifficulty()
+				telemetry.loadedModel = model and model.Name or nil
+				telemetry.result = loadedDifficulty == requestedDifficulty and "already_loaded" or "already_in_raid"
 				return true
 			end
 
 			chooseMap = playerGui:FindFirstChild("ChooseMap")
 			if chooseMap and chooseMap:FindFirstChild("ChooseMapFrame") then
+				_G._GenesisUpdateDungeonCommit()
 				break
 			end
 
@@ -20771,17 +22273,18 @@ local function run(B, T, P, DfT, ...)
 			task.wait(0.25)
 		end
 
-		if not chooseMap or not chooseMap.Parent or not GetSetting("auto_dungeon_v2") then
+		if not chooseMap or not chooseMap.Parent or not entryStillValid() then
+			telemetry.result = entryStillValid() and "picker_not_found" or "entry_cancelled"
 			return false
 		end
 
 		local chooseMapFrame = chooseMap:FindFirstChild("ChooseMapFrame")
 		local mapFrame = chooseMapFrame and chooseMapFrame:FindFirstChild("MapFrame")
 		if not mapFrame then
+			telemetry.result = "map_frame_not_found"
 			return false
 		end
 
-		local current = tostring(GetSetting("dungeon_select") or "Easy")
 		local aliases = { current }
 		if current == "Normal" then
 			table.insert(aliases, "Medium")
@@ -20814,50 +22317,111 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		if not button or not _G._GenesisIsVisibleGuiButton(button) then
+			telemetry.result = "difficulty_button_not_found"
 			return false
 		end
+		-- A completed dungeon model may remain replicated while the next picker is
+		-- already visible. Only a replacement model can verify this new selection.
+		local staleModel = _G.Raid.getDungeonModel()
 
 		local attemptCount = _G.Raid._difficultyAttemptsByGui[chooseMap] or 0
-		while attemptCount < 3 and chooseMap.Parent and GetSetting("auto_dungeon_v2") do
+		while attemptCount < 3 and chooseMap.Parent and entryStillValid() do
 			attemptCount = attemptCount + 1
 			_G.Raid._difficultyAttemptsByGui[chooseMap] = attemptCount
+			telemetry.attempts = attemptCount
 
 			-- Re-dispatch the same validated choice only if this exact popup remains.
-			local fired = _G._GenesisDispatchGuiButton(button)
+			local fired, dispatchReason = _G._GenesisDispatchGuiButton(button)
+			telemetry.lastDispatchReason = dispatchReason
 			if not fired then
-				return false
+				telemetry.result = "dispatch_failed"
+				task.wait(0.15)
+				if not _G._GenesisIsVisibleGuiButton(button) then
+					break
+				end
+				continue
 			end
+			telemetry.clickConfirmed = true
+			telemetry.result = "click_confirmed"
 
-			local verifyDeadline = os.clock() + 3
+			local verifyDeadline = os.clock() + 20
 			repeat
-				if _G.Raid.checkInRaid() or not chooseMap.Parent then
-					return true
+				local loadedDifficulty, model = _G.Raid.getLoadedDungeonDifficulty()
+				if model and model ~= staleModel then
+					telemetry.loadedModel = model.Name
+					if loadedDifficulty == requestedDifficulty then
+						telemetry.result = "verified"
+						return true
+					end
+					telemetry.result = "loaded_wrong_difficulty"
+					return false
 				end
-				if chooseMap:IsA("ScreenGui") and not chooseMap.Enabled then
-					return true
-				end
-				if chooseMapFrame:IsA("GuiObject") and not chooseMapFrame.Visible then
-					return true
+				if not chooseMap.Parent
+					or (chooseMap:IsA("ScreenGui") and not chooseMap.Enabled)
+					or (chooseMapFrame:IsA("GuiObject") and not chooseMapFrame.Visible)
+				then
+					local inRaid = _G.Raid.checkInRaid()
+					local committed = _G._GenesisUpdateDungeonCommit()
+					telemetry.result = inRaid and "entered_unverified" or "picker_closed_committed"
+					return inRaid or committed
 				end
 				task.wait(0.1)
-			until os.clock() >= verifyDeadline
+			until os.clock() >= verifyDeadline or not entryStillValid()
+
+			if not chooseMap.Parent
+				or (chooseMap:IsA("ScreenGui") and not chooseMap.Enabled)
+				or (chooseMapFrame:IsA("GuiObject") and not chooseMapFrame.Visible)
+			then
+				telemetry.result = _G.Raid.checkInRaid() and "entered_unverified" or "picker_closed_unverified"
+				return _G.Raid.checkInRaid()
+			end
 		end
 
-		-- A vote-style menu may remain visible while the server waits for players.
-		-- The same generated popup is capped at three dispatches to prevent spam.
-		return (_G.Raid._difficultyAttemptsByGui[chooseMap] or 0) > 0
+		-- Never equate "we sent input" with a successful choice. The popup is
+		-- bounded to three hit-tested dispatches and records an explicit result.
+		telemetry.result = telemetry.clickConfirmed and "verification_timed_out" or telemetry.result
+		return false
 	end
 
 	_G.Raid.cycleTools = function()
+		if os.clock() < (_G.Raid.attackState.opeToolUntil or 0) then
+			return nil
+		end
+		if (GetSetting("dungeon_cast_method") or "Remote (Aimbot)") == "Remote (Aimbot)" then
+			-- The remote skill path can cast configured Backpack tools directly.
+			-- Keeping one real M1 weapon in hand removes the half-second unequip gaps.
+			return _G.Raid.ensureBaseCombatTool()
+		end
+		local state = _G.Raid.attackState
+		if state.skillInFlight > 0 or os.clock() < state.toolReadyAt then
+			return nil
+		end
 		local tools = GetSetting("dungeon_outside_tools") or { "Combat", "Fruit Power" }
+		if GetSetting("ope_method_dungeon") and _G.Raid.findOpeTool() then
+			tools = { "Fruit Power" }
+		end
 		if not tools or #tools == 0 then
-			return
+			return nil
 		end
 		_G.Raid._toolIdx = (_G.Raid._toolIdx or 0) + 1
 		if _G.Raid._toolIdx > #tools then
 			_G.Raid._toolIdx = 1
 		end
-		_G.Raid.tooltip(tools[_G.Raid._toolIdx])
+		local selected = tools[_G.Raid._toolIdx]
+		local tool = _G.Raid.tooltip(selected)
+		if not tool then
+			-- Do not get stuck forever on a configured category that the player does
+			-- not own. Try each remaining category once, deterministically.
+			for _ = 2, #tools do
+				_G.Raid._toolIdx = (_G.Raid._toolIdx % #tools) + 1
+				selected = tools[_G.Raid._toolIdx]
+				tool = _G.Raid.tooltip(selected)
+				if tool then
+					break
+				end
+			end
+		end
+		return tool
 	end
 
 	_G.Raid.cleanupEffectTracker = function()
@@ -20869,26 +22433,53 @@ local function run(B, T, P, DfT, ...)
 		end
 	end
 
-	_G.Raid.isDangerousEffect = function(effect, bossPos, playerPos)
+	_G.Raid.getAttackPattern = function(effect)
 		local name = string.lower(effect.Name or "")
-		local isMatch = false
 		for _, pattern in pairs(_G.Raid.attackPatterns) do
-			if name:find(pattern) then
-				isMatch = true
-				break
+			if name:find(pattern, 1, true) then
+				return pattern
 			end
 		end
-		if not isMatch then
+		return nil
+	end
+
+	_G.Raid.getEffectDangerDuration = function(effect)
+		local name = string.lower(effect.Name or "")
+		-- Crab warning disks remain replicated for five seconds. Their damaging
+		-- phase continues after the old 2.2-second generic cutoff, so keep tracking
+		-- those disks for their actual replicated lifetime (with a small cap).
+		if name:find("warning", 1, true) then
+			return 5.2
+		end
+		if name:find("circ", 1, true) or name:find("waterball", 1, true) then
+			return 3.2
+		end
+		return _G.Raid.EFFECT_MAX_AGE
+	end
+
+	_G.Raid.isDangerousEffect = function(effect, bossPos, playerPos)
+		if not _G.Raid.getAttackPattern(effect) then
 			return false, nil
 		end
 		local part = effect:IsA("BasePart") and effect or effect:FindFirstChildWhichIsA("BasePart")
 		if not part then
 			return false, nil
 		end
-		if (part.Position - playerPos).Magnitude > 300 then
+		local function horizontalDistance(a, b)
+			local dx = a.X - b.X
+			local dz = a.Z - b.Z
+			return math.sqrt(dx * dx + dz * dz)
+		end
+		-- Effect centers alone are misleading for the 300/800-stud warning disks,
+		-- and vertical farm height must not make a ground hazard look farther away.
+		local effectRadius = math.clamp(math.max(part.Size.X, part.Size.Z) * 0.5, 0, 400)
+		if horizontalDistance(part.Position, playerPos) > 300 + effectRadius then
 			return false, nil
 		end
-		if bossPos and (part.Position - bossPos).Magnitude > 180 then
+		-- Crab target markers and follow-up pillars can legitimately be more than
+		-- 300 studs from the boss. Player proximity is the primary relevance gate;
+		-- retain only a broad arena-level boss bound to reject unrelated effects.
+		if bossPos and horizontalDistance(part.Position, bossPos) > 500 + effectRadius then
 			return false, nil
 		end
 		return true, part.Position
@@ -20914,7 +22505,7 @@ local function run(B, T, P, DfT, ...)
 				_G.Raid.effectFirstSeen[effect] = now
 			end
 			local age = now - _G.Raid.effectFirstSeen[effect]
-			if age <= _G.Raid.EFFECT_MAX_AGE then
+			if age <= _G.Raid.getEffectDangerDuration(effect) then
 				local dangerous, pos = _G.Raid.isDangerousEffect(effect, bossPos, playerPos)
 				if dangerous then
 					if not getPosition then
@@ -20938,24 +22529,43 @@ local function run(B, T, P, DfT, ...)
 		return d
 	end
 
+	_G.Raid.isLargeTrackingBoss = function(mob)
+		if not mob then
+			return false
+		end
+		local name = mob.Name or ""
+		return name:find("Veyzor", 1, true) ~= nil
+			or name:find("Chaos Crab", 1, true) ~= nil
+			or name:find("Craberno", 1, true) ~= nil
+	end
+
 	_G.Raid.getAttackPosition = function()
 		local _, pos = _G.Raid.scanAttacks(true)
 		return pos
 	end
 
 	_G.Raid.stopDodge = function()
-		if not _G.Raid.dodge_active then
-			return
-		end
 		_G.Raid.dodge_active = false
+		_G.Raid.dodge_retreating = false
+		_G.Raid.dodge_phase = nil
+		_G.Raid.dodge_phase_started = 0
+		_G.Raid.dodge_generation = (_G.Raid.dodge_generation or 0) + 1
+		if _G.Raid.dodge_render_step_name then
+			pcall(function()
+				RunService:UnbindFromRenderStep(_G.Raid.dodge_render_step_name)
+			end)
+		end
+		if _G.Raid.dodge_gyro then
+			pcall(function()
+				_G.Raid.dodge_gyro:Destroy()
+			end)
+			_G.Raid.dodge_gyro = nil
+		end
 		if _G.Raid.dodge_force_thread then
 			_G.Raid.dodge_force_thread = nil
 		end
 		if _G.Raid.dodge_monitor_thread then
 			_G.Raid.dodge_monitor_thread = nil
-		end
-		if _G.Raid.dodge_attack_thread then
-			_G.Raid.dodge_attack_thread = nil
 		end
 		local root = _G.Raid.getRoot(LocalPlayer.Character)
 		if root then
@@ -20974,283 +22584,918 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 		local now = tick()
-		if now - (_G.Raid.last_dodge_time or 0) < 1.8 then
+		local target = _G.Raid.current_target
+		local targetRoot = target and target:FindFirstChild("HumanoidRootPart")
+		local targetHumanoid = target and target:FindFirstChild("Humanoid")
+		local root = _G.Raid.getRoot(LocalPlayer.Character)
+		local floorCF = _G.Raid.getFloorCFrame(_G.Raid.current_floor)
+		if not targetRoot or not targetHumanoid or targetHumanoid.Health <= 0 or not root or not floorCF then
 			return
 		end
+
+		local isLargeBoss = _G.Raid.isLargeTrackingBoss(target)
+		local dodgeCooldown = 1.8
+		if now - (_G.Raid.last_dodge_time or 0) < dodgeCooldown then
+			return
+		end
+
 		_G.Raid.dodge_active = true
+		_G.Raid.dodge_retreating = false
+		_G.Raid.dodge_phase = "evade"
+		_G.Raid.dodge_phase_started = now
 		_G.Raid.dodge_start_time = now
 		_G.Raid.last_dodge_time = now
+		_G.Raid.dodge_generation = (_G.Raid.dodge_generation or 0) + 1
+		local generation = _G.Raid.dodge_generation
 		_G.Raid.clearDungeonFarm()
-		local floorCF = _G.Raid.teleportToFloor(_G.Raid.current_floor)
-		if not floorCF then
-			_G.Raid.dodge_active = false
-			return
-		end
+
+		-- Stay inside the loaded floor, but do not mistake 300 studs for safety:
+		-- Craberno's largest warning disk is 800 studs wide. Score raycast-validated
+		-- floor corners against the boss and every visible dangerous effect so the
+		-- dodge clears that disk without returning to the old out-of-bounds retreat.
 		local center = floorCF.Position
-		local attackPos = attackPosition or center
-		local direction = (attackPos - center)
-		if direction.Magnitude < 0.15 then
-			local angle = math.random() * math.pi * 2
-			direction = Vector3.new(math.cos(angle), 0, math.sin(angle))
-		else
-			direction = direction.Unit
-		end
-		local safeOffset = direction * -300
-		local safeX = math.min(math.max(center.X + safeOffset.X, center.X - 350), center.X + 350)
-		local safeZ = math.min(math.max(center.Z + safeOffset.Z, center.Z - 350), center.Z + 350)
-		local safePos = Vector3.new(safeX, center.Y + (customHeight or 210), safeZ)
-		local safeCF = CFrame.new(safePos, center)
-		local root = _G.Raid.getRoot(LocalPlayer.Character)
-		if not root then
-			_G.Raid.dodge_active = false
-			return
-		end
-		local hum = LocalPlayer.Character:FindFirstChild("Humanoid")
-		if hum then
-			hum.PlatformStand = true
-		end
-		root.CFrame = safeCF
-		local boss = _G.Raid.current_target
-
-		_G.Raid.dodge_force_thread = task.spawn(function()
-			while _G.Raid.dodge_active do
-				local r = _G.Raid.getRoot(LocalPlayer.Character)
-				if r and r.Parent then
-					r.CFrame = safeCF
-					r.AssemblyLinearVelocity = Vector3.zero
-					r.AssemblyAngularVelocity = Vector3.zero
+		local attackPos = attackPosition or targetRoot.Position
+		local height = customHeight or (isLargeBoss and 230 or 210)
+		local threats = { attackPos, targetRoot.Position }
+		local effects = Workspace:FindFirstChild("Effects")
+		if effects then
+			for _, effect in ipairs(effects:GetChildren()) do
+				local dangerous, position = _G.Raid.isDangerousEffect(effect, targetRoot.Position, root.Position)
+				if dangerous and position then
+					table.insert(threats, position)
 				end
-				task.wait(0.03)
 			end
-		end)
+		end
 
-		_G.Raid.dodge_attack_thread = task.spawn(function()
-			local lastSwitch = 0
-			while _G.Raid.dodge_active do
-				local currentBoss = _G.Raid.current_target or boss
-				if currentBoss and currentBoss.Parent then
-					local hrp = currentBoss:FindFirstChild("HumanoidRootPart")
-					local humB = currentBoss:FindFirstChild("Humanoid")
-					if hrp and humB and humB.Health > 0 then
-						_G.pos_skill = hrp.CFrame
-						if tick() - lastSwitch >= (GetSetting("dungeon_tool_switch") or 0.5) then
-							pcall(_G.Raid.cycleTools)
-							lastSwitch = tick()
-							task.wait(0.06)
-						end
-						pcall(_G.Raid.click)
-						pcall(_G.Raid.autoskill)
+		local bestPosition = nil
+		local bestScore = -1
+		local largeCandidates = {}
+		if isLargeBoss then
+			local offsets = {
+				-- Diagonal distance is about 467 studs, clearing an 800-wide disk
+				-- while every individual axis remains inside the safe +/-350 envelope.
+				{ 330, 330 }, { 330, -330 }, { -330, 330 }, { -330, -330 },
+				{ 315, 315 }, { 315, -315 }, { -315, 315 }, { -315, -315 },
+			}
+			local dungeonModel = _G.Raid.getDungeonModel()
+			local rayParams = nil
+			if dungeonModel then
+				rayParams = RaycastParams.new()
+				rayParams.FilterType = Enum.RaycastFilterType.Include
+				rayParams.FilterDescendantsInstances = { dungeonModel }
+			end
+			for _, offset in ipairs(offsets) do
+				local candidate = Vector3.new(center.X + offset[1], center.Y + height, center.Z + offset[2])
+				local onFloor = true
+				if rayParams then
+					onFloor = Workspace:Raycast(
+						Vector3.new(candidate.X, center.Y + 80, candidate.Z),
+						Vector3.new(0, -180, 0),
+						rayParams
+					) ~= nil
+				end
+				if onFloor then
+					table.insert(largeCandidates, candidate)
+					local score = math.huge
+					for _, threat in ipairs(threats) do
+						local dx = candidate.X - threat.X
+						local dz = candidate.Z - threat.Z
+						score = math.min(score, math.sqrt(dx * dx + dz * dz))
+					end
+					if score > bestScore then
+						bestScore = score
+						bestPosition = candidate
 					end
 				end
-				task.wait(0.05)
 			end
+		else
+			-- Ordinary boss telegraphs do not need the expensive full-arena retreat;
+			-- keep their shorter baseline dodge so melee downtime stays bounded.
+			local direction = Vector3.new(attackPos.X - center.X, 0, attackPos.Z - center.Z)
+			if direction.Magnitude < 0.15 then
+				direction = Vector3.new(root.Position.X - center.X, 0, root.Position.Z - center.Z)
+			end
+			if direction.Magnitude < 0.15 then
+				direction = Vector3.new(1, 0, 0)
+			else
+				direction = direction.Unit
+			end
+			bestPosition = Vector3.new(
+				math.clamp(center.X - direction.X * 300, center.X - 350, center.X + 350),
+				center.Y + height,
+				math.clamp(center.Z - direction.Z * 300, center.Z - 350, center.Z + 350)
+			)
+			bestScore = math.huge
+			for _, threat in ipairs(threats) do
+				local dx = bestPosition.X - threat.X
+				local dz = bestPosition.Z - threat.Z
+				bestScore = math.min(bestScore, math.sqrt(dx * dx + dz * dz))
+			end
+		end
+		if not bestPosition then
+			-- Streaming may temporarily hide the large-boss floor geometry from the
+			-- raycast. Retain a bounded diagonal fallback inside the known envelope.
+			local x = attackPos.X >= center.X and -330 or 330
+			local z = attackPos.Z >= center.Z and -330 or 330
+			bestPosition = Vector3.new(center.X + x, center.Y + height, center.Z + z)
+			bestScore = math.huge
+			for _, threat in ipairs(threats) do
+				local dx = bestPosition.X - threat.X
+				local dz = bestPosition.Z - threat.Z
+				bestScore = math.min(bestScore, math.sqrt(dx * dx + dz * dz))
+			end
+		end
+		_G.Raid.lastDodgeSafePosition = bestPosition
+		_G.Raid.lastDodgeSafeScore = bestScore
+		_G.Raid.lastDodgeThreatCount = #threats
+		local safeCF = _G.Raid.downwardCFrame(bestPosition)
+		local lastLargeReposition = 0
+		local lastLargeScan = 0
+		local function refreshLargeSafeCFrame()
+			if not isLargeBoss or #largeCandidates == 0 then
+				return
+			end
+			local checkTime = tick()
+			if checkTime - lastLargeScan < 0.15 then
+				return
+			end
+			lastLargeScan = checkTime
+			local currentRoot = _G.Raid.getRoot(LocalPlayer.Character)
+			local liveEffects = Workspace:FindFirstChild("Effects")
+			if not currentRoot or not liveEffects or not targetRoot.Parent then
+				return
+			end
+
+			local liveThreats = { targetRoot.Position }
+			local dangerCount = 0
+			for _, effect in ipairs(liveEffects:GetChildren()) do
+				if not _G.Raid.effectFirstSeen[effect] then
+					_G.Raid.effectFirstSeen[effect] = checkTime
+				end
+				local age = checkTime - _G.Raid.effectFirstSeen[effect]
+				if age <= _G.Raid.getEffectDangerDuration(effect) then
+					local dangerous, position =
+						_G.Raid.isDangerousEffect(effect, targetRoot.Position, currentRoot.Position)
+					if dangerous and position then
+						dangerCount = dangerCount + 1
+						table.insert(liveThreats, position)
+					end
+				end
+			end
+			if dangerCount == 0 then
+				return
+			end
+
+			local nextPosition = nil
+			local nextScore = -1
+			for _, candidate in ipairs(largeCandidates) do
+				local score = math.huge
+				for _, threat in ipairs(liveThreats) do
+					local dx = candidate.X - threat.X
+					local dz = candidate.Z - threat.Z
+					score = math.min(score, math.sqrt(dx * dx + dz * dz))
+				end
+				if score > nextScore then
+					nextScore = score
+					nextPosition = candidate
+				end
+			end
+			if nextPosition
+				and (nextPosition - safeCF.Position).Magnitude > 40
+				and checkTime - lastLargeReposition >= 0.45
+			then
+				safeCF = _G.Raid.downwardCFrame(nextPosition)
+				lastLargeReposition = checkTime
+				_G.Raid.lastDodgeSafePosition = nextPosition
+				_G.Raid.lastDodgeSafeScore = nextScore
+				_G.Raid.lastDodgeThreatCount = #liveThreats
+				_G.Raid.lastDodgeRepositionAt = checkTime
+				_G.Raid.lastDodgeRepositionCount = (_G.Raid.lastDodgeRepositionCount or 0) + 1
+			end
+		end
+		local function getSafeCFrame()
+			if not targetRoot.Parent then
+				return nil
+			end
+			return safeCF
+		end
+
+		local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.PlatformStand = true
+			humanoid.AutoRotate = false
+		end
+		local dodgeGyro = Instance.new("BodyGyro")
+		dodgeGyro.Name = "GenesisDungeonDodgeGyro"
+		dodgeGyro.MaxTorque = Vector3.new(1000000000, 1000000000, 1000000000)
+		dodgeGyro.D = 50000
+		dodgeGyro.P = 500000
+		dodgeGyro.Parent = root
+		_G.Raid.dodge_gyro = dodgeGyro
+
+		local renderName = _G.Raid.dodge_render_step_name
+		pcall(function()
+			RunService:UnbindFromRenderStep(renderName)
 		end)
+		local bound, bindError = pcall(function()
+			RunService:BindToRenderStep(renderName, Enum.RenderPriority.Last.Value + 11, function()
+				if not _G.Raid.dodge_active
+					or _G.Raid.dodge_generation ~= generation
+					or not GetSetting("auto_dungeon_v2")
+				then
+					return
+				end
+				local liveRoot = _G.Raid.getRoot(LocalPlayer.Character)
+				local safeCF = getSafeCFrame()
+				if liveRoot and liveRoot.Parent and safeCF then
+					local liveHumanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+					if liveHumanoid then
+						liveHumanoid.PlatformStand = true
+						liveHumanoid.AutoRotate = false
+					end
+					if dodgeGyro and dodgeGyro.Parent == liveRoot then
+						dodgeGyro.CFrame = safeCF
+					end
+					liveRoot.CFrame = safeCF
+					liveRoot.AssemblyLinearVelocity = Vector3.zero
+					liveRoot.AssemblyAngularVelocity = Vector3.zero
+				end
+			end)
+		end)
+		if not bound then
+			_G.Raid.attackState.lastError = "dungeon dodge binding failed: " .. tostring(bindError)
+			_G.Raid.stopDodge()
+			return
+		end
+		_G.Raid.dodge_force_thread = true -- compatibility/telemetry: render-step owner.
 
 		_G.Raid.dodge_monitor_thread = task.spawn(function()
 			local cleanCount = 0
-			while _G.Raid.dodge_active do
+			while _G.Raid.dodge_active and _G.Raid.dodge_generation == generation do
 				task.wait(0.1)
-				local elapsed = tick() - _G.Raid.dodge_start_time
+				if not target.Parent
+					or not targetHumanoid.Parent
+					or targetHumanoid.Health <= 0
+					or _G.Raid.current_target ~= target
+				then
+					_G.Raid.stopDodge()
+					break
+				end
+				refreshLargeSafeCFrame()
+				local elapsed = tick() - (_G.Raid.dodge_start_time or tick())
 				if elapsed >= 5.5 then
 					_G.Raid.stopDodge()
 					break
 				end
-				if elapsed < 1.55 then
+				local recentlyDamaged = tick() - (_G.Raid.lastDamageAt or 0) < 0.85
+				if elapsed < 1.55 or recentlyDamaged or _G.Raid.detectAttack() then
 					cleanCount = 0
 				else
-					if not _G.Raid.detectAttack() then
-						cleanCount = cleanCount + 1
-						if cleanCount >= 6 then
-							_G.Raid.stopDodge()
-							break
-						end
-					else
-						cleanCount = 0
+					cleanCount = cleanCount + 1
+					if cleanCount >= 6 then
+						_G.Raid.stopDodge()
+						break
 					end
 				end
 			end
 		end)
 	end
 
-	_G.Raid.opez = function()
-		pcall(function()
-			_G.Raid.tooltip("Fruit Power")
-			task.wait(0.1)
-			_G.Raid.keyboard("Z")
-			_G.Raid.inop = true
+	_G.Raid.updateDamageState = function()
+		local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
+		if not humanoid or humanoid.Health <= 0 then
+			_G.Raid.lastHealth = nil
+			return false
+		end
+		local health = humanoid.Health
+		local previous = _G.Raid.lastHealth
+		_G.Raid.lastHealth = health
+		if previous and health < previous then
+			_G.Raid.lastDamageAmount = previous - health
+			_G.Raid.lastDamageAt = tick()
+			return true
+		end
+		return false
+	end
+
+	_G.Raid.getRaceAbilityHud = function()
+		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+		local mainGui = playerGui and playerGui:FindFirstChild("MainGui")
+		local starterFrame = mainGui and mainGui:FindFirstChild("StarterFrame")
+		local statusEffect = starterFrame and starterFrame:FindFirstChild("StatusEffect")
+		local raceV3 = statusEffect and statusEffect:FindFirstChild("RaceV3")
+		local frame = raceV3 and raceV3:FindFirstChild("Frame")
+		local canvas = frame and frame:FindFirstChild("CanvasGroup")
+		local textLabel = frame and frame:FindFirstChild("TextLabel")
+		local left = canvas and canvas:FindFirstChild("Left")
+		local right = canvas and canvas:FindFirstChild("Right")
+		local text = textLabel and textLabel:IsA("TextLabel") and textLabel.Text or ""
+		local textVisible = textLabel and textLabel:IsA("GuiObject") and textLabel.Visible or false
+		local leftVisible = left and left:IsA("GuiObject") and left.Visible or false
+		local rightVisible = right and right:IsA("GuiObject") and right.Visible or false
+		return {
+			present = raceV3 ~= nil and raceV3:IsA("GuiObject") and raceV3.Visible,
+			cooling = leftVisible or rightVisible or (textVisible and text ~= ""),
+			text = text,
+			textVisible = textVisible,
+			leftVisible = leftVisible,
+			rightVisible = rightVisible,
+		}
+	end
+
+	-- The visible race aura is cloned into Workspace.Effects and welded to the
+	-- character. Cache the matching object so the 30 Hz dungeon loop does not
+	-- repeatedly scan every effect. This is behavioral evidence only, never an
+	-- ownership requirement: clients without a replicated aura retain the bounded
+	-- duration fallback below.
+	_G.Raid.hasLocalRaceAura = function(character)
+		local state = _G.Raid.raceAbility
+		local now = tick()
+		if now - (state.auraCheckedAt or 0) < 0.075 then
+			return state.auraCached == true
+		end
+		state.auraCheckedAt = now
+
+		local effects = Workspace:FindFirstChild("Effects")
+		if not character or not effects then
+			state.auraObject = nil
+			state.auraCached = false
+			return false
+		end
+
+		local function belongsToCharacter(effect)
+			if not effect or effect.Parent ~= effects then
+				return false
+		end
+			local weld = effect:FindFirstChildWhichIsA("Weld", true)
+			local part0 = weld and weld.Part0
+			local part1 = weld and weld.Part1
+			return (part0 and part0:IsDescendantOf(character))
+				or (part1 and part1:IsDescendantOf(character))
+				or false
+		end
+
+		if belongsToCharacter(state.auraObject) then
+			state.auraCached = true
+			return true
+		end
+
+		state.auraObject = nil
+		for _, effect in ipairs(effects:GetChildren()) do
+			if (effect.Name == "Auras" or effect.Name == "AurasPool") and belongsToCharacter(effect) then
+				state.auraObject = effect
+				state.auraCached = true
+				return true
+			end
+		end
+		state.auraCached = false
+		return false
+	end
+
+	_G.Raid.updateRaceAbility = function()
+		local state = _G.Raid.raceAbility
+		local now = tick()
+		local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+		local hud = _G.Raid.getRaceAbilityHud()
+		if not humanoid or humanoid.Health <= 0 then
+			state.pendingUntil = 0
+			state.activeUntil = 0
+			state.auraSeen = false
+			state.auraEnded = false
+			state.auraObject = nil
+			state.auraCached = false
+			state.healthBefore = nil
+			state.humanoid = humanoid
+			state.lastResult = "unavailable"
+			return "unavailable", hud
+		end
+
+		if state.humanoid ~= humanoid then
+			state.humanoid = humanoid
+			state.pendingUntil = 0
+			state.activeUntil = 0
+			state.auraSeen = false
+			state.auraEnded = false
+			state.auraObject = nil
+			state.auraCached = false
+			state.healthBefore = nil
+		end
+
+		local shouldCheckAura = state.pendingUntil > 0
+			or now < (state.activeUntil or 0)
+			or (state.auraSeen and not state.auraEnded)
+		local auraActive = shouldCheckAura and _G.Raid.hasLocalRaceAura(LocalPlayer.Character) or false
+		if auraActive then
+			state.auraSeen = true
+			state.auraEnded = false
+			state.auraLastSeenAt = now
+		elseif state.auraSeen and not state.auraEnded and now - (state.auraLastSeenAt or 0) > 0.2 then
+			-- Resume ordinary positioning as soon as the replicated aura is actually
+			-- gone. The short grace avoids a one-frame reparent/flicker interrupt.
+			state.auraEnded = true
+			state.activeUntil = 0
+		end
+
+		if state.pendingUntil > 0 then
+			local healThreshold = math.max(750, humanoid.MaxHealth * 0.0125)
+			local healed = state.healthBefore ~= nil and humanoid.Health >= state.healthBefore + healThreshold
+			if hud.cooling or healed or auraActive then
+				state.pendingUntil = 0
+				state.activeUntil = math.max(state.activeUntil or 0, (state.lastAttempt or now) + 12.5)
+				state.cooldownUntil = math.max(state.cooldownUntil or 0, (state.lastAttempt or now) + 60)
+				state.confirmed = (state.confirmed or 0) + 1
+				state.lastResult = hud.cooling and "confirmed_hud" or "confirmed_health"
+			elseif now >= state.pendingUntil then
+				state.pendingUntil = 0
+				state.lastResult = "unconfirmed"
+			end
+		end
+
+		if now < (state.activeUntil or 0) then
+			return "active", hud
+		end
+		if now < (state.pendingUntil or 0) then
+			return "pending", hud
+		end
+		if hud.cooling or now < (state.cooldownUntil or 0) then
+			return "cooldown", hud
+		end
+		return "ready", hud
+	end
+
+	_G.Raid.tryRaceAbility = function(targetMob)
+		local state = _G.Raid.raceAbility
+		local status, hud = _G.Raid.updateRaceAbility()
+		if status ~= "ready" or state.inputBusy then
+			return status
+		end
+
+		local character = LocalPlayer.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local root = _G.Raid.getRoot(character)
+		local targetRoot = targetMob and targetMob:FindFirstChild("HumanoidRootPart")
+		if not humanoid or humanoid.Health <= 0 or humanoid.MaxHealth <= 0 or not root or not targetRoot then
+			return status
+		end
+		-- Share the user's existing Race V3 HP setting with the fallback retreat.
+		-- The two-second roar and ten-second drain need the player close to a target.
+		local triggerRatio = math.clamp(tonumber(GetSetting("raceV3HealthPercent")) or 30, 1, 100) / 100
+		if humanoid.Health / humanoid.MaxHealth > triggerRatio
+			or (root.Position - targetRoot.Position).Magnitude > 32
+		then
+			return status
+		end
+		if UserInputService:GetFocusedTextBox() then
+			return status
+		end
+
+		local now = tick()
+		if now - (_G.lastRaceAbilityAttempt or 0) < 1.5 then
+			return "recent_input"
+		end
+
+		state.lastAttempt = now
+		state.pendingUntil = now + 3.25
+		-- A failed or unavailable racial ability must never turn into R spam. The
+		-- dungeon continues with its normal dodge path while this bounded timer runs.
+		state.cooldownUntil = now + 60
+		state.auraSeen = false
+		state.auraEnded = false
+		state.auraLastSeenAt = 0
+		state.auraCheckedAt = 0
+		state.auraCached = false
+		state.auraObject = nil
+		state.healthBefore = humanoid.Health
+		state.humanoid = humanoid
+		state.hudWasPresent = hud.present == true
+		state.inputBusy = true
+		state.attempts = (state.attempts or 0) + 1
+		state.lastResult = "input_sent"
+		_G.lastRaceAbilityAttempt = now
+
+		task.spawn(function()
+			local ok = pcall(function()
+				VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
+				task.wait(0.05)
+				VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+			end)
+			state.inputBusy = false
+			if not ok then
+				state.pendingUntil = 0
+				state.cooldownUntil = math.min(state.cooldownUntil, tick() + 5)
+				state.lastResult = "input_error"
+			end
 		end)
+		return "pending"
+	end
+
+	_G.Raid.findOpeTool = function()
+		for _, container in ipairs({ LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack") }) do
+			if container then
+				for _, tool in ipairs(container:GetChildren()) do
+					if tool:IsA("Tool") and string.lower((tool.Name:gsub("[^%w]", ""))) == "opop" then
+						return tool
+					end
+				end
+			end
+		end
+		return nil
+	end
+
+	_G.Raid.getOpeRoom = function()
+		local room = Workspace:FindFirstChild("OpeRoom" .. LocalPlayer.Name)
+		return room and room:IsA("BasePart") and room or nil
+	end
+
+	_G.Raid.isOpeRoomUsable = function()
+		local room = _G.Raid.getOpeRoom()
+		local playerRoot = _G.Raid.getRoot(LocalPlayer.Character)
+		if not room or not playerRoot then
+			return false
+		end
+		local radius = math.max(room.Size.X, room.Size.Y, room.Size.Z) * 0.5 + 15
+		if (playerRoot.Position - room.Position).Magnitude > radius then
+			return false
+		end
+		local target = _G.Raid.current_target
+		local targetRoot = target and target:FindFirstChild("HumanoidRootPart")
+		return not targetRoot or (targetRoot.Position - room.Position).Magnitude <= radius
+	end
+
+	_G.Raid.dispatchOpeToggle = function(mouseHit, phase)
+		local ope = _G.Raid.findOpeTool()
+		local state = _G.Raid.opeState
+		if not ope or os.clock() - state.lastToggle < 3.15 or _G.Raid.attackState.skillInFlight > 0 then
+			return false
+		end
+
+		-- Treat equipping OpOp plus sending Z as one atomic handoff. Previously the
+		-- main combat pass could equip the sword again between those two steps,
+		-- leaving the character parked with no room and almost no usable attacks.
+		local attackState = _G.Raid.attackState
+		attackState.opeToolUntil = os.clock() + (phase == "opening" and 12.25 or 1.25)
+		local started = _G.Raid.startAttackJob("skill", function()
+			local ok, err = pcall(function()
+				local liveOpe = _G.Raid.findOpeTool()
+				local character = LocalPlayer.Character
+				local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+				local backpack = LocalPlayer:FindFirstChild("Backpack")
+				if not liveOpe or not humanoid or not backpack then
+					error("Ope tool or character unavailable")
+				end
+				if liveOpe.Parent ~= character then
+					if liveOpe.Parent ~= backpack then
+						error("Ope tool is outside the character inventory")
+					end
+					humanoid:EquipTool(liveOpe)
+					local equipDeadline = os.clock() + 0.45
+					repeat
+						task.wait()
+					until liveOpe.Parent == character or os.clock() >= equipDeadline
+				end
+				if liveOpe.Parent ~= character then
+					error("Ope tool failed to equip")
+				end
+				_G.Raid.remoteOpeToggle(liveOpe, mouseHit, phase)
+			end)
+			attackState.opeToolUntil = os.clock() + 0.18
+			if not ok then
+				error(err)
+			end
+		end, 12.5)
+		if started then
+			state.phase = phase
+			state.lastToggle = os.clock()
+			attackState.skillsDispatched = attackState.skillsDispatched + 1
+			attackState.lastSkillId = "DF_" .. ope.Name .. "_Z (room)"
+			attackState.skillsByTool[ope.Name] = (attackState.skillsByTool[ope.Name] or 0) + 1
+		else
+			attackState.opeToolUntil = 0
+		end
+		return started
+	end
+
+	_G.Raid.opez = function()
+		local target = _G.Raid.current_target
+		local targetRoot = target and target:FindFirstChild("HumanoidRootPart")
+		local mouseHit = targetRoot and targetRoot.CFrame or _G.Raid.getFloorCFrame(_G.Raid.current_floor)
+		if mouseHit then
+			return _G.Raid.dispatchOpeToggle(mouseHit, "opening")
+		end
+		return false
 	end
 
 	_G.Raid.disableOpeRoom = function()
 		_G.Raid.inop = false
+		local room = _G.Raid.getOpeRoom()
+		if room and _G.Raid.opeState.ownedRoom then
+			_G.Raid.dispatchOpeToggle(room.CFrame, "closing")
+		end
 	end
 
 	_G.Raid.handleFruitPower = function()
-		pcall(function()
-			-- If Ope is available, try to keep Room active.
-			local hasOpe = false
-			for _, tool in pairs(LocalPlayer.Backpack:GetChildren()) do
-				if tool:IsA("Tool") and (string.find(tool.Name, "Ope") or string.find(tool.Name, "Op")) then
-					hasOpe = true
-				end
+		local state = _G.Raid.opeState
+		local ope = _G.Raid.findOpeTool()
+		_G.Raid.has_opop = ope ~= nil
+		if not ope then
+			_G.Raid.inop = false
+			state.phase = "idle"
+			return false
+		end
+		local room = _G.Raid.getOpeRoom()
+		if room and _G.Raid.isOpeRoomUsable() then
+			if state.phase == "opening" then
+				state.ownedRoom = true
 			end
-			for _, tool in pairs(LocalPlayer.Character and LocalPlayer.Character:GetChildren() or {}) do
-				if tool:IsA("Tool") and (string.find(tool.Name, "Ope") or string.find(tool.Name, "Op")) then
-					hasOpe = true
+			state.phase = "active"
+			_G.Raid.inop = true
+			return true
+		end
+		_G.Raid.inop = false
+		if room then
+			state.ownedRoom = true
+			_G.Raid.dispatchOpeToggle(room.CFrame, "closing")
+			return false
+		end
+		if state.phase == "closing" and os.clock() - state.lastToggle < 3.15 then
+			return false
+		end
+		if state.phase == "opening" and os.clock() - state.lastToggle > 4 then
+			state.phase = "idle"
+		end
+		return _G.Raid.opez()
+	end
+
+	_G.Raid.beginEntry = function()
+		if _G.Raid._entryBusy then
+			return
+		end
+		local committed = _G._GenesisUpdateDungeonCommit()
+		local canStart = committed or _G._GenesisCanStartDungeon()
+		if not canStart then
+			return
+		end
+		_G.Raid._entryBusy = true
+		_G.Raid._mainLoopBusy = true -- compatibility/telemetry: entry worker only
+		_G.Raid._entryGeneration = (_G.Raid._entryGeneration or 0) + 1
+		local generation = _G.Raid._entryGeneration
+		_G.Raid._entryCancelReason = nil
+		task.spawn(function()
+			local ok, err = pcall(function()
+				local function entryStillValid()
+					if not GetSetting("auto_dungeon_v2") or _G.Raid._entryGeneration ~= generation then
+						return false
+					end
+					if _G._GenesisUpdateDungeonCommit() then
+						return true
+					end
+					return _G._GenesisCanStartDungeon() == true
 				end
+				local handoffDeadline = os.clock() + 5
+				while fishingOwnsWeaponSlot()
+					and entryStillValid()
+					and os.clock() < handoffDeadline
+				do
+					_G._GenesisPrepareCombatFromFishing("dungeon_entry")
+					task.wait(0.1)
+				end
+				if fishingOwnsWeaponSlot()
+					or not entryStillValid()
+				then
+					return
+				end
+				if _G.Raid.hasConfiguredBasicAttack() then
+					_G.Raid.bootstrapBaseCombatTool(4, function()
+						return entryStillValid()
+					end)
+				end
+				if not entryStillValid() then
+					return
+				end
+				_G.Raid.clearDungeonFarm()
+				if _G.Raid.dodge_active then
+					_G.Raid.stopDodge()
+				end
+				if not _G._GenesisUpdateDungeonCommit() then
+					_G.Raid.teleportToDungeonEntrance()
+				end
+				_G.Raid.selectDifficulty(generation)
+			end)
+			if not ok then
+				_G.Raid.attackState.lastError = tostring(err)
 			end
-			if hasOpe and not _G.Raid.inop then
-				_G.Raid.opez()
+			if _G.Raid._entryGeneration == generation then
+				_G.Raid._entryBusy = false
+				_G.Raid._mainLoopBusy = false
 			end
 		end)
 	end
 
-	-- MAIN DUNGEON LOOP
-	trackGenesisConnection(RunService.Stepped:Connect(function()
-		if _G.Raid._mainLoopBusy then
+	-- MAIN DUNGEON LOOP. All RemoteFunction work is dispatched through bounded
+	-- workers, so this Heartbeat path only handles state, targeting, and movement.
+	_G.Raid._lastMainStep = 0
+	trackGenesisConnection(RunService.Heartbeat:Connect(function()
+		local now = os.clock()
+		if now - (_G.Raid._lastMainStep or 0) < 0.03 then
 			return
 		end
-		_G.Raid._mainLoopBusy = true
-		pcall(function()
+		_G.Raid._lastMainStep = now
+		local ok, err = pcall(function()
+			local dungeonCommitted = _G._GenesisUpdateDungeonCommit()
 			if not GetSetting("auto_dungeon_v2") then
 				if _G.Raid._wasDungeon then
+					_G.Raid._entryGeneration = (_G.Raid._entryGeneration or 0) + 1
+					_G.Raid._entryBusy = false
+					_G.Raid._mainLoopBusy = false
+					_G.Raid.stopCombat()
+					_G.Raid.stopDodge()
+					_G.Raid.disableOpeRoom()
+					_G.Raid._wasDungeon = false
+					_G.Raid.inraid = false
+				end
+				return
+			end
+
+			_G.Raid._wasDungeon = true
+			if not dungeonCommitted then
+				local canStart, reason = _G._GenesisCanStartDungeon()
+				if not canStart then
+					if _G.Raid._entryBusy then
+						_G._GenesisCancelDungeonEntry(reason)
+					end
+					_G.Raid.current_target = nil
+					_G.Raid.attackState.requestedUntil = 0
 					_G.Raid.clearDungeonFarm()
 					if _G.Raid.dodge_active then
 						_G.Raid.stopDodge()
 					end
-					_G.Raid._wasDungeon = false
+					return
 				end
-				return
 			end
 			if fishingOwnsWeaponSlot() then
 				_G._GenesisPrepareCombatFromFishing("dungeon")
 				return
 			end
-			_G.Raid._wasDungeon = true
 
 			-- Use the loading screen's confirmed server action; autoPlay is debounced.
-			-- Do not run entrance/farm movement while a loading screen is active.
 			if autoPlay() then
 				return
 			end
 
 			if not _G.Raid.checkInRaid() then
+				_G.Raid.current_target = nil
+				_G.Raid.attackState.requestedUntil = 0
 				_G.Raid.clearDungeonFarm()
 				if _G.Raid.dodge_active then
 					_G.Raid.stopDodge()
 				end
-				_G.Raid.teleportToDungeonEntrance()
-				task.wait(1)
-				if _G.Raid.selectDifficulty() then
-					task.wait(1)
-				end
+				_G.Raid.current_floor = 1
+				_G.Raid.last_floor = 1
+				-- If the picker has appeared (or just closed), entry is irreversible.
+				-- beginEntry detects that latch and only handles selection/transition;
+				-- it will never teleport back to the entrance in this state.
+				_G.Raid.beginEntry()
 				return
 			end
 
 			local floor = _G.Raid.updateFloor()
 			if floor ~= _G.Raid.last_floor and floor >= 1 and floor <= 5 then
 				_G.Raid.last_floor = floor
-				if GetSetting("ope_method_dungeon") and _G.Raid.inop then
-					_G.Raid.disableOpeRoom()
-				end
-				_G.Raid.teleportToFloor(floor)
-				task.wait(0.5)
 				_G.Raid.clearDungeonFarm()
 				if _G.Raid.dodge_active then
 					_G.Raid.stopDodge()
 				end
 				if GetSetting("ope_method_dungeon") then
-					_G.Raid.opez()
+					_G.Raid.disableOpeRoom()
 				end
-				local floorCF = _G.Raid.teleportToFloor(floor)
-				if floorCF then
-					_G.Raid.applyFarmFix(floorCF * CFrame.new(0, 5, 0))
-				end
-				while not _G.Raid.hasMobsInFloor() and GetSetting("auto_dungeon_v2") and _G.Raid.checkInRaid() do
-					task.wait(0.5)
-				end
-				_G.Raid.clearDungeonFarm()
+				_G.Raid.teleportToFloor(floor)
+				_G.Raid._floorSettleUntil = os.clock() + 0.45
+				return
+			end
+			if os.clock() < (_G.Raid._floorSettleUntil or 0) then
+				return
 			end
 
-			if not _G.Raid.hasMobsInFloor() then
+			if (GetSetting("dungeon_cast_method") or "Remote (Aimbot)") == "Remote (Aimbot)"
+				and _G.Raid.hasConfiguredBasicAttack()
+				and not _G.Raid.ensureBaseCombatTool()
+			then
+				_G.Raid.beginLoadoutBootstrap()
+				_G.Raid.attackState.requestedUntil = 0
 				_G.Raid.clearDungeonFarm()
 				return
 			end
 
-			_G.Raid.boss_dungeon = false
-			local targetMob = nil
-			local folder = Workspace:FindFirstChild("MOB")
-			if folder then
-				for _, mob in pairs(folder:GetChildren()) do
-					if mob:IsA("Model") and mob:FindFirstChild("Humanoid") and mob.Humanoid.Health > 0 then
-						if _G.Raid.isDungeonBoss(mob.Name) then
-							_G.Raid.boss_dungeon = true
-							targetMob = mob
-							break
-						elseif not _G.Raid.boss_dungeon then
-							targetMob = mob
-						end
-					end
-				end
-			end
+			local targetMob, isBoss = _G.Raid.selectTarget()
 			_G.Raid.current_target = targetMob
+			_G.Raid.boss_dungeon = isBoss == true
+			if not targetMob or not targetMob:FindFirstChild("HumanoidRootPart") then
+				_G.Raid.attackState.requestedUntil = 0
+				_G.Raid.clearDungeonFarm()
+				return
+			end
 
-			if GetSetting("dodge_v2") and _G.Raid.boss_dungeon and not _G.Raid.dodge_active then
-				if _G.Raid.detectAttack() then
-					local attackPos = _G.Raid.getAttackPosition()
+			local hrp = targetMob.HumanoidRootPart
+			_G.pos_skill = hrp.CFrame
+			_G.Raid.updateDamageState()
+			local raceStatus = _G.Raid.updateRaceAbility()
+			local raceState = _G.Raid.raceAbility
+			local raceProtecting = raceStatus == "active"
+				or (raceStatus == "pending"
+					and raceState.hudWasPresent
+					and tick() - (raceState.lastAttempt or 0) <= 0.75)
+			local playerHumanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
+			local recoveryRatio = math.clamp(tonumber(GetSetting("raceV3HealthPercent")) or 30, 1, 100) / 100
+			local belowRecoveryThreshold = playerHumanoid
+				and playerHumanoid.MaxHealth > 0
+				and playerHumanoid.Health > 0
+				and playerHumanoid.Health / playerHumanoid.MaxHealth <= recoveryRatio
+			local raceReadyForRecovery = belowRecoveryThreshold and raceStatus == "ready"
+			local largeTrackingBoss = isBoss and _G.Raid.isLargeTrackingBoss(targetMob)
+			local danger, attackPos = false, nil
+			if GetSetting("dodge_v2")
+				and not _G.Raid.dodge_active
+				and isBoss
+				and not raceProtecting
+				and not raceReadyForRecovery
+			then
+				danger, attackPos = _G.Raid.scanAttacks(true)
+			end
+
+			-- At the configured Race V3 recovery threshold, a ready racial ability takes
+			-- priority over starting another retreat. If the prior dodge left the
+			-- character far away, this pass returns to the target and the next pass
+			-- activates R at close range. An existing dodge still finishes normally.
+			if not _G.Raid.dodge_active and (not danger or raceReadyForRecovery) then
+				raceStatus = _G.Raid.tryRaceAbility(targetMob)
+				raceProtecting = raceStatus == "active"
+					or (raceStatus == "pending"
+						and raceState.hudWasPresent
+						and tick() - (raceState.lastAttempt or 0) <= 0.75)
+				raceReadyForRecovery = belowRecoveryThreshold and raceStatus == "ready"
+			end
+			if GetSetting("dodge_v2") and not _G.Raid.dodge_active then
+				-- Preserve close combat between attacks so M1 and short-range skills
+				-- connect. Dodge actual boss telegraphs, not ordinary damage that has
+				-- already landed; the latter repeatedly stranded combat hundreds of studs
+				-- away from normal floor mobs.
+				-- R and the fallback retreat share the configured HP threshold. While R is
+				-- cooling, unavailable, or unconfirmed, hold the safe position instead
+				-- of letting sustained effects (notably Craberno's circles) drain the
+				-- player from the configured recovery threshold to death. A ready R is
+				-- allowed to return close first.
+				local recoveryRetreat = belowRecoveryThreshold
+					and not raceProtecting
+					and not raceReadyForRecovery
+				if recoveryRetreat or (danger and not raceProtecting) then
 					local customHeight = 210
-					if
-						targetMob
-						and (
-							targetMob.Name:find("Veyzor")
-							or targetMob.Name:find("Chaos Crab")
-							or targetMob.Name:find("Craberno")
-						)
-					then
-						customHeight = 230
+					if largeTrackingBoss then
+						customHeight = 260
 					end
 					_G.Raid.startDodge(attackPos, customHeight)
-					return
 				end
-			end
-
-			if _G.Raid.dodge_active then
-				return
 			end
 
 			_G.Raid.buso()
 			_G.Raid.ken()
 			_G.Raid.hao()
 
-			if GetSetting("ope_method_dungeon") then
+			if GetSetting("ope_method_dungeon") and _G.Raid.findOpeTool() then
 				_G.Raid.handleFruitPower()
 			else
 				_G.Raid.inop = false
 			end
 
-			if tick() - (_G.Raid.last_tool_switch or 0) >= (GetSetting("dungeon_tool_switch") or 0.5) then
-				_G.Raid.cycleTools()
-				_G.Raid.last_tool_switch = tick()
+			if not _G.Raid.dodge_retreating
+				and tick() - (_G.Raid.last_tool_switch or 0) >= (GetSetting("dungeon_tool_switch") or 0.5)
+			then
+				local switchedTool = _G.Raid.cycleTools()
+				if switchedTool then
+					_G.Raid.last_tool_switch = tick()
+				end
 			end
 
-			if targetMob and targetMob:FindFirstChild("HumanoidRootPart") then
-				local hrp = targetMob.HumanoidRootPart
-				_G.pos_skill = hrp.CFrame
+			if not _G.Raid.dodge_active then
 				_G.Raid.applyDungeonFarm(targetMob)
+			end
+			-- Dodges remain inside the floor envelope and within usable remote range,
+			-- so combat continues while the render-step dodge owner moves the player.
+			if not _G.Raid.dodge_retreating then
 				_G.Raid.click()
 				_G.Raid.autoskill()
 			else
-				_G.Raid.clearDungeonFarm()
+				_G.Raid.attackState.requestedUntil = 0
 			end
 		end)
-		_G.Raid._mainLoopBusy = false
+		if not ok then
+			_G.Raid.attackState.lastError = tostring(err)
+		end
 	end))
 
-	-- Raid-tab UI.
+	-- Dungeon-tab UI. It is created after the Raid backend so every callback can
+	-- call the finalized dungeon helpers without changing their behavior.
 	pcall(function()
-		Window:CreateSection(RaidTab.Left, "Options of Dungeon", GenesisX.Theme.Warning, "lucide-settings")
-
-		Window:CreateDropdown(RaidTab.Left, {
+		Window:CreateDropdown(uiSections.dungeonEntry, {
 			Label = "Difficulty",
 			Options = { "Easy", "Normal", "Hard" },
 			Default = GetSetting("dungeon_select") or "Easy",
@@ -21259,12 +23504,16 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateToggle(RaidTab.Left, {
+		Window:CreateToggle(uiSections.dungeonEntry, {
 			Text = "Enable Auto Dungeon",
 			Default = GetSetting("auto_dungeon_v2") or false,
 			Callback = function(state)
 				saveAndApply("auto_dungeon_v2", state)
 				if not state then
+					_G.Raid._entryGeneration = (_G.Raid._entryGeneration or 0) + 1
+					_G.Raid._entryBusy = false
+					_G.Raid._mainLoopBusy = false
+					_G.Raid.stopCombat()
 					_G.Raid.clearDungeonFarm()
 					if _G.Raid.dodge_active then
 						_G.Raid.stopDodge()
@@ -21273,7 +23522,21 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateSlider(RaidTab.Left, {
+		Window:CreateToggle(uiSections.dungeonEntry, {
+			Text = "Stop Dungeons When Sea Events Are Near",
+			Default = GetSetting("stopDungeonNearSeaEvent") ~= false,
+			Callback = function(state)
+				saveAndApply("stopDungeonNearSeaEvent", state)
+			end,
+		})
+
+		Window:CreateLabel(uiSections.dungeonEntry, {
+			Text = "Stops only a new, uncommitted entry when a Sea Event is 15:00 or closer. Once the difficulty picker appears or the dungeon begins, Dungeon keeps control until it ends.",
+			Color = SpectrumX.Theme.TextSecondary,
+			Wrapped = true,
+		})
+
+		Window:CreateSlider(uiSections.dungeonLoadout, {
 			Text = "Tool Switch Speed (s)",
 			Min = 0.1,
 			Max = 2,
@@ -21284,7 +23547,7 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateToggle(RaidTab.Left, {
+		Window:CreateToggle(uiSections.dungeonSafety, {
 			Text = "Auto Dodge",
 			Default = GetSetting("dodge_v2") ~= false,
 			Callback = function(state)
@@ -21292,7 +23555,7 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateToggle(RaidTab.Left, {
+		Window:CreateToggle(uiSections.dungeonLoadout, {
 			Text = "Ope Method",
 			Default = GetSetting("ope_method_dungeon") ~= false,
 			Callback = function(state)
@@ -21300,16 +23563,8 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateSection(RaidTab.Left, "Haki (uses Main toggles)", GenesisX.Theme.Warning, "lucide-shield")
-		Window:CreateLabel(RaidTab.Left, {
-			Text = "Buso / Ken / Hao use the toggles on the Main tab.",
-			Color = SpectrumX.Theme.TextSecondary,
-		})
-
-		Window:CreateSection(RaidTab.Right, "Settings of Dungeon", GenesisX.Theme.Warning, "lucide-clover")
-
-		Window:CreateMultiDropdown(RaidTab.Right, {
-			Label = "Tools (If Ope Method Is OFF)",
+		Window:CreateMultiDropdown(uiSections.dungeonLoadout, {
+			Label = "Tools (used when Ope is unavailable)",
 			Options = { "Sword", "Combat", "Fruit Power" },
 			Default = GetSetting("dungeon_outside_tools") or { "Combat", "Fruit Power" },
 			Callback = function(selected)
@@ -21317,8 +23572,8 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateDropdown(RaidTab.Right, {
-			Label = "Method of Cast Skills & M1",
+		Window:CreateDropdown(uiSections.dungeonLoadout, {
+			Label = "Attack Method",
 			Options = { "Default (Random)", "Remote (Aimbot)" },
 			Default = GetSetting("dungeon_cast_method") or "Remote (Aimbot)",
 			Callback = function(selected)
@@ -21326,7 +23581,7 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateDropdown(RaidTab.Right, {
+		Window:CreateDropdown(uiSections.dungeonPosition, {
 			Label = "Dungeon Method",
 			Options = { "Stand Above Mobs", "Orbit Above Mobs" },
 			Default = GetSetting("dungeon_method") or "Stand Above Mobs",
@@ -21336,7 +23591,7 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateSlider(RaidTab.Right, {
+		Window:CreateSlider(uiSections.dungeonPosition, {
 			Text = "Farm Height (above mobs)",
 			Min = 3,
 			Max = 40,
@@ -21347,7 +23602,7 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateSlider(RaidTab.Right, {
+		Window:CreateSlider(uiSections.dungeonPosition, {
 			Text = "Orbit Speed",
 			Min = 0.5,
 			Max = 8,
@@ -21358,10 +23613,10 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 
-		Window:CreateSection(RaidTab.Right, "Skills (same as Main)", GenesisX.Theme.Warning, "lucide-zap")
-		Window:CreateLabel(RaidTab.Right, {
-			Text = "Z/X/C/V/F/B/E use the toggles on the Skills tab.",
+		Window:CreateLabel(uiSections.dungeonGuide, {
+			Text = "Dungeon uses the Haki and Z/X/C/V/F/B/E choices from the Combat tab.",
 			Color = SpectrumX.Theme.TextSecondary,
+			Wrapped = true,
 		})
 	end)
 
