@@ -8662,7 +8662,17 @@ local function run(B, T, P, DfT, ...)
 		if toolName == "Mele" then
 			tooltip("Combat")
 		elseif toolName == "Sword" then
-			tooltip("Sword")
+			-- Dungeon teardown can leave the game's replicated Primary slot at None,
+			-- which also removes the selected sword Tool from Character/Backpack. The
+			-- ordinary tooltip helper cannot recover from that state because it only
+			-- equips an already-instantiated Tool. Reuse the validated inventory path
+			-- below to restore the exact remembered sword; never fall back to fists,
+			-- fruit, or an arbitrary sword while that bounded restore is pending.
+			if type(_G._GenesisEnsureCombatSword) == "function" then
+				_G._GenesisEnsureCombatSword("outside_combat")
+			else
+				tooltip("Sword")
+			end
 		elseif toolName == "Fruit" then
 			tooltip("Fruit Power")
 		end
@@ -16201,6 +16211,109 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		return findConfirmedWeapon()
+	end
+
+	-- Restore the exact remembered sword when real outside combat owns the hand.
+	-- This is intentionally asynchronous: callers such as the central combat step
+	-- run every frame and must never yield while the game's inventory UI replicates.
+	_G._GenesisCombatSwordRestore = {
+		busy = false,
+		generation = 0,
+		nextAttemptAt = 0,
+		lastResult = "idle",
+	}
+
+	_G._GenesisEnsureCombatSword = function(_reason)
+		local character = LocalPlayer.Character
+		local humanoid = GetHumanoid(character)
+		if not character or not humanoid or humanoid.Health <= 0 then
+			return false
+		end
+		if fishingOwnsWeaponSlot() or _G.storingFruit then
+			return false
+		end
+
+		for _, tool in ipairs(character:GetChildren()) do
+			if _G._GenesisIsSwordTool(tool) then
+				_G._GenesisRememberSword(tool)
+				return true
+			end
+		end
+
+		local preferredName = _G._GenesisGetLastEquippedSwordName()
+		if not _G._GenesisIsUsableSwordName(preferredName) then
+			preferredName = _G.lastEquippedSwordName or GetSetting("lastEquippedSwordName")
+		end
+		if not _G._GenesisIsUsableSwordName(preferredName) then
+			return false
+		end
+
+		local existing = _G._GenesisFindSwordToolByName(preferredName)
+		if existing then
+			if existing.Parent ~= character then
+				humanoid:EquipTool(existing)
+			end
+			if existing.Parent == character then
+				_G._GenesisRememberSword(existing)
+				return true
+			end
+		end
+
+		local state = _G._GenesisCombatSwordRestore
+		if state.busy or os.clock() < (state.nextAttemptAt or 0) then
+			return false
+		end
+
+		state.busy = true
+		state.generation = state.generation + 1
+		state.lastResult = "selecting_primary"
+		local generation = state.generation
+		local startingCharacter = character
+		task.spawn(function()
+			local selected = nil
+			local ok, err = pcall(function()
+				selected = selectPrimaryWeapon(preferredName, 4, function()
+					if state.generation ~= generation
+						or LocalPlayer.Character ~= startingCharacter
+						or fishingOwnsWeaponSlot()
+						or _G.storingFruit
+					then
+						return false
+					end
+					local owner = _G._GenesisPriorityOwner
+					return owner == "major_sea_event"
+						or owner == "world_raid_boss"
+						or owner == "serpent"
+						or owner == "galleon"
+						or owner == "other_combat"
+						or owner == "haki_progression"
+				end)
+			end)
+
+			if state.generation ~= generation then
+				return
+			end
+			if ok and selected then
+				local liveHumanoid = GetHumanoid(startingCharacter)
+				if liveHumanoid and selected.Parent ~= startingCharacter then
+					pcall(function()
+						liveHumanoid:EquipTool(selected)
+					end)
+				end
+			end
+
+			if ok and _G._GenesisIsSwordTool(selected) and selected.Parent == startingCharacter then
+				_G._GenesisRememberSword(selected)
+				state.lastResult = "equipped"
+				state.nextAttemptAt = 0
+			else
+				state.lastResult = ok and "not_available" or ("error: " .. tostring(err))
+				-- A failed inventory transaction must not be restarted every frame.
+				state.nextAttemptAt = os.clock() + 1
+			end
+			state.busy = false
+		end)
+		return false
 	end
 
 	_G._GenesisBindSwordTracker = function(character)
