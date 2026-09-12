@@ -22548,6 +22548,28 @@ local function run(B, T, P, DfT, ...)
 
 	_G.Raid.getAttackPattern = function(effect)
 		local name = string.lower(effect.Name or "")
+		-- Chaos Crab creates this constrained hand roughly half a second before
+		-- CrabS1/Circ (and before the close explosion in its longer combos). Those
+		-- later objects are impact visuals, so waiting for their names can make the
+		-- dodge start after the damage packet. "hand" is otherwise far too generic;
+		-- accept it only when its constraint is physically attached to the current
+		-- Chaos Crab target.
+		if name == "hand" then
+			local target = _G.Raid.current_target
+			if target and string.find(string.lower(target.Name or ""), "chaos crab", 1, true) then
+				for _, descendant in ipairs(effect:GetDescendants()) do
+					if descendant:IsA("RigidConstraint") then
+						local attachment0 = descendant.Attachment0
+						local attachment1 = descendant.Attachment1
+						if (attachment0 and attachment0:IsDescendantOf(target))
+							or (attachment1 and attachment1:IsDescendantOf(target))
+						then
+							return "chaoscrab_windup"
+						end
+					end
+				end
+			end
+		end
 		for _, pattern in pairs(_G.Raid.attackPatterns) do
 			if name:find(pattern, 1, true) then
 				return pattern
@@ -22558,14 +22580,28 @@ local function run(B, T, P, DfT, ...)
 
 	_G.Raid.getEffectDangerDuration = function(effect)
 		local name = string.lower(effect.Name or "")
-		-- Crab warning disks remain replicated for five seconds. Their damaging
-		-- phase continues after the old 2.2-second generic cutoff, so keep tracking
-		-- those disks for their actual replicated lifetime (with a small cap).
+		-- Crab warning disks are only garbage-collected after five seconds, but the
+		-- reconstructed attack finishes the warning tween and lands its meteor or
+		-- pillar at about 2.0 seconds. Following the stale visual for its full
+		-- lifetime caused several seconds of needless evasion after every strike.
+		-- Keep a small replication/latency margin beyond the measured impact instead.
 		if name:find("warning", 1, true) then
-			return 5.2
+			return 2.35
 		end
-		if name:find("circ", 1, true) or name:find("waterball", 1, true) then
-			return 3.2
+		-- These are late visuals from the same Chaos Crab attack whose constrained
+		-- hand is now detected at wind-up. Retain them briefly as replication
+		-- fallbacks, but expire them before the completed wind-up dodge can mistake
+		-- the same strike for a new attack and retreat a second time.
+		if name:find("crabs1", 1, true) or name:find("circ", 1, true) then
+			return 1.25
+		end
+		if name:find("pillar_exp", 1, true) then
+			return 0.8
+		end
+		-- WaterBall is different: it remains a moving projectile for roughly one
+		-- second after it appears, so preserve a modest post-spawn tracking window.
+		if name:find("waterball", 1, true) then
+			return 1.4
 		end
 		return _G.Raid.EFFECT_MAX_AGE
 	end
@@ -22595,7 +22631,7 @@ local function run(B, T, P, DfT, ...)
 		if bossPos and horizontalDistance(part.Position, bossPos) > 500 + effectRadius then
 			return false, nil
 		end
-		return true, part.Position
+		return true, part.Position, effectRadius
 	end
 
 	_G.Raid.scanAttacks = function(getPosition)
@@ -22730,25 +22766,29 @@ local function run(B, T, P, DfT, ...)
 		local attackPos = attackPosition or targetRoot.Position
 		local height = customHeight or (isLargeBoss and 230 or 210)
 		local threats = { attackPos, targetRoot.Position }
+		local threatRadii = { 0, 0 }
 		local effects = Workspace:FindFirstChild("Effects")
 		if effects then
 			for _, effect in ipairs(effects:GetChildren()) do
-				local dangerous, position = _G.Raid.isDangerousEffect(effect, targetRoot.Position, root.Position)
+				local dangerous, position, radius =
+					_G.Raid.isDangerousEffect(effect, targetRoot.Position, root.Position)
 				if dangerous and position then
 					table.insert(threats, position)
+					table.insert(threatRadii, radius or 0)
 				end
 			end
 		end
 
 		local bestPosition = nil
 		local bestScore = -1
+		local bestPathPhase = 0
 		local largeCandidates = {}
 		if isLargeBoss then
 			local offsets = {
-				-- Diagonal distance is about 467 studs, clearing an 800-wide disk
-				-- while every individual axis remains inside the safe +/-350 envelope.
-				{ 330, 330 }, { 330, -330 }, { -330, 330 }, { -330, -330 },
-				{ 315, 315 }, { 315, -315 }, { -315, 315 }, { -315, -315 },
+				-- Clockwise floor corners. Phase is retained so a dodge can immediately
+				-- continue around the perimeter instead of camping at a position that a
+				-- tracking dungeon boss can teleport onto.
+				{ -330, -330, 0 }, { 330, -330, 1 }, { 330, 330, 2 }, { -330, 330, 3 },
 			}
 			local dungeonModel = _G.Raid.getDungeonModel()
 			local rayParams = nil
@@ -22768,16 +22808,18 @@ local function run(B, T, P, DfT, ...)
 					) ~= nil
 				end
 				if onFloor then
-					table.insert(largeCandidates, candidate)
+					table.insert(largeCandidates, { position = candidate, phase = offset[3] })
 					local score = math.huge
-					for _, threat in ipairs(threats) do
+					for threatIndex, threat in ipairs(threats) do
 						local dx = candidate.X - threat.X
 						local dz = candidate.Z - threat.Z
-						score = math.min(score, math.sqrt(dx * dx + dz * dz))
+						local clearance = math.sqrt(dx * dx + dz * dz) - (threatRadii[threatIndex] or 0)
+						score = math.min(score, clearance)
 					end
 					if score > bestScore then
 						bestScore = score
 						bestPosition = candidate
+						bestPathPhase = offset[3]
 					end
 				end
 			end
@@ -22799,10 +22841,11 @@ local function run(B, T, P, DfT, ...)
 				math.clamp(center.Z - direction.Z * 300, center.Z - 350, center.Z + 350)
 			)
 			bestScore = math.huge
-			for _, threat in ipairs(threats) do
+			for threatIndex, threat in ipairs(threats) do
 				local dx = bestPosition.X - threat.X
 				local dz = bestPosition.Z - threat.Z
-				bestScore = math.min(bestScore, math.sqrt(dx * dx + dz * dz))
+				local clearance = math.sqrt(dx * dx + dz * dz) - (threatRadii[threatIndex] or 0)
+				bestScore = math.min(bestScore, clearance)
 			end
 		end
 		if not bestPosition then
@@ -22812,83 +22855,48 @@ local function run(B, T, P, DfT, ...)
 			local z = attackPos.Z >= center.Z and -330 or 330
 			bestPosition = Vector3.new(center.X + x, center.Y + height, center.Z + z)
 			bestScore = math.huge
-			for _, threat in ipairs(threats) do
+			for threatIndex, threat in ipairs(threats) do
 				local dx = bestPosition.X - threat.X
 				local dz = bestPosition.Z - threat.Z
-				bestScore = math.min(bestScore, math.sqrt(dx * dx + dz * dz))
+				local clearance = math.sqrt(dx * dx + dz * dz) - (threatRadii[threatIndex] or 0)
+				bestScore = math.min(bestScore, clearance)
 			end
 		end
 		_G.Raid.lastDodgeSafePosition = bestPosition
 		_G.Raid.lastDodgeSafeScore = bestScore
 		_G.Raid.lastDodgeThreatCount = #threats
 		local safeCF = _G.Raid.downwardCFrame(bestPosition)
-		local lastLargeReposition = 0
-		local lastLargeScan = 0
+		local largePathStartedAt = tick()
+		local largePathDirection = generation % 2 == 0 and 1 or -1
+		local largePathEdge = 660
+		local largePathSpeed = 850
 		local function refreshLargeSafeCFrame()
-			if not isLargeBoss or #largeCandidates == 0 then
-				return
-			end
-			local checkTime = tick()
-			if checkTime - lastLargeScan < 0.15 then
-				return
-			end
-			lastLargeScan = checkTime
-			local currentRoot = _G.Raid.getRoot(LocalPlayer.Character)
-			local liveEffects = Workspace:FindFirstChild("Effects")
-			if not currentRoot or not liveEffects or not targetRoot.Parent then
-				return
-			end
-
-			local liveThreats = { targetRoot.Position }
-			local dangerCount = 0
-			for _, effect in ipairs(liveEffects:GetChildren()) do
-				if not _G.Raid.effectFirstSeen[effect] then
-					_G.Raid.effectFirstSeen[effect] = checkTime
-				end
-				local age = checkTime - _G.Raid.effectFirstSeen[effect]
-				if age <= _G.Raid.getEffectDangerDuration(effect) then
-					local dangerous, position =
-						_G.Raid.isDangerousEffect(effect, targetRoot.Position, currentRoot.Position)
-					if dangerous and position then
-						dangerCount = dangerCount + 1
-						table.insert(liveThreats, position)
-					end
-				end
-			end
-			if dangerCount == 0 then
-				return
-			end
-
-			local nextPosition = nil
-			local nextScore = -1
-			for _, candidate in ipairs(largeCandidates) do
-				local score = math.huge
-				for _, threat in ipairs(liveThreats) do
-					local dx = candidate.X - threat.X
-					local dz = candidate.Z - threat.Z
-					score = math.min(score, math.sqrt(dx * dx + dz * dz))
-				end
-				if score > nextScore then
-					nextScore = score
-					nextPosition = candidate
-				end
-			end
-			if nextPosition
-				and (nextPosition - safeCF.Position).Magnitude > 40
-				and checkTime - lastLargeReposition >= 0.45
-			then
-				safeCF = _G.Raid.downwardCFrame(nextPosition)
-				lastLargeReposition = checkTime
-				_G.Raid.lastDodgeSafePosition = nextPosition
-				_G.Raid.lastDodgeSafeScore = nextScore
-				_G.Raid.lastDodgeThreatCount = #liveThreats
-				_G.Raid.lastDodgeRepositionAt = checkTime
-				_G.Raid.lastDodgeRepositionCount = (_G.Raid.lastDodgeRepositionCount or 0) + 1
-			end
+			-- Large bosses actively chase or teleport onto a stationary corner. Their
+			-- render-step path is continuous, so rescoring transient visuals here would
+			-- only reintroduce the corner-to-corner jitter this path replaces.
 		end
 		local function getSafeCFrame()
 			if not targetRoot.Parent then
 				return nil
+			end
+			if isLargeBoss and #largeCandidates > 0 then
+				local travelledEdges = (tick() - largePathStartedAt) * largePathSpeed / largePathEdge
+				local phase = (bestPathPhase + largePathDirection * travelledEdges) % 4
+				local segment = math.floor(phase)
+				local alpha = phase - segment
+				local x, z
+				if segment == 0 then
+					x, z = -330 + largePathEdge * alpha, -330
+				elseif segment == 1 then
+					x, z = 330, -330 + largePathEdge * alpha
+				elseif segment == 2 then
+					x, z = 330 - largePathEdge * alpha, 330
+				else
+					x, z = -330, 330 - largePathEdge * alpha
+				end
+				local movingPosition = Vector3.new(center.X + x, center.Y + height, center.Z + z)
+				_G.Raid.lastDodgeSafePosition = movingPosition
+				return _G.Raid.downwardCFrame(movingPosition)
 			end
 			return safeCF
 		end
@@ -22956,12 +22964,27 @@ local function run(B, T, P, DfT, ...)
 				end
 				refreshLargeSafeCFrame()
 				local elapsed = tick() - (_G.Raid.dodge_start_time or tick())
-				if elapsed >= 5.5 then
+				local playerHumanoid = LocalPlayer.Character
+					and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+				local recoveryRatio = math.clamp(
+					tonumber(GetSetting("raceV3HealthPercent")) or 30,
+					1,
+					100
+				) / 100
+				local belowRecoveryThreshold = playerHumanoid
+					and playerHumanoid.MaxHealth > 0
+					and playerHumanoid.Health > 0
+					and playerHumanoid.Health / playerHumanoid.MaxHealth <= recoveryRatio
+				local raceStatus = belowRecoveryThreshold and _G.Raid.updateRaceAbility() or nil
+				local holdForRecovery = belowRecoveryThreshold
+					and raceStatus ~= "active"
+					and raceStatus ~= "ready"
+				if elapsed >= 65 or (elapsed >= 5.5 and not holdForRecovery) then
 					_G.Raid.stopDodge()
 					break
 				end
 				local recentlyDamaged = tick() - (_G.Raid.lastDamageAt or 0) < 0.85
-				if elapsed < 1.55 or recentlyDamaged or _G.Raid.detectAttack() then
+				if holdForRecovery or elapsed < 1.55 or recentlyDamaged or _G.Raid.detectAttack() then
 					cleanCount = 0
 				else
 					cleanCount = cleanCount + 1
