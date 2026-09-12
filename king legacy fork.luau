@@ -22678,6 +22678,36 @@ local function run(B, T, P, DfT, ...)
 		return d
 	end
 
+	-- Chaos Crab's long Z combos create several red warning disks 1.8 seconds
+	-- before their pillar impacts. They are critical even while Race V3 is active:
+	-- lifesteal cannot recover four stacked hits, and an existing recovery dodge
+	-- must move again because the next barrage targets its parked position.
+	_G.Raid.getChaosAirstrikeWarning = function(mob)
+		if not mob
+			or not string.find(string.lower(mob.Name or ""), "chaos crab", 1, true)
+		then
+			return nil, nil
+		end
+		local effects = Workspace:FindFirstChild("Effects")
+		if not effects then
+			return nil, nil
+		end
+		local now = tick()
+		for _, effect in ipairs(effects:GetChildren()) do
+			if string.lower(effect.Name or "") == "warning" then
+				if not _G.Raid.effectFirstSeen[effect] then
+					_G.Raid.effectFirstSeen[effect] = now
+				end
+				if now - _G.Raid.effectFirstSeen[effect] <= 2.35 then
+					local part = effect:IsA("BasePart") and effect
+						or effect:FindFirstChildWhichIsA("BasePart")
+					return effect, part and part.Position or nil
+				end
+			end
+		end
+		return nil, nil
+	end
+
 	_G.Raid.isLargeTrackingBoss = function(mob)
 		if not mob then
 			return false
@@ -22696,6 +22726,8 @@ local function run(B, T, P, DfT, ...)
 	_G.Raid.stopDodge = function()
 		_G.Raid.dodge_active = false
 		_G.Raid.dodge_retreating = false
+		_G.Raid.dodge_critical = false
+		_G.Raid.dodge_critical_name = nil
 		_G.Raid.dodge_phase = nil
 		_G.Raid.dodge_phase_started = 0
 		_G.Raid.dodge_generation = (_G.Raid.dodge_generation or 0) + 1
@@ -22758,13 +22790,36 @@ local function run(B, T, P, DfT, ...)
 		local generation = _G.Raid.dodge_generation
 		_G.Raid.clearDungeonFarm()
 
-		-- Stay inside the loaded floor, but do not mistake 300 studs for safety:
-		-- Craberno's largest warning disk is 800 studs wide. Score raycast-validated
-		-- floor corners against the boss and every visible dangerous effect so the
-		-- dodge clears that disk without returning to the old out-of-bounds retreat.
+		-- A dungeon arena is a three-dimensional room, not merely a floor footprint.
+		-- Preserve the character's already-valid combat altitude for large bosses
+		-- and use adjacent FloorN markers to keep every destination below the next
+		-- room. The former +380 large-boss height crossed the roughly 348-stud room
+		-- spacing, causing the game to correct the player back into live warnings.
 		local center = floorCF.Position
 		local attackPos = attackPosition or targetRoot.Position
-		local height = customHeight or (isLargeBoss and 230 or 210)
+		local requestedHeight = customHeight or (isLargeBoss and 230 or 210)
+		local currentHeight = root.Position.Y - center.Y
+		local roomSpacing = nil
+		local nextFloorCF = _G.Raid.getFloorCFrame((_G.Raid.current_floor or 1) + 1)
+		if nextFloorCF and nextFloorCF.Position.Y > center.Y then
+			roomSpacing = nextFloorCF.Position.Y - center.Y
+		else
+			local previousFloorCF = _G.Raid.getFloorCFrame((_G.Raid.current_floor or 1) - 1)
+			if previousFloorCF and previousFloorCF.Position.Y < center.Y then
+				roomSpacing = center.Y - previousFloorCF.Position.Y
+			end
+		end
+		local maximumInsideHeight = roomSpacing and math.max(60, roomSpacing - 60) or 230
+		local desiredHeight = isLargeBoss and math.min(currentHeight, requestedHeight) or requestedHeight
+		local height = math.clamp(desiredHeight, 12, maximumInsideHeight)
+		_G.Raid.lastDodgeArenaVolume = {
+			center = center,
+			horizontalHalfExtent = 350,
+			minimumY = center.Y + 12,
+			maximumY = center.Y + maximumInsideHeight,
+			selectedY = center.Y + height,
+			floorSpacing = roomSpacing,
+		}
 		local threats = { attackPos, targetRoot.Position }
 		local threatRadii = { 0, 0 }
 		local effects = Workspace:FindFirstChild("Effects")
@@ -22866,37 +22921,410 @@ local function run(B, T, P, DfT, ...)
 		_G.Raid.lastDodgeSafeScore = bestScore
 		_G.Raid.lastDodgeThreatCount = #threats
 		local safeCF = _G.Raid.downwardCFrame(bestPosition)
-		local largePathStartedAt = tick()
-		local largePathDirection = generation % 2 == 0 and 1 or -1
-		local largePathEdge = 660
-		local largePathSpeed = 850
-		local function refreshLargeSafeCFrame()
-			-- Large bosses actively chase or teleport onto a stationary corner. Their
-			-- render-step path is continuous, so rescoring transient visuals here would
-			-- only reintroduce the corner-to-corner jitter this path replaces.
+		local selectedLargeCandidate = nil
+		for _, candidate in ipairs(largeCandidates) do
+			if candidate.phase == bestPathPhase then
+				selectedLargeCandidate = candidate
+				break
+			end
 		end
+		local lastLargeRescore = 0
+		local criticalMode = false
+		local criticalWallPart = nil
+		local chaosAirstrikeUntil = 0
+		local chaosAirstrikeLastMoveAt = 0
+		local chaosAirstrikeCandidates = {}
+		if string.find(string.lower(target.Name or ""), "chaos crab", 1, true) then
+			-- The normal dungeon dodge has always treated +/-350 from FloorN as the
+			-- playable arena. Keep every air-strike destination thirty studs inside
+			-- that boundary. Do not validate against the dungeon model's broad floor
+			-- slab: that slab continues underneath exterior scenery and previously
+			-- made an out-of-arena point look valid.
+			for offsetX = -320, 320, 40 do
+				for offsetZ = -320, 320, 40 do
+					table.insert(chaosAirstrikeCandidates, {
+						position = Vector3.new(center.X + offsetX, center.Y + height, center.Z + offsetZ),
+					})
+				end
+			end
+		end
+		local function getCrabPullSafeWallPosition()
+			local liveEffects = Workspace:FindFirstChild("Effects")
+			if not liveEffects then
+				return nil
+			end
+
+			-- The shared crab C attack receives four WallCFs from the server. The client materializes
+			-- each one as a pillar and a wind barrier, then turns its directional beam
+			-- orange before CrabPull starts. The widening beam is the visible shelter
+			-- field: AT1 begins at the rock and AT2 extends roughly 194 studs through the
+			-- safe side. Arena-center-to-rock is not a reliable substitute for that
+			-- orientation (it previously parked beside a rock instead of behind it).
+			local function projectedShelterPosition(part)
+				local beam = part:FindFirstChild("Beam")
+				local attachment0 = beam and beam:IsA("Beam") and beam.Attachment0
+				local attachment1 = beam and beam:IsA("Beam") and beam.Attachment1
+				local origin = attachment0 and attachment0.WorldPosition or part.Position
+				local beamVector = attachment1 and (attachment1.WorldPosition - origin)
+					or part.CFrame.LookVector * 194
+				local horizontal = Vector3.new(beamVector.X, 0, beamVector.Z)
+				if horizontal.Magnitude < 1 then
+					return nil
+				end
+
+				-- Stay near the middle of the widening field: far enough behind the rock
+				-- to block the pull, but with ample room before the beam's far edge. Keep
+				-- the HumanoidRootPart at the pillar's floor-relative height rather than at
+				-- the beam attachments, which sit near the bottom of the mesh.
+				local shelterDistance = math.clamp(horizontal.Magnitude * 0.42, 65, 90)
+				local direction = horizontal.Unit
+				local position = Vector3.new(
+					origin.X + direction.X * shelterDistance,
+					part.Position.Y,
+					origin.Z + direction.Z * shelterDistance
+				)
+				if math.abs(position.X - center.X) > 340
+					or math.abs(position.Z - center.Z) > 340
+				then
+					return nil
+				end
+				return position, beam ~= nil and attachment0 ~= nil and attachment1 ~= nil
+			end
+
+			-- Latch one valid projected shelter instead of changing destinations as the
+			-- remaining walls replicate.
+			if not criticalWallPart or not criticalWallPart.Parent then
+				local nearestPart = nil
+				local nearestDistance = math.huge
+				for _, effect in ipairs(liveEffects:GetChildren()) do
+					if string.lower(effect.Name or "") == "pillar" then
+						local part = effect:IsA("BasePart") and effect
+							or effect:FindFirstChildWhichIsA("BasePart")
+						local projectedPosition = part and projectedShelterPosition(part)
+						if projectedPosition then
+							local distance = (projectedPosition - root.Position).Magnitude
+							if distance < nearestDistance then
+								nearestDistance = distance
+								nearestPart = part
+							end
+						end
+					end
+				end
+				criticalWallPart = nearestPart
+			end
+			if not criticalWallPart or not criticalWallPart.Parent then
+				return nil
+			end
+
+			local position, usedBeam = projectedShelterPosition(criticalWallPart)
+			if position then
+				_G.Raid.lastCrabPullShelter = {
+					wall = criticalWallPart,
+					position = position,
+					usedBeam = usedBeam == true,
+					lookVector = criticalWallPart.CFrame.LookVector,
+				}
+			end
+			return position
+		end
+		local function isCrabPullWindup()
+			local targetName = target and string.lower(target.Name or "") or ""
+			if not string.find(targetName, "craberno", 1, true)
+				and not string.find(targetName, "chaos crab", 1, true)
+			then
+				return false, nil
+			end
+			local liveEffects = Workspace:FindFirstChild("Effects")
+			if not liveEffects then
+				return false, nil
+			end
+			local wallPosition = getCrabPullSafeWallPosition()
+			local pillarCount = 0
+			for _, effect in ipairs(liveEffects:GetChildren()) do
+				local name = string.lower(effect.Name or "")
+				if name == "crabpull" then
+					return true, wallPosition
+				elseif name == "pillar" then
+					pillarCount = pillarCount + 1
+					if pillarCount >= 1 then
+						return true, wallPosition or getCrabPullSafeWallPosition()
+					end
+				elseif string.find(name, "warning", 1, true) then
+					local part = effect:IsA("BasePart") and effect
+						or effect:FindFirstChildWhichIsA("BasePart")
+					if part and math.max(part.Size.X, part.Size.Z) >= 500 then
+						return true, wallPosition
+					end
+				end
+			end
+			return false, wallPosition
+		end
+
+		local function promoteToCriticalEscape(wallPosition)
+			if not criticalMode then
+				criticalMode = true
+				_G.Raid.dodge_critical = true
+				_G.Raid.dodge_critical_name = "Chaos Crab / Craberno C / CrabPull"
+				_G.Raid.dodge_retreating = true
+				_G.Raid.dodge_phase = "critical_escape"
+				_G.Raid.dodge_phase_started = tick()
+			end
+
+			-- Chaos Crab and Craberno share this C attack: it covers the room with an
+			-- 800-stud warning and then forcibly
+			-- pulls players for three seconds. Move behind one of the four replicated
+			-- shelter walls as soon as it exists. During the few frames before the first
+			-- pillar appears, retain the known-good webhook dodge geometry as a bounded
+			-- fallback; a later refresh replaces it with the latched wall position.
+			if wallPosition then
+				bestPosition = wallPosition
+			else
+				local outward = Vector3.new(bestPosition.X - center.X, 0, bestPosition.Z - center.Z)
+				if outward.Magnitude < 0.1 then
+					outward = Vector3.new(-1, 0, -1)
+				end
+				outward = outward.Unit
+				bestPosition = Vector3.new(
+					math.clamp(center.X + outward.X * 300, center.X - 350, center.X + 350),
+					center.Y + 210,
+					math.clamp(center.Z + outward.Z * 300, center.Z - 350, center.Z + 350)
+				)
+			end
+			bestScore = (bestPosition - targetRoot.Position).Magnitude
+			safeCF = _G.Raid.downwardCFrame(bestPosition)
+			_G.Raid.lastDodgeSafePosition = bestPosition
+			_G.Raid.lastDodgeSafeScore = bestScore
+			_G.Raid.lastDodgeThreatCount = #threats
+		end
+
+		local function selectChaosAirstrikeCandidate()
+			local liveEffects = Workspace:FindFirstChild("Effects")
+			if not liveEffects then
+				return nil, nil, nil, 0
+			end
+			local scanNow = tick()
+			local warningThreats = {}
+			for _, effect in ipairs(liveEffects:GetChildren()) do
+				if string.lower(effect.Name or "") == "warning" then
+					if not _G.Raid.effectFirstSeen[effect] then
+						_G.Raid.effectFirstSeen[effect] = scanNow
+					end
+					local part = effect:IsA("BasePart") and effect
+						or effect:FindFirstChildWhichIsA("BasePart")
+					local age = scanNow - _G.Raid.effectFirstSeen[effect]
+					if part and age <= 2.35 then
+						-- Chaos Crab's warning grows to roughly 300 studs across. Include
+						-- a modest buffer, but score its live tweened position every pass
+						-- because separate circles can appear at different times.
+						table.insert(warningThreats, {
+							position = part.Position,
+							radius = math.max(185, math.max(part.Size.X, part.Size.Z) * 0.5 + 35),
+						})
+					end
+				end
+			end
+			if #warningThreats == 0 then
+				return nil, nil, nil, 0
+			end
+
+			local function scorePosition(position)
+				local bossDx = position.X - targetRoot.Position.X
+				local bossDz = position.Z - targetRoot.Position.Z
+				local clearance = math.sqrt(bossDx * bossDx + bossDz * bossDz) - 120
+				for _, threat in ipairs(warningThreats) do
+					local dx = position.X - threat.position.X
+					local dz = position.Z - threat.position.Z
+					clearance = math.min(
+						clearance,
+						math.sqrt(dx * dx + dz * dz) - threat.radius
+					)
+				end
+				return clearance
+			end
+
+			local safestCandidate = nil
+			local safestClearance = -math.huge
+			for _, candidate in ipairs(chaosAirstrikeCandidates) do
+				local clearance = scorePosition(candidate.position)
+				if clearance > safestClearance then
+					safestClearance = clearance
+					safestCandidate = candidate
+				end
+			end
+			local currentClearance = bestPosition and scorePosition(bestPosition) or nil
+			return safestCandidate, safestClearance, currentClearance, #warningThreats
+		end
+
+		local function applyChaosAirstrikeCandidate(candidate, score, moveNow)
+			if candidate then
+				selectedLargeCandidate = candidate
+				bestPosition = candidate.position
+			else
+				-- Streaming can hide the raycast candidates for a few frames. Keep the
+				-- already-scored dodge destination rather than performing an unscored
+				-- corner flip into the barrage.
+				bestPosition = bestPosition or Vector3.new(center.X, center.Y + height, center.Z)
+			end
+			bestScore = score or (bestPosition - targetRoot.Position).Magnitude
+			safeCF = _G.Raid.downwardCFrame(bestPosition)
+			_G.Raid.lastDodgeSafePosition = bestPosition
+			_G.Raid.lastDodgeSafeScore = bestScore
+			_G.Raid.dodge_retreating = true
+			_G.Raid.dodge_phase = "chaos_airstrike"
+			_G.Raid.dodge_phase_started = moveNow
+		end
+
+		local function moveForChaosAirstrike()
+			local moveNow = tick()
+			chaosAirstrikeUntil = moveNow + 0.85
+			local nextCandidate, clearance, currentClearance, threatCount =
+				selectChaosAirstrikeCandidate()
+			if not nextCandidate then
+				return false
+			end
+
+			local firstAirstrikePass = _G.Raid.dodge_phase ~= "chaos_airstrike"
+			local destinationChanged = not bestPosition
+				or (nextCandidate.position - bestPosition).Magnitude > 4
+			local currentUnsafe = currentClearance == nil or currentClearance < 45
+			local materiallySafer = currentClearance == nil
+				or clearance >= currentClearance + 15
+			local canMoveAgain = moveNow - chaosAirstrikeLastMoveAt >= 0.12
+
+			if firstAirstrikePass
+				or (currentUnsafe and destinationChanged and materiallySafer and canMoveAgain)
+			then
+				chaosAirstrikeLastMoveAt = moveNow
+				applyChaosAirstrikeCandidate(nextCandidate, clearance, moveNow)
+			else
+				-- Keep the current safe point to avoid jitter, but retain the phase and
+				-- telemetry while every moving/staggered warning is rescored.
+				bestScore = currentClearance or bestScore
+				_G.Raid.lastDodgeSafeScore = bestScore
+				_G.Raid.lastDodgeThreatCount = threatCount
+				_G.Raid.dodge_retreating = true
+				_G.Raid.dodge_phase = "chaos_airstrike"
+			end
+			return true
+		end
+
+		local function refreshLargeSafeCFrame()
+			if not isLargeBoss or not targetRoot.Parent then
+				return
+			end
+			local now = tick()
+			if now - lastLargeRescore < 0.055 then
+				return
+			end
+			lastLargeRescore = now
+			local pullWindup, wallPosition = isCrabPullWindup()
+			if pullWindup then
+				promoteToCriticalEscape(wallPosition)
+				return
+			end
+			if criticalMode then
+				return
+			end
+			local airstrikeWarning = _G.Raid.getChaosAirstrikeWarning(target)
+			if airstrikeWarning and moveForChaosAirstrike() then
+				return
+			end
+			if now < chaosAirstrikeUntil then
+				return
+			elseif _G.Raid.dodge_phase == "chaos_airstrike" then
+				-- Force the normal rescore to choose its ordinary combat corner after the
+				-- final air-strike warning and impact window end.
+				selectedLargeCandidate = nil
+				_G.Raid.dodge_retreating = false
+				_G.Raid.dodge_phase = "evade"
+				_G.Raid.dodge_phase_started = now
+			end
+			if #largeCandidates == 0 then
+				return
+			end
+
+			-- Chaos Crab and Craberno place warnings at predicted player positions.
+			-- Continuously tracing the whole perimeter crossed those moving zones and
+			-- produced three lethal hits during a confirmed dodge. Hold one validated
+			-- corner instead, then jump directly to a better corner only when a newly
+			-- replicated hazard (or the tracking boss itself) compromises the current
+			-- one. This also removes the high-frequency circular motion that looked like
+			-- random teleport jitter and generated needless replication traffic.
+			local liveThreats = { targetRoot.Position }
+			local liveThreatRadii = { 140 }
+			local liveEffects = Workspace:FindFirstChild("Effects")
+			if liveEffects then
+				for _, effect in ipairs(liveEffects:GetChildren()) do
+					local pattern = _G.Raid.getAttackPattern(effect)
+					if pattern then
+						if not _G.Raid.effectFirstSeen[effect] then
+							_G.Raid.effectFirstSeen[effect] = now
+						end
+						local age = now - _G.Raid.effectFirstSeen[effect]
+						if age <= _G.Raid.getEffectDangerDuration(effect) then
+							local part = effect:IsA("BasePart") and effect
+								or effect:FindFirstChildWhichIsA("BasePart")
+							if part then
+								local radius = math.clamp(math.max(part.Size.X, part.Size.Z) * 0.5, 0, 400)
+								local dx = part.Position.X - center.X
+								local dz = part.Position.Z - center.Z
+								if math.sqrt(dx * dx + dz * dz) <= 650 + radius then
+									table.insert(liveThreats, part.Position)
+									table.insert(liveThreatRadii, radius)
+								end
+							end
+						end
+					end
+				end
+			end
+
+			local function scoreCandidate(candidate)
+				local score = math.huge
+				for threatIndex, threat in ipairs(liveThreats) do
+					local dx = candidate.position.X - threat.X
+					local dz = candidate.position.Z - threat.Z
+					local clearance = math.sqrt(dx * dx + dz * dz) - (liveThreatRadii[threatIndex] or 0)
+					score = math.min(score, clearance)
+				end
+				return score
+			end
+
+			local currentScore = selectedLargeCandidate and scoreCandidate(selectedLargeCandidate) or -math.huge
+			local bestCandidate = selectedLargeCandidate
+			local rescoredBest = currentScore
+			for _, candidate in ipairs(largeCandidates) do
+				local score = scoreCandidate(candidate)
+				if score > rescoredBest then
+					rescoredBest = score
+					bestCandidate = candidate
+				end
+			end
+
+			-- Do not bounce between nearly equivalent corners. Move only when the
+			-- current corner is genuinely threatened or another corner adds a material
+			-- safety margin.
+			if not selectedLargeCandidate
+				or currentScore < 110
+				or rescoredBest >= currentScore + 180
+			then
+				selectedLargeCandidate = bestCandidate
+			end
+			if selectedLargeCandidate then
+				bestPosition = selectedLargeCandidate.position
+				bestScore = scoreCandidate(selectedLargeCandidate)
+				safeCF = _G.Raid.downwardCFrame(bestPosition)
+				_G.Raid.lastDodgeSafePosition = bestPosition
+				_G.Raid.lastDodgeSafeScore = bestScore
+				_G.Raid.lastDodgeThreatCount = #liveThreats
+			end
+		end
+		-- The warning and its pillars can replicate during the same frame that
+		-- starts the ordinary dodge. Promote immediately when they are already
+		-- visible; otherwise the 0.1-second monitor below performs the promotion.
+		refreshLargeSafeCFrame()
 		local function getSafeCFrame()
 			if not targetRoot.Parent then
 				return nil
-			end
-			if isLargeBoss and #largeCandidates > 0 then
-				local travelledEdges = (tick() - largePathStartedAt) * largePathSpeed / largePathEdge
-				local phase = (bestPathPhase + largePathDirection * travelledEdges) % 4
-				local segment = math.floor(phase)
-				local alpha = phase - segment
-				local x, z
-				if segment == 0 then
-					x, z = -330 + largePathEdge * alpha, -330
-				elseif segment == 1 then
-					x, z = 330, -330 + largePathEdge * alpha
-				elseif segment == 2 then
-					x, z = 330 - largePathEdge * alpha, 330
-				else
-					x, z = -330, 330 - largePathEdge * alpha
-				end
-				local movingPosition = Vector3.new(center.X + x, center.Y + height, center.Z + z)
-				_G.Raid.lastDodgeSafePosition = movingPosition
-				return _G.Raid.downwardCFrame(movingPosition)
 			end
 			return safeCF
 		end
@@ -22953,7 +23381,7 @@ local function run(B, T, P, DfT, ...)
 		_G.Raid.dodge_monitor_thread = task.spawn(function()
 			local cleanCount = 0
 			while _G.Raid.dodge_active and _G.Raid.dodge_generation == generation do
-				task.wait(0.1)
+				task.wait(0.06)
 				if not target.Parent
 					or not targetHumanoid.Parent
 					or targetHumanoid.Health <= 0
@@ -22979,12 +23407,30 @@ local function run(B, T, P, DfT, ...)
 				local holdForRecovery = belowRecoveryThreshold
 					and raceStatus ~= "active"
 					and raceStatus ~= "ready"
-				if elapsed >= 65 or (elapsed >= 5.5 and not holdForRecovery) then
+				-- The 65-second ceiling is only a deadlock guard. Do not apply the old
+				-- unconditional 5.5-second exit here: a low-health recovery dodge can
+				-- already be in progress when R becomes ready, and Chaos Crab may have
+				-- live meteor warnings at that exact moment. The second-run trace showed
+				-- that returning on the ceiling put the character beside Chaos only 0.12
+				-- seconds before a 150-stud pillar impact. Let the clean-frame test below
+				-- prove the telegraph has ended before returning to activate R.
+				if elapsed >= 65 then
 					_G.Raid.stopDodge()
 					break
 				end
 				local recentlyDamaged = tick() - (_G.Raid.lastDamageAt or 0) < 0.85
-				if holdForRecovery or elapsed < 1.55 or recentlyDamaged or _G.Raid.detectAttack() then
+				local dangerStillActive = _G.Raid.detectAttack()
+				-- CrabPull begins two seconds after its warning and remains active for
+				-- three more. Do not return merely because the warning graphic expired.
+				local criticalWindowActive = criticalMode and elapsed < 5.6
+				local chaosAirstrikeWindowActive = tick() < chaosAirstrikeUntil
+				if holdForRecovery
+					or criticalWindowActive
+					or chaosAirstrikeWindowActive
+					or elapsed < 1.55
+					or recentlyDamaged
+					or dangerStillActive
+				then
 					cleanCount = 0
 				else
 					cleanCount = cleanCount + 1
@@ -23549,20 +23995,28 @@ local function run(B, T, P, DfT, ...)
 			local raceReadyForRecovery = belowRecoveryThreshold and raceStatus == "ready"
 			local largeTrackingBoss = isBoss and _G.Raid.isLargeTrackingBoss(targetMob)
 			local danger, attackPos = false, nil
+			local chaosAirstrikeWarning, chaosAirstrikePosition =
+				_G.Raid.getChaosAirstrikeWarning(targetMob)
 			if GetSetting("dodge_v2")
 				and not _G.Raid.dodge_active
 				and isBoss
-				and not raceProtecting
-				and not raceReadyForRecovery
+				and (chaosAirstrikeWarning or (not raceProtecting and not raceReadyForRecovery))
 			then
-				danger, attackPos = _G.Raid.scanAttacks(true)
+				if chaosAirstrikeWarning then
+					danger = true
+					attackPos = chaosAirstrikePosition or hrp.Position
+				else
+					danger, attackPos = _G.Raid.scanAttacks(true)
+				end
 			end
 
 			-- At the configured Race V3 recovery threshold, a ready racial ability takes
 			-- priority over starting another retreat. If the prior dodge left the
 			-- character far away, this pass returns to the target and the next pass
 			-- activates R at close range. An existing dodge still finishes normally.
-			if not _G.Raid.dodge_active and (not danger or raceReadyForRecovery) then
+			if not _G.Raid.dodge_active
+				and (not danger or (raceReadyForRecovery and not chaosAirstrikeWarning))
+			then
 				raceStatus = _G.Raid.tryRaceAbility(targetMob)
 				raceProtecting = raceStatus == "active"
 					or (raceStatus == "pending"
@@ -23583,10 +24037,12 @@ local function run(B, T, P, DfT, ...)
 				local recoveryRetreat = belowRecoveryThreshold
 					and not raceProtecting
 					and not raceReadyForRecovery
-				if recoveryRetreat or (danger and not raceProtecting) then
+				if recoveryRetreat
+					or (danger and (chaosAirstrikeWarning or not raceProtecting))
+				then
 					local customHeight = 210
 					if largeTrackingBoss then
-						customHeight = 260
+						customHeight = 230
 					end
 					_G.Raid.startDodge(attackPos, customHeight)
 				end
