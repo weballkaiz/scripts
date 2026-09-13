@@ -1,5 +1,6 @@
 -- GENESIS_WEBHOOK_ONLY_BUNDLE_V1
 -- GENESIS_DAILY_QUEST_ALL_11_V1
+-- GENESIS_DAILY_QUEST_CODEX_DIALOGUE_GUARD_V1
 -- Bundled application with reporting only to the user-configured Discord webhook.
 -- Shared event/server retrieval remains enabled; Event Hub uploads are disabled.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -39,7 +40,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_DAILY_QUEST_ALL_11_V1",
+		buildMarker = "GENESIS_DAILY_QUEST_CODEX_DIALOGUE_GUARD_V1",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -16935,6 +16936,8 @@ local function run(B, T, P, DfT, ...)
 		local promptCursor = 1
 		local nextActionAt = 0
 		local codexSubmissions = 0
+		local codexDialogueRetryAt = 0
+		local codexPuzzleRetryAt = 0
 
 		local function useQuestPrompt(part, prompt)
 			if not part or not prompt or not prompt.Enabled then
@@ -16978,6 +16981,8 @@ local function run(B, T, P, DfT, ...)
 					objectiveName = current.quest
 					promptCursor = 1
 					codexSubmissions = 0
+					codexDialogueRetryAt = 0
+					codexPuzzleRetryAt = 0
 					_G.dailyQuestIssue = nil
 				end
 
@@ -17063,7 +17068,15 @@ local function run(B, T, P, DfT, ...)
 					local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
 					local gui = playerGui and playerGui:FindFirstChild("LeePungg_PuzzleLibs")
 					local frame = gui and gui:FindFirstChild("MainFrame")
-					if not frame or not frame.Visible then
+					local puzzleVisible = frame and frame.Visible
+						and (not gui:IsA("LayerCollector") or gui.Enabled)
+					if not puzzleVisible then
+						local now = tick()
+						-- The puzzle is created a few seconds after the final NPC choice.
+						-- Do not reopen the dialogue during that transition.
+						if now < codexPuzzleRetryAt then
+							return
+						end
 						local giver = Workspace.AllNPC:FindFirstChild("Lore Kraken Codex Giver")
 						if not giver then
 							_G.dailyQuestIssue = "Kraken Codex giver is not present"
@@ -17080,18 +17093,33 @@ local function run(B, T, P, DfT, ...)
 						end
 						local lore = playerGui:FindFirstChild("LoreGUI")
 						local dialogue = lore and lore:FindFirstChild("Dialogue")
-						local yes = dialogue and dialogue:FindFirstChild("Quest 1")
-						if yes and _G._GenesisIsVisibleGuiButton(yes) then
-							_G._GenesisDispatchGuiButton(yes)
-							nextActionAt = tick() + 0.5
-						else
-							pcall(function()
-								ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(giver)
-							end)
-							nextActionAt = tick() + 1
+						local dialogueOpen = dialogue and dialogue:IsA("GuiObject") and dialogue.Visible
+							and (not lore:IsA("LayerCollector") or lore.Enabled)
+						if dialogueOpen then
+							codexDialogueRetryAt = 0
+							local yes = dialogue:FindFirstChild("Quest 1")
+							if yes and _G._GenesisIsVisibleGuiButton(yes) then
+								local sent = _G._GenesisDispatchGuiButton(yes)
+								if sent then
+									codexPuzzleRetryAt = tick() + 6
+								end
+							end
+							-- While text animates and the answer is hidden, just wait.
+							nextActionAt = tick() + 0.25
+							return
 						end
+						if now < codexDialogueRetryAt then
+							return
+						end
+						local opened = pcall(function()
+							ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(giver)
+						end)
+						codexDialogueRetryAt = tick() + (opened and 5 or 2)
+						nextActionAt = tick() + 0.5
 						return
 					end
+					codexDialogueRetryAt = 0
+					codexPuzzleRetryAt = 0
 					local pack = gui:FindFirstChild("PuzzlePack")
 					if not pack then
 						_G.dailyQuestIssue = "Kraken Codex UI has no PuzzlePack"
