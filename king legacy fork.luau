@@ -22002,6 +22002,16 @@ local function run(B, T, P, DfT, ...)
 		end
 	end
 
+	_G.Raid.getEffectiveFarmHeight = function(target)
+		local configured = tonumber(GetSetting("dungeon_farm_height")) or 8
+		-- Keep Veyzor inside melee range; the higher test offset cost too much
+		-- damage output. His telegraphed attacks are handled by arena-safe dodges.
+		if target and string.find(target.Name or "", "Veyzor", 1, true) then
+			return 10
+		end
+		return configured
+	end
+
 	_G.Raid.startOrbit = function(target)
 		if not target or not target.Parent then
 			return
@@ -22029,7 +22039,7 @@ local function run(B, T, P, DfT, ...)
 				if not hrp or not humT or humT.Health <= 0 then
 					break
 				end
-				local height = GetSetting("dungeon_farm_height") or 8
+				local height = _G.Raid.getEffectiveFarmHeight(o.target)
 				local speed = GetSetting("orbit_speed") or 2.5
 				o.angle = o.angle + (speed * 0.03)
 				local offset = Vector3.new(math.cos(o.angle) * o.radius, height, math.sin(o.angle) * o.radius)
@@ -22069,7 +22079,7 @@ local function run(B, T, P, DfT, ...)
 			_G.Raid.startOrbit(targetMob)
 		else
 			_G.Raid.stopOrbit()
-			local height = GetSetting("dungeon_farm_height") or 8
+			local height = _G.Raid.getEffectiveFarmHeight(targetMob)
 			_G.Raid.applyFarmFix(targetMob, height)
 		end
 	end
@@ -22548,6 +22558,23 @@ local function run(B, T, P, DfT, ...)
 
 	_G.Raid.getAttackPattern = function(effect)
 		local name = string.lower(effect.Name or "")
+		-- Veyzor's 50-stud ImpactT appears at the boss about 1.5 seconds
+		-- before the room-crossing pull/slam. The later ImpactT is an impact
+		-- visual; the first one gives the dodge its usable warning window.
+		if name == "impactt" then
+			local target = _G.Raid.current_target
+			local targetRoot = target and target:FindFirstChild("HumanoidRootPart")
+			local part = effect:IsA("BasePart") and effect or effect:FindFirstChildWhichIsA("BasePart")
+			if targetRoot and string.find(target.Name or "", "Veyzor", 1, true)
+				and part
+				and math.abs(part.Size.X - 50) <= 2
+				and math.abs(part.Size.Y - 50) <= 2
+				and math.abs(part.Size.Z - 50) <= 2
+				and (part.Position - targetRoot.Position).Magnitude <= 125
+			then
+				return "veyzor_mount_windup"
+			end
+		end
 		-- Chaos Crab creates this constrained hand roughly half a second before
 		-- CrabS1/Circ (and before the close explosion in its longer combos). Those
 		-- later objects are impact visuals, so waiting for their names can make the
@@ -22607,7 +22634,8 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	_G.Raid.isDangerousEffect = function(effect, bossPos, playerPos)
-		if not _G.Raid.getAttackPattern(effect) then
+		local pattern = _G.Raid.getAttackPattern(effect)
+		if not pattern then
 			return false, nil
 		end
 		local part = effect:IsA("BasePart") and effect or effect:FindFirstChildWhichIsA("BasePart")
@@ -22631,7 +22659,7 @@ local function run(B, T, P, DfT, ...)
 		if bossPos and horizontalDistance(part.Position, bossPos) > 500 + effectRadius then
 			return false, nil
 		end
-		return true, part.Position, effectRadius
+		return true, part.Position, effectRadius, pattern
 	end
 
 	_G.Raid.scanAttacks = function(getPosition)
@@ -22648,27 +22676,33 @@ local function run(B, T, P, DfT, ...)
 		if not effects then
 			return false, nil
 		end
-		local foundPos = nil
+		local foundPos, foundPattern = nil, nil
+		local prioritizeVeyzorMount = boss and string.find(boss.Name or "", "Veyzor", 1, true) ~= nil
 		for _, effect in pairs(effects:GetChildren()) do
 			if not _G.Raid.effectFirstSeen[effect] then
 				_G.Raid.effectFirstSeen[effect] = now
 			end
 			local age = now - _G.Raid.effectFirstSeen[effect]
 			if age <= _G.Raid.getEffectDangerDuration(effect) then
-				local dangerous, pos = _G.Raid.isDangerousEffect(effect, bossPos, playerPos)
+				local dangerous, pos, _, pattern = _G.Raid.isDangerousEffect(effect, bossPos, playerPos)
 				if dangerous then
 					if not getPosition then
-						return true, nil
+						return true, nil, pattern
 					end
-					foundPos = pos or foundPos
-					if foundPos then
-						return true, foundPos
+					if pattern == "veyzor_mount_windup" then
+						return true, pos, pattern
+					end
+					if not foundPos then
+						foundPos, foundPattern = pos, pattern
+					end
+					if foundPos and not prioritizeVeyzorMount then
+						return true, foundPos, foundPattern
 					end
 				end
 			end
 		end
 		if foundPos then
-			return true, foundPos
+			return true, foundPos, foundPattern
 		end
 		return false, nil
 	end
@@ -22716,6 +22750,48 @@ local function run(B, T, P, DfT, ...)
 		return name:find("Veyzor", 1, true) ~= nil
 			or name:find("Chaos Crab", 1, true) ~= nil
 			or name:find("Craberno", 1, true) ~= nil
+	end
+
+	_G.Raid.clearVeyzorAnimationWatch = function()
+		if _G.Raid.veyzorAnimationConnection then
+			_G.Raid.veyzorAnimationConnection:Disconnect()
+			_G.Raid.veyzorAnimationConnection = nil
+		end
+		_G.Raid.veyzorAnimationTarget = nil
+	end
+
+	_G.Raid.watchVeyzorAnimations = function(target)
+		if target == _G.Raid.veyzorAnimationTarget and _G.Raid.veyzorAnimationConnection then
+			return
+		end
+		_G.Raid.clearVeyzorAnimationWatch()
+		if not target or not string.find(target.Name or "", "Veyzor", 1, true) then
+			return
+		end
+		local humanoid = target:FindFirstChildOfClass("Humanoid")
+		local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+		if not animator then
+			return
+		end
+		_G.Raid.veyzorAnimationTarget = target
+		_G.Raid.veyzorAnimationConnection = trackGenesisConnection(animator.AnimationPlayed:Connect(function(track)
+			local animation = track.Animation
+			if not animation or animation.AnimationId ~= "rbxassetid://138126660188153" then
+				return
+			end
+			if not GetSetting("auto_dungeon_v2")
+				or not GetSetting("dodge_v2")
+				or not _G.Raid.inraid
+				or _G.Raid.current_target ~= target
+			then
+				return
+			end
+			local targetRoot = target:FindFirstChild("HumanoidRootPart")
+			if targetRoot then
+				_G.Raid.lastVeyzorAnimationDodgeAt = os.clock()
+				_G.Raid.startDodge(targetRoot.Position, 230)
+			end
+		end))
 	end
 
 	_G.Raid.getAttackPosition = function()
@@ -22839,6 +22915,7 @@ local function run(B, T, P, DfT, ...)
 		local bestPathPhase = 0
 		local largeCandidates = {}
 		if isLargeBoss then
+			local isVeyzor = string.find(target.Name or "", "Veyzor", 1, true) ~= nil
 			local offsets = {
 				-- Clockwise floor corners. Phase is retained so a dodge can immediately
 				-- continue around the perimeter instead of camping at a position that a
@@ -22846,11 +22923,27 @@ local function run(B, T, P, DfT, ...)
 				{ -330, -330, 0 }, { 330, -330, 1 }, { 330, 330, 2 }, { -330, 330, 3 },
 			}
 			local dungeonModel = _G.Raid.getDungeonModel()
+			local fakeDungeon = nil
+			if isVeyzor then
+				-- The Normal dungeon has a separate collidable fake shell. Its walls
+				-- intersect the old +/-330 corners even though the real floor lies
+				-- beneath them; that produced a teleport/correction tug of war.
+				offsets = {
+					{ -200, -200, 0 }, { 200, -200, 1 }, { 200, 200, 2 }, { -200, 200, 3 },
+					{ -160, -160, 4 }, { 160, -160, 5 }, { 160, 160, 6 }, { -160, 160, 7 },
+				}
+				if dungeonModel and dungeonModel.Parent then
+					local fakeName = string.gsub(dungeonModel.Name, "^%(Real%)", "(Fake)")
+					fakeDungeon = dungeonModel.Parent:FindFirstChild(fakeName)
+				end
+			end
 			local rayParams = nil
 			if dungeonModel then
 				rayParams = RaycastParams.new()
 				rayParams.FilterType = Enum.RaycastFilterType.Include
-				rayParams.FilterDescendantsInstances = { dungeonModel }
+				local floorGroup = isVeyzor and dungeonModel:FindFirstChild("5th")
+				local floorSurface = floorGroup and floorGroup:FindFirstChild("Floor")
+				rayParams.FilterDescendantsInstances = { floorSurface or dungeonModel }
 			end
 			for _, offset in ipairs(offsets) do
 				local candidate = Vector3.new(center.X + offset[1], center.Y + height, center.Z + offset[2])
@@ -22861,6 +22954,19 @@ local function run(B, T, P, DfT, ...)
 						Vector3.new(0, -180, 0),
 						rayParams
 					) ~= nil
+				end
+				if onFloor and isVeyzor then
+					-- Reject real scenery and fake-shell walls at the character's
+					-- actual dodge altitude, not just positions with floor below.
+					for _, part in ipairs(Workspace:GetPartBoundsInBox(CFrame.new(candidate), Vector3.new(8, 12, 8))) do
+						if part.CanCollide
+							and ((dungeonModel and part:IsDescendantOf(dungeonModel))
+								or (fakeDungeon and part:IsDescendantOf(fakeDungeon)))
+						then
+							onFloor = false
+							break
+						end
+					end
 				end
 				if onFloor then
 					table.insert(largeCandidates, { position = candidate, phase = offset[3] })
@@ -22906,8 +23012,9 @@ local function run(B, T, P, DfT, ...)
 		if not bestPosition then
 			-- Streaming may temporarily hide the large-boss floor geometry from the
 			-- raycast. Retain a bounded diagonal fallback inside the known envelope.
-			local x = attackPos.X >= center.X and -330 or 330
-			local z = attackPos.Z >= center.Z and -330 or 330
+			local fallbackRadius = string.find(target.Name or "", "Veyzor", 1, true) and 160 or 330
+			local x = attackPos.X >= center.X and -fallbackRadius or fallbackRadius
+			local z = attackPos.Z >= center.Z and -fallbackRadius or fallbackRadius
 			bestPosition = Vector3.new(center.X + x, center.Y + height, center.Z + z)
 			bestScore = math.huge
 			for threatIndex, threat in ipairs(threats) do
@@ -23886,6 +23993,7 @@ local function run(B, T, P, DfT, ...)
 			local dungeonCommitted = _G._GenesisUpdateDungeonCommit()
 			if not GetSetting("auto_dungeon_v2") then
 				if _G.Raid._wasDungeon then
+					_G.Raid.clearVeyzorAnimationWatch()
 					_G.Raid._entryGeneration = (_G.Raid._entryGeneration or 0) + 1
 					_G.Raid._entryBusy = false
 					_G.Raid._mainLoopBusy = false
@@ -23971,6 +24079,7 @@ local function run(B, T, P, DfT, ...)
 			local targetMob, isBoss = _G.Raid.selectTarget()
 			_G.Raid.current_target = targetMob
 			_G.Raid.boss_dungeon = isBoss == true
+			_G.Raid.watchVeyzorAnimations(targetMob)
 			if not targetMob or not targetMob:FindFirstChild("HumanoidRootPart") then
 				_G.Raid.attackState.requestedUntil = 0
 				_G.Raid.clearDungeonFarm()
@@ -23994,28 +24103,30 @@ local function run(B, T, P, DfT, ...)
 				and playerHumanoid.Health / playerHumanoid.MaxHealth <= recoveryRatio
 			local raceReadyForRecovery = belowRecoveryThreshold and raceStatus == "ready"
 			local largeTrackingBoss = isBoss and _G.Raid.isLargeTrackingBoss(targetMob)
-			local danger, attackPos = false, nil
+			local isVeyzor = isBoss and string.find(targetMob.Name or "", "Veyzor", 1, true) ~= nil
+			local danger, attackPos, attackPattern = false, nil, nil
 			local chaosAirstrikeWarning, chaosAirstrikePosition =
 				_G.Raid.getChaosAirstrikeWarning(targetMob)
 			if GetSetting("dodge_v2")
 				and not _G.Raid.dodge_active
 				and isBoss
-				and (chaosAirstrikeWarning or (not raceProtecting and not raceReadyForRecovery))
+				and (chaosAirstrikeWarning or isVeyzor or (not raceProtecting and not raceReadyForRecovery))
 			then
 				if chaosAirstrikeWarning then
 					danger = true
 					attackPos = chaosAirstrikePosition or hrp.Position
 				else
-					danger, attackPos = _G.Raid.scanAttacks(true)
+					danger, attackPos, attackPattern = _G.Raid.scanAttacks(true)
 				end
 			end
+			local veyzorMountWarning = attackPattern == "veyzor_mount_windup"
 
 			-- At the configured Race V3 recovery threshold, a ready racial ability takes
 			-- priority over starting another retreat. If the prior dodge left the
 			-- character far away, this pass returns to the target and the next pass
 			-- activates R at close range. An existing dodge still finishes normally.
 			if not _G.Raid.dodge_active
-				and (not danger or (raceReadyForRecovery and not chaosAirstrikeWarning))
+				and (not danger or (raceReadyForRecovery and not chaosAirstrikeWarning and not veyzorMountWarning))
 			then
 				raceStatus = _G.Raid.tryRaceAbility(targetMob)
 				raceProtecting = raceStatus == "active"
@@ -24038,7 +24149,7 @@ local function run(B, T, P, DfT, ...)
 					and not raceProtecting
 					and not raceReadyForRecovery
 				if recoveryRetreat
-					or (danger and (chaosAirstrikeWarning or not raceProtecting))
+					or (danger and (chaosAirstrikeWarning or veyzorMountWarning or not raceProtecting))
 				then
 					local customHeight = 210
 					if largeTrackingBoss then
