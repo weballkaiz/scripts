@@ -1,4 +1,5 @@
 -- GENESIS_WEBHOOK_ONLY_BUNDLE_V1
+-- GENESIS_DAILY_QUEST_ALL_11_V1
 -- Bundled application with reporting only to the user-configured Discord webhook.
 -- Shared event/server retrieval remains enabled; Event Hub uploads are disabled.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -38,6 +39,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
+		buildMarker = "GENESIS_DAILY_QUEST_ALL_11_V1",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -16927,6 +16929,203 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
+	local dailyQuestCanAct, getDailyQuestPending
+	spawn(function()
+		local objectiveName = nil
+		local promptCursor = 1
+		local nextActionAt = 0
+		local codexSubmissions = 0
+
+		local function useQuestPrompt(part, prompt)
+			if not part or not prompt or not prompt.Enabled then
+				return false
+			end
+			local root = GetRoot(LocalPlayer.Character)
+			if not root then
+				return false
+			end
+			local reach = math.max(3, prompt.MaxActivationDistance - 2)
+			if (root.Position - part.Position).Magnitude > reach then
+				tp(CFrame.new(part.Position + Vector3.new(0, 3, 0)))
+				nextActionAt = tick() + 0.7 -- let the server see the new position
+				return false
+			end
+			if type(fireproximityprompt) ~= "function" then
+				_G.dailyQuestIssue = "Executor cannot trigger daily quest prompts"
+				nextActionAt = tick() + 5
+				return false
+			end
+			local ok = pcall(fireproximityprompt, prompt, 0)
+			if not ok then
+				_G.dailyQuestIssue = "Daily quest prompt failed: " .. part.Name
+			end
+			nextActionAt = tick() + (ok and 0.7 or 3)
+			return ok
+		end
+
+		while task.wait(0.2) do
+			local ok, err = pcall(function()
+				if not dailyQuestCanAct or not getDailyQuestPending
+					or not dailyQuestCanAct() or _G.dailyQuestState ~= "objective" or tick() < nextActionAt then
+					return
+				end
+				local current = getDailyQuestPending()
+				local activeQuest = LocalPlayer:FindFirstChild("CurrentQuest")
+				if not current or not activeQuest or activeQuest.Value ~= current.quest then
+					return
+				end
+				if objectiveName ~= current.quest then
+					objectiveName = current.quest
+					promptCursor = 1
+					codexSubmissions = 0
+					_G.dailyQuestIssue = nil
+				end
+
+				if current.kind == "prompts" then
+					local spawnItems = Workspace:FindFirstChild("SpawnItem")
+					if not spawnItems then
+						return
+					end
+					local objects = {}
+					for _, part in ipairs(spawnItems:GetChildren()) do
+						if part.Name == current.object and part:IsA("BasePart") then
+							table.insert(objects, part)
+						end
+					end
+					table.sort(objects, function(a, b)
+						return a.Position.X < b.Position.X
+					end)
+					if #objects == 0 then
+						_G.dailyQuestIssue = "Daily quest objects not present: " .. current.object
+						return
+					end
+					promptCursor = ((promptCursor - 1) % #objects) + 1
+					local part = objects[promptCursor]
+					local prompt = part:FindFirstChild("PromptQuest")
+					if not prompt or not prompt.Enabled then
+						promptCursor = promptCursor + 1
+						return
+					end
+					if useQuestPrompt(part, prompt) then
+						promptCursor = promptCursor + 1
+					end
+					return
+				end
+
+				if current.kind == "plates" then
+					local spawnItems = Workspace:FindFirstChild("SpawnItem")
+					local puzzle = spawnItems and spawnItems:FindFirstChild("Puzzle_Easy")
+					if not puzzle then
+						_G.dailyQuestIssue = "Puzzle Mania pieces are not present"
+						return
+					end
+					local plates = {}
+					for _, part in ipairs(puzzle:GetChildren()) do
+						if part.Name == "Plate" and part:IsA("BasePart") then
+							table.insert(plates, part)
+						end
+					end
+					table.sort(plates, function(a, b)
+						return a.Position.X < b.Position.X
+					end)
+					if #plates ~= 3 then
+						_G.dailyQuestIssue = "Puzzle Mania plate layout changed"
+						return
+					end
+					-- Verified live: Message1 (Kraken), Message2 (Shell), Message3
+					-- (Giant Crab) go on the plates from lowest to highest X.
+					for i = 1, 3 do
+						local piece = puzzle:FindFirstChild("Message" .. i)
+						local pickup = piece and piece:FindFirstChildOfClass("ProximityPrompt")
+						local plate = plates[i]
+						local place = plate:FindFirstChildOfClass("ProximityPrompt")
+						if not piece or not pickup or not place then
+							_G.dailyQuestIssue = "Puzzle Mania prompt layout changed"
+							return
+						end
+						if pickup.Enabled then
+							useQuestPrompt(piece, pickup)
+							return
+						end
+						if place.Enabled then
+							useQuestPrompt(plate, place)
+							return
+						end
+					end
+					return -- wait for the completion record after the last placement
+				end
+
+				if current.kind == "codex" then
+					if codexSubmissions >= 3 then
+						_G.dailyQuestIssue = "Codex did not complete after three verified submissions: " .. current.quest
+						return
+					end
+					local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+					local gui = playerGui and playerGui:FindFirstChild("LeePungg_PuzzleLibs")
+					local frame = gui and gui:FindFirstChild("MainFrame")
+					if not frame or not frame.Visible then
+						local giver = Workspace.AllNPC:FindFirstChild("Lore Kraken Codex Giver")
+						if not giver then
+							_G.dailyQuestIssue = "Kraken Codex giver is not present"
+							return
+						end
+						local root = GetRoot(LocalPlayer.Character)
+						if not root then
+							return
+						end
+						if (root.Position - giver.Position).Magnitude > 8 then
+							tp(CFrame.new(giver.Position + Vector3.new(0, 3, 0)))
+							nextActionAt = tick() + 0.4
+							return
+						end
+						local lore = playerGui:FindFirstChild("LoreGUI")
+						local dialogue = lore and lore:FindFirstChild("Dialogue")
+						local yes = dialogue and dialogue:FindFirstChild("Quest 1")
+						if yes and _G._GenesisIsVisibleGuiButton(yes) then
+							_G._GenesisDispatchGuiButton(yes)
+							nextActionAt = tick() + 0.5
+						else
+							pcall(function()
+								ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(giver)
+							end)
+							nextActionAt = tick() + 1
+						end
+						return
+					end
+					local pack = gui:FindFirstChild("PuzzlePack")
+					if not pack then
+						_G.dailyQuestIssue = "Kraken Codex UI has no PuzzlePack"
+						return
+					end
+					local chosen = pack:GetChildren()
+					for i, value in ipairs(chosen) do
+						if value.Name ~= tostring(current.words[i]) then
+							pack:ClearAllChildren() -- reset a stale partial client-side input
+							chosen = {}
+							break
+						end
+					end
+					if #chosen < 3 then
+						local slot = frame:FindFirstChild("Slot" .. current.words[#chosen + 1])
+						local button = slot and slot:FindFirstChildWhichIsA("TextButton", true)
+						if not _G._GenesisDispatchGuiButton(button) then
+							_G.dailyQuestIssue = "Kraken Codex word button is unavailable"
+						end
+						nextActionAt = tick() + 0.3
+						return
+					end
+					if _G._GenesisDispatchGuiButton(gui:FindFirstChild("Send")) then
+						codexSubmissions = codexSubmissions + 1
+					end
+					nextActionAt = tick() + 2
+				end
+			end)
+			if not ok then
+				_G.dailyQuestIssue = tostring(err)
+			end
+		end
+	end)
+
 	spawn(function()
 		while task.wait(1) do
 			pcall(function()
@@ -18850,9 +19049,13 @@ local function run(B, T, P, DfT, ...)
 	end)
 
 	spawn(function()
-		while task.wait(0.01) do
+		while task.wait(0.05) do
 			pcall(function()
 				if not GetSetting("autoDailyQuest") or _G.dailyQuestState ~= "get_quest" then
+					return
+				end
+				local owner = _G._GenesisPriorityOwner
+				if owner ~= "other_combat" and owner ~= "idle" then
 					return
 				end
 
@@ -19461,18 +19664,46 @@ local function run(B, T, P, DfT, ...)
 		{
 			npc = "Lore the Depth",
 			quest = "Rolling in the Depth",
+			kind = "mob",
 			mob = "Deep Diver",
 			cframe = CFrame.new(1674, 47, 1015),
 		},
 		{
 			npc = "Lore Lost Fugitive",
 			quest = "Redemption",
+			kind = "mob",
 			mob = "Fugitive",
 			cframe = CFrame.new(2888, 35, 993),
 		},
+		{ npc = "Lore Until Pond", quest = "Until Pond", kind = "mob", mob = "Ocean Gladiator", cframe = CFrame.new(-116, 44, -9150) },
+		{ npc = "Lore Into the Bubble-Verse", quest = "Into the Bubble-Verse", kind = "mob", mob = "Cyborg Gorilla", cframe = CFrame.new(5881, 51, 9375) },
+		{ npc = "Lore The Bubble One", quest = "Hide'n Seek!", kind = "prompts", object = "Hide'n Seek!" },
+		{ npc = "Lore The Pillar", quest = "The Pillar", kind = "prompts", object = "The Pillar" },
+		{ npc = "Lore Mossy Must Gone", quest = "Mossy Must Gone", kind = "prompts", object = "Mossy Must Gone" },
+		{ npc = "Lore Puzzle First", quest = "Puzzle Mania", kind = "plates" },
+		{ npc = "Lore Kraken Codex Easy", quest = "Krakenci Codes (Easy)", kind = "codex", words = { 8, 5, 7 } },
+		{ npc = "Lore Kraken Codex Medium", quest = "Krakenci Codes (Medium)", kind = "codex", words = { 1, 9, 4 } },
+		{ npc = "Lore Kraken Codex Hard", quest = "Krakenci Codes (Hard)", kind = "codex", words = { 6, 1, 3 } },
 	}
+	-- Only the eleven live Third Sea Lore NPCs whose QuestManager entries are
+	-- marked DailyQuest belong here. The Codex indices are the game's UI slots:
+	-- Fallen/Dark/Heroic, Moon/Savior/Bright, Fearful/Moon/Night.
 
-	local function getDailyQuestPending()
+	dailyQuestCanAct = function()
+		if not GetSetting("autoDailyQuest") or game.PlaceId ~= 15759515082 then
+			return false
+		end
+		if _G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation() then
+			return false
+		end
+		if _G.storingFruit or _G.isLootingChests or _G.isFishing then
+			return false
+		end
+		local owner = _G._GenesisPriorityOwner
+		return owner == "other_combat" or owner == "idle"
+	end
+
+	getDailyQuestPending = function()
 		local dailyValue = LocalPlayer.PlayerStats:FindFirstChild("DailyQuest")
 		local completed = {}
 		if dailyValue then
@@ -19483,6 +19714,13 @@ local function run(B, T, P, DfT, ...)
 				for questName, _ in pairs(data) do
 					completed[questName] = true
 				end
+			end
+		end
+		local activeQuest = LocalPlayer:FindFirstChild("CurrentQuest")
+		local activeName = activeQuest and activeQuest.Value
+		for _, q in ipairs(dailyQuests) do
+			if q.quest == activeName and not completed[q.quest] then
+				return q
 			end
 		end
 		for _, q in ipairs(dailyQuests) do
@@ -19496,10 +19734,7 @@ local function run(B, T, P, DfT, ...)
 	spawn(function()
 		while task.wait(0.5) do
 			pcall(function()
-				if not GetSetting("autoDailyQuest") then
-					return
-				end
-				if game.PlaceId ~= 15759515082 then
+				if not dailyQuestCanAct() then
 					return
 				end
 
@@ -19512,8 +19747,8 @@ local function run(B, T, P, DfT, ...)
 				local currentQuest = LocalPlayer:FindFirstChild("CurrentQuest")
 				local hasQuest = currentQuest and currentQuest.Value == current.quest
 
-				if _G.dailyQuestState == "idle" or _G.dailyQuestState == "done" then
-					_G.dailyQuestState = hasQuest and "kill" or "get_quest"
+				if _G.dailyQuestState == "idle" or _G.dailyQuestState == "done" or _G.dailyQuestCurrentNPC ~= current.npc then
+					_G.dailyQuestState = hasQuest and (current.kind == "mob" and "kill" or "objective") or "get_quest"
 					_G.dailyQuestCurrentNPC = current.npc
 					_G.dailyQuestCheckQueued = false
 					_G.dailyQuestLastCheckAttempt = 0
@@ -19522,7 +19757,7 @@ local function run(B, T, P, DfT, ...)
 
 				if _G.dailyQuestState == "get_quest" then
 					if hasQuest then
-						_G.dailyQuestState = "kill"
+						_G.dailyQuestState = current.kind == "mob" and "kill" or "objective"
 						_G.dailyQuestCheckQueued = false
 						_G.dailyQuestLastCheckAttempt = 0
 						return
@@ -19538,6 +19773,9 @@ local function run(B, T, P, DfT, ...)
 						_G.dailyQuestCheckQueued = true
 						_G.dailyQuestLastCheckAttempt = tick()
 						task.wait(0.5)
+						if not dailyQuestCanAct() or _G.dailyQuestState ~= "get_quest" then
+							return
+						end
 						pcall(function()
 							local npcPart = Workspace.AllNPC:FindFirstChild(current.npc)
 							if npcPart then
@@ -19548,7 +19786,7 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
-				if _G.dailyQuestState == "kill" then
+				if _G.dailyQuestState == "kill" or _G.dailyQuestState == "objective" then
 					if not hasQuest then
 						_G.dailyQuestState = "idle"
 						_G.dailyQuestCheckQueued = false
@@ -19563,7 +19801,7 @@ local function run(B, T, P, DfT, ...)
 	spawn(function()
 		while task.wait(0.1) do
 			pcall(function()
-				if not GetSetting("autoDailyQuest") then
+				if not dailyQuestCanAct() then
 					_G.dailyQuestTarget = nil
 					return
 				end
@@ -19572,7 +19810,7 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 				local current = getDailyQuestPending()
-				if not current then
+				if not current or current.kind ~= "mob" then
 					_G.dailyQuestTarget = nil
 					return
 				end
@@ -19583,7 +19821,7 @@ local function run(B, T, P, DfT, ...)
 							if
 								mob:FindFirstChild("Humanoid")
 								and mob.Humanoid.Health > 0
-								and string.find(mob.Name, current.mob)
+								and string.find(mob.Name, current.mob, 1, true)
 							then
 								found = mob
 								break
