@@ -323,7 +323,7 @@ local HttpService = game:GetService("HttpService")
 local TextService = game:GetService("TextService")
 
 local LocalPlayer = Players.LocalPlayer
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local PlayerGui = LocalPlayer:FindFirstChild("PlayerGui")
 
 -- --- LUCIDE ICONS / GENESIS X -----------------------------------------------
 local LucideAssets = {}
@@ -2657,7 +2657,31 @@ function GenesisX:CreateWindow(config)
 
 	-- If that fails (the executor does not allow it), use PlayerGui.
 	if not parentSuccess then
-		self.ScreenGui.Parent = PlayerGui
+		local readyGui = PlayerGui or LocalPlayer:FindFirstChild("PlayerGui")
+		if readyGui then
+			self.ScreenGui.Parent = readyGui
+		else
+			-- PlayerGui can arrive after Play. Keep building the UI and attach it later.
+			local pendingGui = self.ScreenGui
+			local parentRuntime = getGenesisRuntimeState()
+			local pendingConnection
+			pendingConnection = trackGenesisConnection(LocalPlayer.ChildAdded:Connect(function(child)
+				if child.Name == "PlayerGui" then
+					pendingConnection:Disconnect()
+					if (not parentRuntime or parentRuntime.active) and not pendingGui.Parent then
+						pendingGui.Parent = child
+					end
+				end
+			end))
+			-- Recheck after connecting so an arrival in between cannot be missed.
+			readyGui = LocalPlayer:FindFirstChild("PlayerGui")
+			if readyGui then
+				pendingConnection:Disconnect()
+				if (not parentRuntime or parentRuntime.active) and not pendingGui.Parent then
+					pendingGui.Parent = readyGui
+				end
+			end
+		end
 	end
 
 	self._notifications = {}
@@ -6668,8 +6692,7 @@ local function run(B, T, P, DfT, ...)
 	-- ========== end Event Hub ==========
 	local TeleportService = game:GetService("TeleportService")
 	local LocalPlayer = Players.LocalPlayer
-	-- Daily access checks and startup UI depend on replicated player data.
-	LocalPlayer:WaitForChild("PlayerStats")
+	-- PlayerStats may only replicate after Play; it must not stall initialization.
 
 	-- Retire globals from earlier builds without changing the executor's own
 	-- auto-execute or teleport queue configuration.
@@ -9871,6 +9894,13 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	function dailyCoordinator.refreshAccess()
+		if not LocalPlayer:FindFirstChild("PlayerStats") then
+			-- Preview from the current sea and saved proof without persisting an
+			-- incomplete access check before player data has replicated.
+			local confirmed = dailyCoordinator.currentRank() or 1
+			local remembered = tonumber(dailyJournal.highestUnlocked) or 1
+			return math.clamp(math.max(confirmed, remembered), 1, 3)
+		end
 		local unlocked, confirmed = dailyCoordinator.unlockedRank()
 		local seen = tonumber(dailyJournal.highestUnlocked) or 1
 		local changed = false
@@ -9889,8 +9919,9 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	function dailyCoordinator.mainRank()
-		dailyCoordinator.refreshAccess()
-		return tonumber(dailyJournal.mainSea) or 1
+		local unlocked = dailyCoordinator.refreshAccess()
+		local main = tonumber(dailyJournal.mainSea)
+		return (main and dailySea[main] and main <= unlocked) and main or unlocked
 	end
 
 	function dailyCoordinator.setMainRank(rank)
@@ -9932,7 +9963,10 @@ local function run(B, T, P, DfT, ...)
 		dailyCoordinator.save()
 	end
 
-	dailyCoordinator.refreshAccess()
+	spawn(function()
+		LocalPlayer:WaitForChild("PlayerStats")
+		dailyCoordinator.refreshAccess()
+	end)
 	end
 
 	local function findSeaKingIsland()
@@ -15008,9 +15042,10 @@ local function run(B, T, P, DfT, ...)
 			end,
 		})
 		spawn(function()
+			LocalPlayer:WaitForChild("PlayerStats")
 			local lastUnlocked = 0
 			local lastMain = 0
-			while task.wait(5) do
+			while true do
 				local unlocked = dailyCoordinator.refreshAccess()
 				local main = dailyCoordinator.mainRank()
 				if unlocked ~= lastUnlocked then
@@ -15021,6 +15056,7 @@ local function run(B, T, P, DfT, ...)
 					mainSeaDropdown.SetValue(dailyCoordinator.sea[main].label)
 					lastMain = main
 				end
+				task.wait(5)
 			end
 		end)
 	end
@@ -19313,7 +19349,7 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	trackGenesisConnection(RunService.Stepped:Connect(function()
-		if _G._GenesisAutomationStepBusy then
+		if not LocalPlayer:FindFirstChild("PlayerStats") or _G._GenesisAutomationStepBusy then
 			return
 		end
 		_G._GenesisAutomationStepBusy = true
@@ -19327,6 +19363,7 @@ local function run(B, T, P, DfT, ...)
 	spawn(function()
 		while task.wait(1) do
 			pcall(function()
+				if not LocalPlayer:FindFirstChild("PlayerStats") then return end
 				if GetSetting("auto_farm") and not _G.seaEventActive then
 					c_lv()
 					if _G.NameQuest and _G.NameQuest ~= "" then
@@ -20669,6 +20706,9 @@ local function run(B, T, P, DfT, ...)
 	-- Fallen/Dark/Heroic, Moon/Savior/Bright, Fearful/Moon/Night.
 
 	dailyQuestCanAct = function()
+		if not LocalPlayer:FindFirstChild("PlayerStats") then
+			return false
+		end
 		if not (GetSetting("autoDailyQuestsMaster") and
 			((game.PlaceId == 15759515082 and GetSetting("autoDailyQuest"))
 				or (game.PlaceId == 6381829480 and GetSetting("autoSecondSeaDailyQuest")))) then
@@ -20911,6 +20951,7 @@ local function run(B, T, P, DfT, ...)
 					_G._GenesisDailyReturnRequested = false
 					return
 				end
+				if not LocalPlayer:FindFirstChild("PlayerStats") then return end
 				local current = dailyCoordinator.currentRank()
 				if not current then return end
 				local now = os.time()
