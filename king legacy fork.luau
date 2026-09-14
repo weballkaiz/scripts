@@ -6,11 +6,11 @@
 -- GENESIS_DAILY_NPC_SEA_TRAVEL_V22
 -- GENESIS_DAILY_PUZZLE_ADAPTIVE_V23
 -- GENESIS_DAILY_PUZZLE_CODEX_HANDOFF_V24
+-- GENESIS_EXECUTOR_MANAGED_AUTOEXEC_V25
 -- Bundled application with reporting only to the user-configured Discord webhook.
 -- Shared event/server retrieval remains enabled; Event Hub uploads are disabled.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
--- Auto-execute requires this file in the executor workspace at:
--- GenesisX/king_legacy.luau (no remote reload fallback).
+-- Teleport auto-execution is managed by the executor, not this script.
 local function getGenesisRuntimeState()
 	local executorEnvironment = (getgenv and getgenv()) or _G
 	return (executorEnvironment and executorEnvironment.__GENESIS_RUNTIME)
@@ -45,7 +45,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_DAILY_PUZZLE_CODEX_HANDOFF_V24",
+		buildMarker = "GENESIS_EXECUTOR_MANAGED_AUTOEXEC_V25",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -278,7 +278,14 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._GenesisDailyQuestPriorityCandidate = nil
 		sharedGlobal._GenesisDailyQuestReleaseUntil = nil
 		sharedGlobal._GenesisDailyPuzzleStatus = nil
-		sharedGlobal._autoExecuteQueued = false
+		sharedGlobal.GENESIS_SCRIPT_URL = nil
+		sharedGlobal.GENESIS_SCRIPT_FILE = nil
+		sharedGlobal._autoExecuteQueued = nil
+		sharedGlobal._autoExecuteLastQueue = nil
+		sharedGlobal.buildAutoExecuteCode = nil
+		sharedGlobal.ensureLocalScriptCopy = nil
+		sharedGlobal.clearAutoExecuteQueue = nil
+		sharedGlobal.queueAutoExecute = nil
 		sharedGlobal._pendingHopJobId = nil
 		executorEnvironment.SpectrumX = runtime.previousSpectrumX
 		executorEnvironment.Notify = runtime.previousNotify
@@ -6661,104 +6668,20 @@ local function run(B, T, P, DfT, ...)
 	-- ========== end Event Hub ==========
 	local TeleportService = game:GetService("TeleportService")
 	local LocalPlayer = Players.LocalPlayer
-	-- Queued teleport code can run before the destination finishes replicating
-	-- player data. Daily access checks and startup UI both depend on it.
+	-- Daily access checks and startup UI depend on replicated player data.
 	LocalPlayer:WaitForChild("PlayerStats")
 
+	-- Retire globals from earlier builds without changing the executor's own
+	-- auto-execute or teleport queue configuration.
 	_G.GENESIS_SCRIPT_URL = nil
-	_G.GENESIS_SCRIPT_FILE = "GenesisX/king_legacy.luau"
-	_G._autoExecuteQueued = false
-	_G._autoExecuteLastQueue = 0
+	_G.GENESIS_SCRIPT_FILE = nil
+	_G._autoExecuteQueued = nil
+	_G._autoExecuteLastQueue = nil
+	_G.buildAutoExecuteCode = nil
+	_G.ensureLocalScriptCopy = nil
+	_G.clearAutoExecuteQueue = nil
+	_G.queueAutoExecute = nil
 
-	_G.buildAutoExecuteCode = function()
-		-- Queue the edited local source itself. Never fetch the original remote loader.
-		if not (isfile and readfile) then
-			return nil
-		end
-		local ok, src = pcall(function()
-			if isfile(_G.GENESIS_SCRIPT_FILE) then
-				return readfile(_G.GENESIS_SCRIPT_FILE)
-			end
-		end)
-		local marker = "-- GENESIS_WEBHOOK_ONLY_BUNDLE_V1"
-		if ok and type(src) == "string" and #src > 200 and src:sub(1, #marker) == marker
-			and src:find("-- GENESIS_DAILY_NPC_SEA_TRAVEL_V22", 1, true)
-			and src:find("-- GENESIS_DAILY_PUZZLE_CODEX_HANDOFF_V24", 1, true) then
-			return src
-		end
-		return nil
-	end
-
-	_G.ensureLocalScriptCopy = function()
-		-- The user supplies this edited file in the executor workspace.
-		return _G.buildAutoExecuteCode() ~= nil
-	end
-
-	_G.clearAutoExecuteQueue = function()
-		-- Try to clear the queue (executors differ; an empty/no-op string usually overwrites it).
-		pcall(function()
-			if queue_on_teleport then
-				queue_on_teleport("do return end")
-			end
-		end)
-		pcall(function()
-			if syn and syn.queue_on_teleport then
-				syn.queue_on_teleport("do return end")
-			end
-		end)
-		_G._autoExecuteQueued = false
-	end
-
-	_G.queueAutoExecute = function(force)
-		-- Respect the setting (GetSetting may not exist during initial startup yet).
-		local enabled = false
-		pcall(function()
-			if type(GetSetting) == "function" then
-				enabled = GetSetting("autoExecuteAfterTeleport") == true
-			elseif _G.Setting and _G.Setting.autoExecuteAfterTeleport then
-				enabled = _G.Setting.autoExecuteAfterTeleport[1] == true
-			end
-		end)
-
-		if not enabled then
-			if _G._autoExecuteQueued then
-				_G.clearAutoExecuteQueue()
-			end
-			return false
-		end
-
-		-- Prevent re-queue spam (at least 2 seconds between queues unless forced).
-		if not force and _G._autoExecuteQueued and (tick() - (_G._autoExecuteLastQueue or 0)) < 2 then
-			return true
-		end
-
-		-- Read the edited local bundle for teleport reload.
-		pcall(_G.ensureLocalScriptCopy)
-		local code = _G.buildAutoExecuteCode()
-		if not code then
-			return false
-		end
-
-		local ok = false
-		pcall(function()
-			if queue_on_teleport then
-				queue_on_teleport(code)
-				ok = true
-			elseif syn and syn.queue_on_teleport then
-				syn.queue_on_teleport(code)
-				ok = true
-			end
-		end)
-
-		if ok then
-			_G._autoExecuteQueued = true
-			_G._autoExecuteLastQueue = tick()
-		end
-		return ok
-	end
-
-	-- Do NOT queue unconditionally on load.
-	-- The setting is only applied after LoadSettings plus a toggle/hop.
 	-- These callbacks are defined before the position controllers below.
 	-- Predeclare them so callbacks capture the intended locals instead of globals.
 	local removeFarmFix
@@ -7049,7 +6972,6 @@ local function run(B, T, P, DfT, ...)
 		hideNotify = { false, "hideNotify" },
 		blackScreen = { false, "blackScreen" },
 
-		autoExecuteAfterTeleport = { false, "autoExecuteAfterTeleport" },
 	}
 
 	function GetSetting(key)
@@ -7111,15 +7033,6 @@ local function run(B, T, P, DfT, ...)
 	-- old save files remain compatible, but never let a saved toggle resume the
 	-- removed background teleporter.
 	_G.Setting.autoRaceIsland[1] = false
-
-	-- If the setting was already saved as true, queue it now (after LoadSettings).
-	task.defer(function()
-		pcall(function()
-			if GetSetting("autoExecuteAfterTeleport") then
-				_G.queueAutoExecute(true)
-			end
-		end)
-	end)
 
 	_G.webhook = {
 		-- Event Hub channels (they are no longer webhook URLs).
@@ -10637,9 +10550,6 @@ local function run(B, T, P, DfT, ...)
 					end
 					if #servers > 0 then
 						local randomServer = servers[math.random(1, #servers)]
-						pcall(function()
-							_G.queueAutoExecute(true)
-						end)
 						TeleportService:TeleportToPlaceInstance(game.PlaceId, randomServer, LocalPlayer)
 					else
 						local ui = env.SpectrumX
@@ -13145,9 +13055,6 @@ local function run(B, T, P, DfT, ...)
 			-- Short cooldown while teleport processes (prevents spam before the Fail event).
 			_G._hopFailCooldown = tick() + 3.5
 			pcall(function()
-				_G.queueAutoExecute(true)
-			end)
-			pcall(function()
 				TeleportService:TeleportToPlaceInstance(game.PlaceId, targetId, LocalPlayer)
 			end)
 			-- Safety: if Fail never arrives within 12 seconds, release pending so hopping cannot remain stuck forever.
@@ -13932,7 +13839,6 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	uiSections.settingsDisplay = createUiSection(uiSections.SettingsTab.Left, "Display & Performance", "lucide-gauge")
-	uiSections.settingsPersistence = createUiSection(uiSections.SettingsTab.Left, "Teleport Persistence", "lucide-refresh-cw")
 	uiSections.settingsScript = createUiSection(uiSections.SettingsTab.Right, "Script Control", "lucide-power")
 	Window:CreateLabel(uiSections.settingsScript, {
 		Text = "Stops Genesis workers, disconnects tracked events, releases movement locks, and removes the UI. Saved settings are kept.",
@@ -14069,35 +13975,6 @@ local function run(B, T, P, DfT, ...)
 		Text = "\240\159\146\161 It is recommended that you have the Sea Beast Race.",
 		Color = SpectrumX.Theme.TextSecondary,
 		Size = UDim2.new(1, 0, 0, 40),
-	})
-
-	Window:CreateToggle(uiSections.settingsPersistence, {
-		Text = "Auto Execute (After Server Switch)",
-		Default = GetSetting("autoExecuteAfterTeleport") or false,
-		Callback = function(state)
-			saveAndApply("autoExecuteAfterTeleport", state)
-
-			if state then
-				-- Queue the edited local bundle without downloading code.
-				pcall(_G.ensureLocalScriptCopy)
-				local ok = _G.queueAutoExecute(true)
-				GenesisX:Notify({
-					Title = "AUTO EXECUTE",
-					Text = ok and "Enabled - reload the edited local bundle"
-						or "Save this bundle as GenesisX/king_legacy.luau; teleport queuing is also required",
-					Type = ok and "success" or "error",
-					Duration = 4,
-				})
-			else
-				_G.clearAutoExecuteQueue()
-				GenesisX:Notify({
-					Title = "AUTO EXECUTE",
-					Text = "Disabled \226\128\148 queue cleared",
-					Type = "info",
-					Duration = 3,
-				})
-			end
-		end,
 	})
 
 	Window:CreateToggle(uiSections.farmLevel, {
@@ -21145,11 +21022,6 @@ local function run(B, T, P, DfT, ...)
 				elseif _G._GenesisPriorityOwner ~= "daily_quest_handoff"
 					or _G.storingFruit or _G.isLootingChests or _G.seaEventActive
 					or (_G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation()) then
-					return
-				end
-				if not _G._autoExecuteQueued and not _G.queueAutoExecute(true) then
-					dailyCoordinator.travelRetry(route, now,
-						"Daily sea travel needs Auto Execute and GenesisX/king_legacy.luau in the executor workspace.", 60)
 					return
 				end
 				local npcName, hop = dailyCoordinator.travelNpc(current, destination)
