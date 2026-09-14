@@ -2,7 +2,7 @@
 -- GENESIS_DAILY_QUEST_ALL_11_V1
 -- GENESIS_DAILY_QUEST_CODEX_DIALOGUE_GUARD_V1
 -- GENESIS_SEA_KING_ACQUISITION_V1
--- GENESIS_SECOND_SEA_DAILY_V14
+-- GENESIS_SECOND_SEA_DAILY_V15
 -- Bundled application with reporting only to the user-configured Discord webhook.
 -- Shared event/server retrieval remains enabled; Event Hub uploads are disabled.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -42,7 +42,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_SECOND_SEA_DAILY_V14",
+		buildMarker = "GENESIS_SECOND_SEA_DAILY_V15",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -13756,7 +13756,7 @@ local function run(B, T, P, DfT, ...)
 	if game.PlaceId == 6381829480 then
 		uiSections.progressHaki = createUiSection(uiSections.ProgressTab.Left, "Haki V2", "lucide-shield")
 	end
-	if game.PlaceId == 15759515082 then
+	if game.PlaceId == 6381829480 or game.PlaceId == 15759515082 then
 		uiSections.progressDaily = createUiSection(uiSections.ProgressTab.Left, "Daily Quests", "lucide-calendar-check")
 	end
 	uiSections.progressStats = createUiSection(uiSections.ProgressTab.Right, "Stat Distribution", "lucide-signal-high")
