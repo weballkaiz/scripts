@@ -2,7 +2,7 @@
 -- GENESIS_DAILY_QUEST_ALL_11_V1
 -- GENESIS_DAILY_QUEST_CODEX_DIALOGUE_GUARD_V1
 -- GENESIS_SEA_KING_ACQUISITION_V1
--- GENESIS_SECOND_SEA_DAILY_V15
+-- GENESIS_SECOND_SEA_DAILY_V16
 -- Bundled application with reporting only to the user-configured Discord webhook.
 -- Shared event/server retrieval remains enabled; Event Hub uploads are disabled.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -42,7 +42,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_SECOND_SEA_DAILY_V15",
+		buildMarker = "GENESIS_SECOND_SEA_DAILY_V16",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -14909,7 +14909,7 @@ local function run(B, T, P, DfT, ...)
 
 	if game.PlaceId == 15759515082 then
 		Window:CreateToggle(uiSections.progressDaily, {
-			Text = "Auto Daily Quest",
+			Text = "Auto Daily Quest (Third Sea)",
 			Default = GetSetting("autoDailyQuest") or false,
 			Callback = function(state)
 				saveAndApply("autoDailyQuest", state)
@@ -20213,7 +20213,8 @@ local function run(B, T, P, DfT, ...)
 			{ npc = "Lore Sea Madness", quest = "Catch me,If you can", kind = "prompts", object = "Catch me,If you can", level = 3000 },
 			{ npc = "Daily Quest DeadAbove", quest = "Dead Above", kind = "prompts", object = "Floating Feather", level = 3000 },
 			{ npc = "Lore Sea Sick!", quest = "I'm not,YOU ARE!", kind = "touch", object = "I'm not,YOU ARE!", level = 3000 },
-			{ npc = "Lore Sea Diving", quest = "Under The Sea~", kind = "touch", object = "Under The Sea~", level = 3000 },
+			-- Temporarily disable the diving daily (reported as "Just Dive?") while its underwater movement is unreliable.
+			{ npc = "Lore Sea Diving", quest = "Under The Sea~", kind = "touch", object = "Under The Sea~", level = 3000, disabled = true },
 			{ npc = "Daily Quest Disobey", quest = "Order Disobey", kind = "prompts", object = "PosterQuest", level = 3000 },
 			{ npc = "Braveman", quest = "Box Box!", kind = "boxes", level = 3000 },
 			{ npc = "Daily QuestLvl3800", quest = "The Lost Book", kind = "book", level = 3800 },
@@ -20299,7 +20300,7 @@ local function run(B, T, P, DfT, ...)
 		local activeName = activeQuest and activeQuest.Value
 		local list = dailyQuests[game.PlaceId] or {}
 		for _, q in ipairs(list) do
-			if q.quest == activeName and not completed[q.quest] then
+			if not q.disabled and q.quest == activeName and not completed[q.quest] then
 				return q
 			end
 		end
@@ -20311,7 +20312,7 @@ local function run(B, T, P, DfT, ...)
 		local npcFolder = Workspace:FindFirstChild("AllNPC")
 		local unavailable = {}
 		for _, q in ipairs(list) do
-			if not completed[q.quest] and (not q.level or level >= q.level)
+			if not q.disabled and not completed[q.quest] and (not q.level or level >= q.level)
 				and (game.PlaceId ~= 6381829480 or (npcFolder and npcFolder:FindFirstChild(q.npc))) then
 				-- Availability gating is for Second Sea only. Third Sea's existing
 				-- travel/spawn workflow must not be skipped by this new guard.
