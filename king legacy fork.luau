@@ -2,7 +2,8 @@
 -- GENESIS_DAILY_QUEST_ALL_11_V1
 -- GENESIS_DAILY_QUEST_CODEX_DIALOGUE_GUARD_V1
 -- GENESIS_SEA_KING_ACQUISITION_V1
--- GENESIS_SECOND_SEA_DAILY_V16
+-- GENESIS_DAILY_BEFORE_FISHING_V17
+-- GENESIS_DAILY_NPC_SEA_TRAVEL_V22
 -- Bundled application with reporting only to the user-configured Discord webhook.
 -- Shared event/server retrieval remains enabled; Event Hub uploads are disabled.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -42,7 +43,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_SECOND_SEA_DAILY_V16",
+		buildMarker = "GENESIS_DAILY_NPC_SEA_TRAVEL_V22",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -258,6 +259,10 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._GenesisDispatchM1IfReady = nil
 		sharedGlobal._GenesisSkillLastSent = nil
 		sharedGlobal._GenesisSkillReady = nil
+		sharedGlobal._GenesisDailyQuestTravelPending = nil
+		sharedGlobal._GenesisDailyReturnRequested = nil
+		sharedGlobal._GenesisDailyTravelWarningAt = nil
+		sharedGlobal.GenesisDaily = nil
 		sharedGlobal._GenesisAbyssalAcquisition = nil
 		sharedGlobal._GenesisFindAbyssalLocator = nil
 		sharedGlobal._GenesisApproachAbyssalLocator = nil
@@ -265,6 +270,11 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._GenesisSeaKingAcquisition = nil
 		sharedGlobal._GenesisFindSeaKingRewardChest = nil
 		sharedGlobal._GenesisApproachSeaKingIsland = nil
+		sharedGlobal._GenesisGetDailyQuestPriorityCandidate = nil
+		sharedGlobal._GenesisRunDailyQuestCombat = nil
+		sharedGlobal._GenesisDailyQuestPriorityCheckedAt = nil
+		sharedGlobal._GenesisDailyQuestPriorityCandidate = nil
+		sharedGlobal._GenesisDailyQuestReleaseUntil = nil
 		sharedGlobal._autoExecuteQueued = false
 		sharedGlobal._pendingHopJobId = nil
 		executorEnvironment.SpectrumX = runtime.previousSpectrumX
@@ -6648,6 +6658,9 @@ local function run(B, T, P, DfT, ...)
 	-- ========== end Event Hub ==========
 	local TeleportService = game:GetService("TeleportService")
 	local LocalPlayer = Players.LocalPlayer
+	-- Queued teleport code can run before the destination finishes replicating
+	-- player data. Daily access checks and startup UI both depend on it.
+	LocalPlayer:WaitForChild("PlayerStats")
 
 	_G.GENESIS_SCRIPT_URL = nil
 	_G.GENESIS_SCRIPT_FILE = "GenesisX/king_legacy.luau"
@@ -6665,7 +6678,8 @@ local function run(B, T, P, DfT, ...)
 			end
 		end)
 		local marker = "-- GENESIS_WEBHOOK_ONLY_BUNDLE_V1"
-		if ok and type(src) == "string" and #src > 200 and src:sub(1, #marker) == marker then
+		if ok and type(src) == "string" and #src > 200 and src:sub(1, #marker) == marker
+			and src:find("-- GENESIS_DAILY_NPC_SEA_TRAVEL_V22", 1, true) then
 			return src
 		end
 		return nil
@@ -6807,6 +6821,7 @@ local function run(B, T, P, DfT, ...)
 			autoThirdSea = true,
 			autoHuntSerpent = true,
 			autoKillAbyssalTyrant = true,
+			autoDailyQuestsMaster = true,
 			autoDailyQuest = true,
 			autoSecondSeaDailyQuest = true,
 			autoHuntPtero = true,
@@ -6948,6 +6963,7 @@ local function run(B, T, P, DfT, ...)
 
 		selectedAnimation = { "Standard", "selectedAnimation" },
 
+		autoDailyQuestsMaster = { false, "autoDailyQuestsMaster" },
 		autoDailyQuest = { false, "autoDailyQuest" },
 		autoSecondSeaDailyQuest = { false, "autoSecondSeaDailyQuest" },
 
@@ -7063,6 +7079,12 @@ local function run(B, T, P, DfT, ...)
 							_G.Setting[key][1] = value
 						end
 					end
+					-- Existing sea-specific daily toggles keep working after the new
+					-- master switch is introduced. A newly saved master takes precedence.
+					if data.autoDailyQuestsMaster == nil then
+						_G.Setting.autoDailyQuestsMaster[1] = data.autoDailyQuest == true
+							or data.autoSecondSeaDailyQuest == true
+					end
 					print("YOKOSO, WATASHI NO SOUL SOCIETY.")
 				end
 			end
@@ -7172,13 +7194,16 @@ local function run(B, T, P, DfT, ...)
 	_G._GenesisPriorityUpdatedAt = os.clock()
 	_G._GenesisPriorityRank = {
 		dungeon_committed = 0,
-		major_sea_event = 1,
-		world_raid_boss = 2,
-		serpent = 3,
-		galleon = 4,
-		dungeon_entry = 5,
-		fishing = 6,
+		daily_quest_return = 1,
+		major_sea_event = 2,
+		world_raid_boss = 3,
+		serpent = 4,
+		galleon = 5,
+		dungeon_entry = 6,
+		daily_quest = 7,
+		fishing = 8,
 	}
+	_G._GenesisDailyReturnRequested = false
 	_G._GenesisDungeonCommit = {
 		latched = false,
 		stage = "outside",
@@ -8061,14 +8086,17 @@ local function run(B, T, P, DfT, ...)
 		end)
 	end
 
-	local function tp(cframe)
-		pcall(function()
+	local function tp(cframe, dailyReturnHop)
+		if _G._GenesisDailyReturnRequested and not dailyReturnHop then
+			return false
+		end
+		return pcall(function()
 			LocalPlayer.Character.HumanoidRootPart.CFrame = cframe
 		end)
 	end
 
 	local function getDownwardCFrame(targetCFrame)
-		if fishingOwnsWeaponSlot() then
+		if fishingOwnsWeaponSlot() or _G._GenesisDailyReturnRequested then
 			return targetCFrame
 		end
 		local height = GetSetting("distance") or 8
@@ -8111,7 +8139,7 @@ local function run(B, T, P, DfT, ...)
 	_G.farmFixOwnershipReleased = false
 
 	local function applyFarmFix(targetCFrame, targetPart)
-		if fishingOwnsWeaponSlot() then
+		if fishingOwnsWeaponSlot() or _G._GenesisDailyReturnRequested then
 			return false
 		end
 		_G.farmFixTargetCF = targetCFrame
@@ -8171,7 +8199,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		_G.farmFixThread = task.spawn(function()
-			while _G.farmFixTargetCF and not fishingOwnsWeaponSlot() do
+			while _G.farmFixTargetCF and not fishingOwnsWeaponSlot() and not _G._GenesisDailyReturnRequested do
 				if root and root.Parent then
 					-- Combat actions are serialized to prevent overlapping M1/skill work,
 					-- but movement must not wait for that yielding dispatcher. Follow the
@@ -8205,7 +8233,7 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	local function updateFarmFix(targetCFrame, targetPart)
-		if fishingOwnsWeaponSlot() then
+		if fishingOwnsWeaponSlot() or _G._GenesisDailyReturnRequested then
 			return false
 		end
 		_G.farmFixTargetCF = targetCFrame
@@ -8282,6 +8310,7 @@ local function run(B, T, P, DfT, ...)
 			"autoSecondSea",
 			"autoThirdSea",
 			"autoHuntSerpent",
+			"autoDailyQuestsMaster",
 			"autoDailyQuest",
 			"autoSecondSeaDailyQuest",
 			"autoHuntPtero",
@@ -8313,6 +8342,7 @@ local function run(B, T, P, DfT, ...)
 	local _chestLootTargetCF = nil
 
 	local function applyChestLootFix(targetCFrame)
+		if _G._GenesisDailyReturnRequested then return end
 		_chestLootTargetCF = targetCFrame
 		if _chestLootThread then
 			return
@@ -8353,7 +8383,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		_chestLootThread = task.spawn(function()
-			while _chestLootTargetCF do
+			while _chestLootTargetCF and not _G._GenesisDailyReturnRequested do
 				if root and root.Parent then
 					if _chestLootBP then
 						_chestLootBP.Position = _chestLootTargetCF.Position
@@ -8905,8 +8935,8 @@ local function run(B, T, P, DfT, ...)
 			or GetSetting("autoRaidBoss_KingSamurai")
 			or GetSetting("autoRaidBoss_BushidoApe")
 			or GetSetting("autoRaidBoss_LordOfSaber")
-			or GetSetting("autoDailyQuest")
-			or GetSetting("autoSecondSeaDailyQuest")
+			or (GetSetting("autoDailyQuestsMaster") and
+				(GetSetting("autoDailyQuest") or GetSetting("autoSecondSeaDailyQuest")))
 			or GetSetting("autoSKHD")
 			or GetSetting("autoGhostShip")
 			or GetSetting("autoKillKraken")
@@ -8993,7 +9023,8 @@ local function run(B, T, P, DfT, ...)
 	_G._removeConquestPosition = removeConquestPosition
 
 	local function isConquestBlocked()
-		return _G.seaEventActive
+		return _G._GenesisDailyReturnRequested
+			or _G.seaEventActive
 			or _G.raidBossTarget
 			or _G.isLootingChests
 			or _G.storingFruit
@@ -9810,7 +9841,8 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	_G.hasThirdSea = function()
-		local miscValue = LocalPlayer.PlayerStats:FindFirstChild("Misc")
+		local stats = LocalPlayer:FindFirstChild("PlayerStats")
+		local miscValue = stats and stats:FindFirstChild("Misc")
 		if not miscValue then
 			return false
 		end
@@ -9868,6 +9900,122 @@ local function run(B, T, P, DfT, ...)
 		pcall(function()
 			ReplicatedStorage.Chest.Remotes.Functions.EtcFunction:InvokeServer("TeleportSea", { SeaName = seaName })
 		end)
+	end
+
+	-- Daily-quest travel state is account-specific. Do not mix timestamps or
+	-- unlock proof when two accounts use the same executor settings folder.
+	local dailyCoordinator
+	do
+	local dailySea = {
+		[1] = { label = "First Sea", teleport = "FirstSea", place = _G.SEA1_ID },
+		[2] = { label = "Second Sea", teleport = "SecondSea", place = _G.SEA2_ID },
+		[3] = { label = "Third Sea", teleport = "ThirdSea", place = _G.SEA3_ID },
+	}
+	local dailyJournalPath = "GenesisX/Saves/daily_quests_" .. tostring(LocalPlayer.UserId) .. ".json"
+	local dailyJournal = { version = 1, highestUnlocked = 1, quests = {} }
+	if readfile and isfile then
+		pcall(function()
+			if isfile(dailyJournalPath) then
+				local loaded = HttpService:JSONDecode(readfile(dailyJournalPath))
+				if type(loaded) == "table" and loaded.version == 1 then
+					dailyJournal = loaded
+				end
+			end
+		end)
+	end
+	dailyJournal.quests = type(dailyJournal.quests) == "table" and dailyJournal.quests or {}
+	dailyCoordinator = { journal = dailyJournal, sea = dailySea }
+	_G.GenesisDaily = dailyCoordinator
+
+	function dailyCoordinator.save()
+		if not (writefile and isfolder and makefolder) then
+			return false
+		end
+		local ok = pcall(function()
+			if not isfolder("GenesisX") then makefolder("GenesisX") end
+			if not isfolder("GenesisX/Saves") then makefolder("GenesisX/Saves") end
+			writefile(dailyJournalPath, HttpService:JSONEncode(dailyJournal))
+		end)
+		return ok
+	end
+
+	function dailyCoordinator.currentRank()
+		for rank, info in pairs(dailySea) do
+			if game.PlaceId == info.place then return rank end
+		end
+		return nil
+	end
+
+	function dailyCoordinator.unlockedRank()
+		local confirmed = dailyCoordinator.currentRank() or 1
+		if _G.hasThirdSea() then confirmed = 3 end
+		local remembered = tonumber(dailyJournal.highestUnlocked) or 1
+		return math.clamp(math.max(confirmed, remembered), 1, 3), confirmed
+	end
+
+	function dailyCoordinator.refreshAccess()
+		local unlocked, confirmed = dailyCoordinator.unlockedRank()
+		local seen = tonumber(dailyJournal.highestUnlocked) or 1
+		local changed = false
+		if confirmed > seen then
+			dailyJournal.highestUnlocked = confirmed
+			dailyJournal.mainSea = confirmed -- promote only on a newly confirmed unlock
+			changed = true
+		end
+		if not dailySea[tonumber(dailyJournal.mainSea)]
+			or tonumber(dailyJournal.mainSea) > unlocked then
+			dailyJournal.mainSea = unlocked
+			changed = true
+		end
+		if changed then dailyCoordinator.save() end
+		return unlocked
+	end
+
+	function dailyCoordinator.mainRank()
+		dailyCoordinator.refreshAccess()
+		return tonumber(dailyJournal.mainSea) or 1
+	end
+
+	function dailyCoordinator.setMainRank(rank)
+		rank = tonumber(rank)
+		if not rank or not dailySea[rank] or rank > dailyCoordinator.refreshAccess() then
+			return false
+		end
+		if dailyJournal.mainSea ~= rank then
+			dailyJournal.mainSea = rank
+			dailyJournal.route = nil
+			_G._GenesisDailyQuestTravelPending = false
+			_G._GenesisDailyReturnRequested = false
+			dailyCoordinator.save()
+		end
+		return true
+	end
+
+	function dailyCoordinator.record(rank, name)
+		local key = tostring(rank)
+		dailyJournal.quests[key] = type(dailyJournal.quests[key]) == "table" and dailyJournal.quests[key] or {}
+		local records = dailyJournal.quests[key]
+		records[name] = type(records[name]) == "table" and records[name] or {}
+		return records[name]
+	end
+
+	function dailyCoordinator.observeCompletion(rank, name, stamp)
+		if type(stamp) ~= "number" or stamp <= 0 then return end
+		local record = dailyCoordinator.record(rank, name)
+		if record.completedAt ~= stamp then
+			record.completedAt = stamp
+			record.retryAt = nil
+			dailyCoordinator.save()
+		end
+	end
+
+	function dailyCoordinator.deferQuest(rank, name, retryAt)
+		local record = dailyCoordinator.record(rank, name)
+		record.retryAt = math.max(os.time() + 300, math.floor(retryAt))
+		dailyCoordinator.save()
+	end
+
+	dailyCoordinator.refreshAccess()
 	end
 
 	local function findSeaKingIsland()
@@ -10225,7 +10373,7 @@ local function run(B, T, P, DfT, ...)
 	_G._stopSeaEventBypass = stopSeaEventBypass
 
 	local function startSeaEventBypass(mob)
-		if not mob or not mob.Parent then
+		if _G._GenesisDailyReturnRequested or not mob or not mob.Parent then
 			return false
 		end
 		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
@@ -10255,7 +10403,8 @@ local function run(B, T, P, DfT, ...)
 		_seaEventLockPosition = initialTargetCF
 
 		_seaEventThread = task.spawn(function()
-			while _seaEventTarget == mob and isValidMob(mob) and isPlayerAlive() do
+			while _seaEventTarget == mob and isValidMob(mob) and isPlayerAlive()
+				and not _G._GenesisDailyReturnRequested do
 				local character = LocalPlayer.Character
 				local root = character and character:FindFirstChild("HumanoidRootPart")
 				if not root then
@@ -11197,6 +11346,9 @@ local function run(B, T, P, DfT, ...)
 				-- only an irreversible dungeon transition may preempt automation.
 				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
 					return "dungeon"
+				end
+				if _G._GenesisDailyReturnRequested then
+					return "daily_return"
 				end
 				-- Turning the feature off remains an immediate manual kill switch.
 				if not GetSetting("autoGhostShip") then
@@ -13756,7 +13908,7 @@ local function run(B, T, P, DfT, ...)
 	if game.PlaceId == 6381829480 then
 		uiSections.progressHaki = createUiSection(uiSections.ProgressTab.Left, "Haki V2", "lucide-shield")
 	end
-	if game.PlaceId == 6381829480 or game.PlaceId == 15759515082 then
+	if game.PlaceId == 4520749081 or game.PlaceId == 6381829480 or game.PlaceId == 15759515082 then
 		uiSections.progressDaily = createUiSection(uiSections.ProgressTab.Left, "Daily Quests", "lucide-calendar-check")
 	end
 	uiSections.progressStats = createUiSection(uiSections.ProgressTab.Right, "Stat Distribution", "lucide-signal-high")
@@ -14907,30 +15059,89 @@ local function run(B, T, P, DfT, ...)
 		})
 	end
 
-	if game.PlaceId == 15759515082 then
+	if uiSections.progressDaily then
+		local function resetDailyRoute()
+			dailyCoordinator.journal.route = nil
+			_G._GenesisDailyQuestTravelPending = false
+			_G._GenesisDailyReturnRequested = false
+			dailyCoordinator.save()
+			_G.dailyQuestState = "idle"
+			_G.dailyQuestKills = 0
+		end
 		Window:CreateToggle(uiSections.progressDaily, {
-			Text = "Auto Daily Quest (Third Sea)",
+			Text = "Auto Daily Quests",
+			Default = GetSetting("autoDailyQuestsMaster") or false,
+			Callback = function(state)
+				saveAndApply("autoDailyQuestsMaster", state)
+				resetDailyRoute()
+			end,
+		})
+
+		local subToggles = Instance.new("Frame")
+		subToggles.Name = "DailyQuestSeaToggles"
+		subToggles.BackgroundTransparency = 1
+		subToggles.Size = UDim2.new(1, 0, 0, 0)
+		subToggles.AutomaticSize = Enum.AutomaticSize.Y
+		subToggles.Parent = uiSections.progressDaily
+		local subPadding = Instance.new("UIPadding")
+		subPadding.PaddingLeft = UDim.new(0, Window:S(14))
+		subPadding.Parent = subToggles
+		local subLayout = Instance.new("UIListLayout")
+		subLayout.Padding = UDim.new(0, Window:S(6))
+		subLayout.Parent = subToggles
+		Window:CreateToggle(subToggles, {
+			Text = "Third Sea Daily Quests",
 			Default = GetSetting("autoDailyQuest") or false,
 			Callback = function(state)
 				saveAndApply("autoDailyQuest", state)
-				if state then
-					_G.dailyQuestState = "idle"
-					_G.dailyQuestKills = 0
-				end
+				resetDailyRoute()
 			end,
 		})
-	elseif game.PlaceId == 6381829480 then
-		Window:CreateToggle(uiSections.progressDaily, {
-			Text = "Auto Daily Quest (Second Sea)",
+		Window:CreateToggle(subToggles, {
+			Text = "Second Sea Daily Quests",
 			Default = GetSetting("autoSecondSeaDailyQuest") or false,
 			Callback = function(state)
 				saveAndApply("autoSecondSeaDailyQuest", state)
-				if state then
-					_G.dailyQuestState = "idle"
-					_G.dailyQuestKills = 0
+				resetDailyRoute()
+			end,
+		})
+
+		local function mainSeaOptions()
+			local options = {}
+			for rank = 1, dailyCoordinator.refreshAccess() do
+				table.insert(options, dailyCoordinator.sea[rank].label)
+			end
+			return options
+		end
+		local mainSeaDropdown = Window:CreateDropdown(uiSections.progressDaily, {
+			Label = "Main Sea",
+			Options = mainSeaOptions(),
+			Default = dailyCoordinator.sea[dailyCoordinator.mainRank()].label,
+			Callback = function(label)
+				for rank, info in pairs(dailyCoordinator.sea) do
+					if label == info.label then
+						dailyCoordinator.setMainRank(rank)
+						break
+					end
 				end
 			end,
 		})
+		spawn(function()
+			local lastUnlocked = 0
+			local lastMain = 0
+			while task.wait(5) do
+				local unlocked = dailyCoordinator.refreshAccess()
+				local main = dailyCoordinator.mainRank()
+				if unlocked ~= lastUnlocked then
+					mainSeaDropdown.SetOptions(mainSeaOptions())
+					lastUnlocked = unlocked
+				end
+				if main ~= lastMain then
+					mainSeaDropdown.SetValue(dailyCoordinator.sea[main].label)
+					lastMain = main
+				end
+			end
+		end)
 	end
 
 	Window:CreateToggle(uiSections.itemFruits, {
@@ -15907,8 +16118,8 @@ local function run(B, T, P, DfT, ...)
 					or GetSetting("autoSecondSea")
 					or GetSetting("autoThirdSea")
 					or GetSetting("autoHuntSerpent")
-					or GetSetting("autoDailyQuest")
-					or GetSetting("autoSecondSeaDailyQuest")
+					or (GetSetting("autoDailyQuestsMaster") and
+						(GetSetting("autoDailyQuest") or GetSetting("autoSecondSeaDailyQuest")))
 					or GetSetting("autoHuntPtero")
 					or GetSetting("autoRaidBoss_ExpertSwordman")
 					or GetSetting("autoRaidBoss_MsMother")
@@ -16064,6 +16275,7 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
+	local getDailyQuestPending
 	local _fishBP = nil
 	local _fishBG = nil
 
@@ -16464,6 +16676,7 @@ local function run(B, T, P, DfT, ...)
 						or owner == "world_raid_boss"
 						or owner == "serpent"
 						or owner == "galleon"
+						or owner == "daily_quest"
 						or owner == "other_combat"
 						or owner == "haki_progression"
 				end)
@@ -16843,6 +17056,47 @@ local function run(B, T, P, DfT, ...)
 		return false
 	end
 
+	_G._GenesisDailyQuestPriorityCheckedAt = 0
+	_G._GenesisDailyQuestPriorityCandidate = nil
+	_G._GenesisDailyQuestReleaseUntil = 0
+	_G._GenesisGetDailyQuestPriorityCandidate = function()
+		if GetSetting("autoDailyQuestsMaster") and _G._GenesisDailyQuestTravelPending then
+			return true -- reserve movement and finish the fishing handoff before a sea transfer
+		end
+		local enabled = GetSetting("autoDailyQuestsMaster") and
+			((game.PlaceId == 15759515082 and GetSetting("autoDailyQuest"))
+				or (game.PlaceId == 6381829480 and GetSetting("autoSecondSeaDailyQuest")))
+		if not enabled then
+			_G._GenesisDailyQuestPriorityCheckedAt = 0
+			_G._GenesisDailyQuestPriorityCandidate = nil
+			_G._GenesisDailyQuestReleaseUntil = 0
+			return nil
+		end
+		-- The selector is initialized later in this bundle. Reserve the slot while
+		-- it loads so fishing cannot briefly claim it on an auto-execute startup.
+		if not getDailyQuestPending then
+			return true
+		end
+		local now = tick()
+		if _G._GenesisDailyQuestPriorityCheckedAt > 0
+			and now - _G._GenesisDailyQuestPriorityCheckedAt < 0.2 then
+			return _G._GenesisDailyQuestPriorityCandidate
+		end
+		_G._GenesisDailyQuestPriorityCheckedAt = now
+		local ok, pending = pcall(getDailyQuestPending)
+		if ok and pending then
+			_G._GenesisDailyQuestPriorityCandidate = pending
+			_G._GenesisDailyQuestReleaseUntil = now + 1.5
+		elseif now < _G._GenesisDailyQuestReleaseUntil then
+			-- Do not send the player fishing during a brief quest-completion
+			-- replication gap. This sentinel owns no movement or combat.
+			_G._GenesisDailyQuestPriorityCandidate = true
+		else
+			_G._GenesisDailyQuestPriorityCandidate = nil
+		end
+		return _G._GenesisDailyQuestPriorityCandidate
+	end
+
 	isFishingBlocked = function()
 		if
 			_G.storingFruit
@@ -16853,6 +17107,7 @@ local function run(B, T, P, DfT, ...)
 			or _G.isProgressingBusoV2
 			or _G.isProgressingObservationV2
 			or _G.thirdSeaProgressionActive
+			or _G._GenesisGetDailyQuestPriorityCandidate()
 		then
 			return true
 		end
@@ -16934,6 +17189,12 @@ local function run(B, T, P, DfT, ...)
 					removeFishPosition()
 					return
 				end
+				-- Capturing the old weapon can yield. Recheck priority before taking
+				-- the root position, in case a daily became eligible meanwhile.
+				if not GetSetting("autoFish") or isFishingBlocked() then
+					stopFishing()
+					return
+				end
 
 				local dist = (cf.Position - root.Position).Magnitude
 				if dist > 10 then
@@ -16950,6 +17211,10 @@ local function run(B, T, P, DfT, ...)
 				local rod = equipFishingRod()
 				local character = LocalPlayer.Character
 				if not rod or not character or rod.Parent ~= character then
+					stopFishing()
+					return
+				end
+				if not GetSetting("autoFish") or isFishingBlocked() then
 					stopFishing()
 					return
 				end
@@ -17106,7 +17371,7 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
-	local dailyQuestCanAct, getDailyQuestPending
+	local dailyQuestCanAct
 	spawn(function()
 		local objectiveName = nil
 		local promptCursor = 1
@@ -17923,6 +18188,42 @@ local function run(B, T, P, DfT, ...)
 		return false, nil
 	end
 
+	_G._GenesisRunDailyQuestCombat = function(current)
+		local target = _G.dailyQuestTarget
+		local activeQuest = LocalPlayer:FindFirstChild("CurrentQuest")
+		if _G.dailyQuestState ~= "kill" or _G.dailyQuestCurrentName ~= current.quest
+			or current.kind ~= "mob" or not current.mob
+			or not activeQuest or activeQuest.Value ~= current.quest
+			or not target or not target.Parent
+			or not string.find(target.Name, current.mob, 1, true)
+			or not target:FindFirstChild("Humanoid") or target.Humanoid.Health <= 0
+			or not target:FindFirstChild("HumanoidRootPart") then
+			_G.allowCombat = false
+			if _G.farmFixThread or _G.farmFixBodyPos then
+				removeFarmFix()
+			end
+			return
+		end
+
+		usetool()
+		buso()
+		ken()
+		hao()
+		local hrp = target.HumanoidRootPart
+		getDownwardCFrame(hrp.CFrame)
+		local height = GetSetting("distance") or 8
+		local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
+		updateFarmFix(targetCF, hrp)
+		if not _G.farmFixThread then
+			applyFarmFix(targetCF, hrp)
+		end
+		_G.pos_skill = hrp.CFrame
+		_G.allowCombat = true
+		click()
+		autoskill()
+		handleOpeMethod()
+	end
+
 	_G._GenesisAutomationStepBusy = false
 	_G._GenesisRunAutomationStep = function()
 		-- A visible difficulty picker is already committed: leaving the circle can no
@@ -17946,6 +18247,41 @@ local function run(B, T, P, DfT, ...)
 			end
 			if type(_G._stopAbyssalAcquisition) == "function" then
 				pcall(_G._stopAbyssalAcquisition)
+			end
+			return
+		end
+
+		-- Once there are no available dailies in this sea, getting back to the
+		-- selected main sea preempts every outside-dungeon automation. A visible
+		-- picker/transition is already committed and was handled above.
+		if GetSetting("autoDailyQuestsMaster") and _G._GenesisDailyReturnRequested then
+			local enteringReturn = _G._GenesisPriorityOwner ~= "daily_quest_return"
+			_G._GenesisSetPriorityOwner("daily_quest_return", "main_sea")
+			_G.allowCombat = false
+			if fishingOwnsWeaponSlot() then
+				_G._GenesisPrepareCombatFromFishing("daily_quest_return")
+			end
+			if _G.farmFixThread or _G.farmFixBodyPos then
+				removeFarmFix()
+			end
+			if removeChestLootFix and (enteringReturn or _G.isLootingChests) then
+				removeChestLootFix()
+			end
+			if _G.conquestActive and removeConquestPosition then
+				removeConquestPosition()
+			end
+			if _G.HakiV2 and (_G.HakiV2.lockCF or _G.HakiV2.lockConn)
+				and type(_G.HakiV2.stopLock) == "function" then
+				_G.HakiV2.stopLock()
+			end
+			if enteringReturn and type(_G._stopSeaEventBypass) == "function" then
+				_G._stopSeaEventBypass()
+			end
+			if enteringReturn and type(_G._stopAbyssalAcquisition) == "function" then
+				_G._stopAbyssalAcquisition()
+			end
+			if enteringReturn and type(_G._stopDailyQuestHover) == "function" then
+				_G._stopDailyQuestHover()
 			end
 			return
 		end
@@ -18056,6 +18392,26 @@ local function run(B, T, P, DfT, ...)
 				pcall(removeFarmFix)
 			end
 			return
+		end
+
+		local dailyQuest = _G._GenesisGetDailyQuestPriorityCandidate()
+		if dailyQuest and fishingOwnsWeaponSlot() then
+			_G.allowCombat = false
+			_G._GenesisSetPriorityOwner("daily_quest_handoff", "restoring_weapon")
+			if _G.farmFixThread or _G.farmFixBodyPos then
+				removeFarmFix()
+			end
+			_G._GenesisPrepareCombatFromFishing("daily_quest")
+			return
+		end
+		if _G._GenesisPriorityOwner == "daily_quest" or _G._GenesisPriorityOwner == "daily_quest_handoff" then
+			_G.allowCombat = false
+			if _G.farmFixThread or _G.farmFixBodyPos then
+				removeFarmFix()
+			end
+			if type(_G._stopDailyQuestHover) == "function" then
+				_G._stopDailyQuestHover()
+			end
 		end
 
 		local fishingBlocked = isFishingBlocked()
@@ -18578,38 +18934,27 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		if (GetSetting("autoDailyQuest") or GetSetting("autoSecondSeaDailyQuest")) and _G.dailyQuestState == "kill" then
-			local target = _G.dailyQuestTarget
-			if
-				target
-				and target.Parent
-				and target:FindFirstChild("Humanoid")
-				and target.Humanoid.Health > 0
-				and target:FindFirstChild("HumanoidRootPart")
-			then
-				usetool()
-				buso()
-				ken()
-				hao()
-				local hrp = target.HumanoidRootPart
-				if hrp then
-					getDownwardCFrame(hrp.CFrame)
-					local height = GetSetting("distance") or 8
-					local targetCF = CFrame.new(hrp.Position + Vector3.new(0, height, 0), hrp.Position)
-					updateFarmFix(targetCF, hrp)
-					if not _G.farmFixThread then
-						applyFarmFix(targetCF, hrp)
-					end
+		-- Normal boss/progression branches above retain their existing priority.
+		-- Re-read the setting in case one of those branches yielded this frame.
+		dailyQuest = _G._GenesisGetDailyQuestPriorityCandidate()
+		if dailyQuest then
+			_G.allowCombat = false
+			if dailyQuest == true then
+				_G._GenesisSetPriorityOwner("daily_quest_handoff", "settling_quest_state")
+				if _G.farmFixThread or _G.farmFixBodyPos then
+					removeFarmFix()
 				end
-				_G.pos_skill = target.HumanoidRootPart.CFrame
-				_G.allowCombat = true
-				click()
-				autoskill()
-				handleOpeMethod()
+				if type(_G._stopDailyQuestHover) == "function" then
+					_G._stopDailyQuestHover()
+				end
 				return
-			else
+			end
+			if _G._GenesisPriorityOwner ~= "daily_quest" and (_G.farmFixThread or _G.farmFixBodyPos) then
 				removeFarmFix()
 			end
+			_G._GenesisSetPriorityOwner("daily_quest", dailyQuest.quest)
+			_G._GenesisRunDailyQuestCombat(dailyQuest)
+			return
 		end
 
 		if GetSetting("auto_farm") and not _G.raidBossTarget and not _G.seaEventActive and not _G.storingFruit then
@@ -19052,6 +19397,7 @@ local function run(B, T, P, DfT, ...)
 				if not GetSetting("autoSecondSea") then
 					return
 				end
+				if _G._GenesisDailyReturnRequested then return end
 
 				if game.PlaceId ~= 4520749081 then
 					saveAndApply("autoSecondSea", false)
@@ -19359,7 +19705,7 @@ local function run(B, T, P, DfT, ...)
 	spawn(function()
 		while task.wait(0.25) do
 			pcall(function()
-				if not GetSetting("autoStoreFruits") then
+				if not GetSetting("autoStoreFruits") or _G._GenesisDailyReturnRequested then
 					return
 				end
 
@@ -19378,6 +19724,7 @@ local function run(B, T, P, DfT, ...)
 				end
 
 				for _, tool in pairs(LocalPlayer.Backpack:GetChildren()) do
+					if _G._GenesisDailyReturnRequested then break end
 					if tool:IsA("Tool") and tool.Name:sub(-5) == "Fruit" then
 						local currentCount = storedFruits[tool.Name] or 0
 						if currentCount < maxPerFruit then
@@ -19392,6 +19739,7 @@ local function run(B, T, P, DfT, ...)
 								_G.storingFruit = true
 								pcall(function()
 								task.wait(0.01)
+								if _G._GenesisDailyReturnRequested then return end
 
 								humanoid:EquipTool(tool)
 								task.wait(0.01)
@@ -19399,6 +19747,7 @@ local function run(B, T, P, DfT, ...)
 								local equippedFruit = nil
 								local startEquip = tick()
 								while tick() - startEquip < 2 do
+									if _G._GenesisDailyReturnRequested then break end
 									local equipped = LocalPlayer.Character
 										and LocalPlayer.Character:FindFirstChild(fruitName)
 									if equipped then
@@ -19411,12 +19760,14 @@ local function run(B, T, P, DfT, ...)
 								-- Equipping only puts the fruit in the character's hand. Its
 								-- normal M1 activation is what opens EatFruitBecky.Dialogue;
 								-- the dedicated worker below then presses Collect.
-								if equippedFruit and equippedFruit.Parent == LocalPlayer.Character then
+								if equippedFruit and equippedFruit.Parent == LocalPlayer.Character
+									and not _G._GenesisDailyReturnRequested then
 									equippedFruit:Activate()
 								end
 
 								local startTime = tick()
 								while tick() - startTime < 5 do
+									if _G._GenesisDailyReturnRequested then break end
 									local currentStore = LocalPlayer.PlayerStats:FindFirstChild("FruitStore")
 									if currentStore then
 										local success2, data2 = pcall(function()
@@ -19610,6 +19961,10 @@ local function run(B, T, P, DfT, ...)
 		while task.wait(0.25) do
 			pcall(function()
 				-- Already in Sea 3 → disable.
+				if _G._GenesisDailyReturnRequested then
+					_G.thirdSeaProgressionActive = false
+					return
+				end
 				if game.PlaceId == _G.SEA3_ID or game.PlaceId == 15759515082 then
 					_G.thirdSeaProgressionActive = false
 					if GetSetting("autoThirdSea") then
@@ -20179,8 +20534,76 @@ local function run(B, T, P, DfT, ...)
 	_G.dailyQuestCurrentName = ""
 	_G.dailyQuestCheckQueued = false
 	_G.dailyQuestLastCheckAttempt = 0
+	_G.dailyQuestNoResponseCount = 0
 	_G.dailyQuestTarget = nil
 	_G.dailyQuestIssue = nil
+	dailyCoordinator.recheckSeconds = 20 * 3600 + 30 * 60
+	function dailyCoordinator.readTimes()
+		local dailyValue = LocalPlayer.PlayerStats:FindFirstChild("DailyQuest")
+		if not dailyValue then return {} end
+		local ok, data = pcall(function()
+			return HttpService:JSONDecode(dailyValue.Value)
+		end)
+		return ok and type(data) == "table" and data or {}
+	end
+
+	function dailyCoordinator.isDue(rank, quest, times, now)
+		local stamp = tonumber(times[quest.quest])
+		if stamp then dailyCoordinator.observeCompletion(rank, quest.quest, stamp) end
+		local record = dailyCoordinator.record(rank, quest.quest)
+		local retryAt = tonumber(record.retryAt)
+		if retryAt and now < retryAt then return false end
+		if stamp then return now >= stamp + dailyCoordinator.recheckSeconds end
+		-- A missing current-sea entry is eligible unless that NPC recently
+		-- refused it and supplied a later retry time.
+		return times[quest.quest] == nil
+	end
+
+	function dailyCoordinator.parseCooldown(value)
+		if type(value) ~= "string" then return nil end
+		local text = value:lower()
+		local amount = 0
+		local found = false
+		for _, unit in ipairs({
+			{ { "day" }, 86400 }, { { "hour", "hr" }, 3600 },
+			{ { "minute", "min" }, 60 }, { { "second", "sec" }, 1 },
+		}) do
+			local number
+			for _, pattern in ipairs(unit[1]) do
+				number = text:match("(%d+)%s*" .. pattern)
+				if number then break end
+			end
+			if number then
+				amount = amount + tonumber(number) * unit[2]
+				found = true
+			end
+		end
+		if found then return amount end
+		if text:find("come back", 1, true) or text:find("remaining", 1, true)
+			or text:find("cooldown", 1, true) or text:find("wait", 1, true)
+			or text:find("available in", 1, true) or text:find("try again", 1, true) then
+			local hours, minutes, seconds = text:match("(%d+):(%d%d):(%d%d)")
+			if hours then return tonumber(hours) * 3600 + tonumber(minutes) * 60 + tonumber(seconds) end
+			minutes, seconds = text:match("(%d+):(%d%d)")
+			if minutes then return tonumber(minutes) * 60 + tonumber(seconds) end
+		end
+		return nil
+	end
+
+	function dailyCoordinator.npcCooldown(quest, response)
+		local remaining = dailyCoordinator.parseCooldown(response)
+		if remaining then return remaining end
+		local loreQuest = quest.npc:sub(1, 5) == "Lore " or quest.npc == "Tomb Event Second"
+		local gui = LocalPlayer.PlayerGui:FindFirstChild(loreQuest and "LoreGUI" or quest.npc)
+		if not gui or not gui.Enabled then return nil end
+		for _, child in ipairs(gui:GetDescendants()) do
+			if child:IsA("TextLabel") or child:IsA("TextButton") then
+				remaining = dailyCoordinator.parseCooldown(child.Text)
+				if remaining then return remaining end
+			end
+		end
+		return nil
+	end
 
 	local dailyQuests = {
 		[15759515082] = {
@@ -20216,7 +20639,8 @@ local function run(B, T, P, DfT, ...)
 			-- Temporarily disable the diving daily (reported as "Just Dive?") while its underwater movement is unreliable.
 			{ npc = "Lore Sea Diving", quest = "Under The Sea~", kind = "touch", object = "Under The Sea~", level = 3000, disabled = true },
 			{ npc = "Daily Quest Disobey", quest = "Order Disobey", kind = "prompts", object = "PosterQuest", level = 3000 },
-			{ npc = "Braveman", quest = "Box Box!", kind = "boxes", level = 3000 },
+			-- Temporarily disable the broken Box Box! pickup/delivery daily.
+			{ npc = "Braveman", quest = "Box Box!", kind = "boxes", level = 3000, disabled = true },
 			{ npc = "Daily QuestLvl3800", quest = "The Lost Book", kind = "book", level = 3800 },
 			{ npc = "Daily QuestLvl3000", quest = "One More Time", kind = "mob", mob = "Joey", cframe = CFrame.new(-5287, 57, 2066), spawnOnApproach = true, level = 3000 },
 			{ npc = "Daily QuestLvl3500", quest = "Believer", kind = "mob", mob = "Hefty", cframe = CFrame.new(-10489, 84, 969), spawnOnApproach = true, level = 3500 },
@@ -20232,18 +20656,19 @@ local function run(B, T, P, DfT, ...)
 	-- Fallen/Dark/Heroic, Moon/Savior/Bright, Fearful/Moon/Night.
 
 	dailyQuestCanAct = function()
-		if not ((game.PlaceId == 15759515082 and GetSetting("autoDailyQuest"))
-			or (game.PlaceId == 6381829480 and GetSetting("autoSecondSeaDailyQuest"))) then
+		if not (GetSetting("autoDailyQuestsMaster") and
+			((game.PlaceId == 15759515082 and GetSetting("autoDailyQuest"))
+				or (game.PlaceId == 6381829480 and GetSetting("autoSecondSeaDailyQuest")))) then
 			return false
 		end
 		if _G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation() then
 			return false
 		end
-		if _G.storingFruit or _G.isLootingChests or _G.isFishing then
+		if _G.storingFruit or _G.isLootingChests or fishingOwnsWeaponSlot() then
 			return false
 		end
 		local owner = _G._GenesisPriorityOwner
-		return owner == "other_combat" or owner == "idle"
+		return owner == "daily_quest"
 	end
 
 	getDailyQuestPending = function()
@@ -20284,23 +20709,14 @@ local function run(B, T, P, DfT, ...)
 			end
 			return true
 		end
-		local dailyValue = LocalPlayer.PlayerStats:FindFirstChild("DailyQuest")
-		local completed = {}
-		if dailyValue then
-			local ok, data = pcall(function()
-				return HttpService:JSONDecode(dailyValue.Value)
-			end)
-			if ok and data then
-				for questName, _ in pairs(data) do
-					completed[questName] = true
-				end
-			end
-		end
+		local completed = dailyCoordinator.readTimes()
+		local now = os.time()
+		local rank = dailyCoordinator.currentRank()
 		local activeQuest = LocalPlayer:FindFirstChild("CurrentQuest")
 		local activeName = activeQuest and activeQuest.Value
 		local list = dailyQuests[game.PlaceId] or {}
 		for _, q in ipairs(list) do
-			if not q.disabled and q.quest == activeName and not completed[q.quest] then
+			if not q.disabled and q.quest == activeName and dailyCoordinator.isDue(rank, q, completed, now) then
 				return q
 			end
 		end
@@ -20312,7 +20728,7 @@ local function run(B, T, P, DfT, ...)
 		local npcFolder = Workspace:FindFirstChild("AllNPC")
 		local unavailable = {}
 		for _, q in ipairs(list) do
-			if not q.disabled and not completed[q.quest] and (not q.level or level >= q.level)
+			if not q.disabled and dailyCoordinator.isDue(rank, q, completed, now) and (not q.level or level >= q.level)
 				and (game.PlaceId ~= 6381829480 or (npcFolder and npcFolder:FindFirstChild(q.npc))) then
 				-- Availability gating is for Second Sea only. Third Sea's existing
 				-- travel/spawn workflow must not be skipped by this new guard.
@@ -20327,6 +20743,344 @@ local function run(B, T, P, DfT, ...)
 		end
 		return nil, "done"
 	end
+
+	function dailyCoordinator.seaEnabled(rank)
+		return GetSetting("autoDailyQuestsMaster") and
+			((rank == 2 and GetSetting("autoSecondSeaDailyQuest"))
+				or (rank == 3 and GetSetting("autoDailyQuest")))
+	end
+
+	function dailyCoordinator.nextSeaCheck(rank, now)
+		local nextAt
+		local levelValue = LocalPlayer.PlayerStats:FindFirstChild("lvl")
+		local level = levelValue and levelValue.Value or 0
+		for _, quest in ipairs(dailyQuests[dailyCoordinator.sea[rank].place] or {}) do
+			if not quest.disabled and (not quest.level or level >= quest.level) then
+				local record = dailyCoordinator.record(rank, quest.quest)
+				local retryAt = tonumber(record.retryAt) or 0
+				local completedAt = tonumber(record.completedAt) or 0
+				local dueAt = retryAt > now and retryAt
+					or (completedAt > 0 and completedAt + dailyCoordinator.recheckSeconds)
+					or (now + 3600)
+				-- A missing seasonal NPC or objective may leave an already-due
+				-- record. Revisit later, but do not bounce between seas constantly.
+				if dueAt <= now then dueAt = now + 3600 end
+				nextAt = nextAt and math.min(nextAt, dueAt) or dueAt
+			end
+		end
+		return nextAt or now + 3600
+	end
+
+	function dailyCoordinator.travelNpc(current, destination)
+		-- The First Sea captain only takes us to Second Sea. When Third Sea is
+		-- the destination, make that an intermediate hop instead of skipping NPCs.
+		local hop = current == 1 and destination == 3 and 2 or destination
+		if current == 1 or (current == 2 and hop == 1) then
+			return "Elite Pirate", hop
+		end
+		if current == 2 or current == 3 then
+			return "The Squid", hop
+		end
+		return nil, nil
+	end
+
+	function dailyCoordinator.findTravelChoice(dialogue, current, hop)
+		local target = dailyCoordinator.sea[hop].label:lower():gsub("[^%a]", "")
+		local ordinal = ({ [1] = "1stsea", [2] = "2ndsea", [3] = "3rdsea" })[hop]
+		local function normalize(value)
+			return tostring(value or ""):lower():gsub("[^%w]", "")
+		end
+		-- Third Sea offers more than one destination. Select only a button
+		-- whose visible label or name explicitly identifies the requested sea.
+		for _, button in ipairs(dialogue:GetDescendants()) do
+			if button:IsA("GuiButton") and _G._GenesisIsVisibleGuiButton(button) then
+				local label = button.Name
+				if button:IsA("TextButton") then label = label .. " " .. button.Text end
+				for _, child in ipairs(button:GetDescendants()) do
+					if (child:IsA("TextLabel") or child:IsA("TextButton"))
+						and not child.Name:match("^Char%d+$") then
+						label = label .. " " .. child.Text
+					end
+				end
+				local normalized = normalize(label)
+				if normalized:find(target, 1, true)
+					or (ordinal and normalized:find(ordinal, 1, true)) then
+					return button
+				end
+			end
+		end
+
+		local accept = dialogue:FindFirstChild("Accept")
+		if not _G._GenesisIsVisibleGuiButton(accept) then return nil end
+		-- Verified in the live Second Sea: The Squid's Accept is the Third
+		-- Sea option, with a server-side Script attached to the actual button.
+		if current == 2 and hop == 3 then return accept end
+
+		-- Some NPCs present a single destination in their speech followed by
+		-- generic Accept/Decline buttons. Only accept when that one destination
+		-- is unambiguous; never guess between First and Second Sea.
+		local textFrame = dialogue:FindFirstChild("TextFrame")
+		local words = {}
+		for _, child in ipairs(textFrame and textFrame:GetDescendants() or {}) do
+			if child:IsA("TextLabel") and child.Name:match("^Group%d+$") then
+				table.insert(words, child.Text)
+			end
+		end
+		local speech = normalize(table.concat(words, " "))
+		if not speech:find(target, 1, true) then return nil end
+		for rank, info in pairs(dailyCoordinator.sea) do
+			if rank ~= hop and speech:find(normalize(info.label), 1, true) then
+				return nil
+			end
+		end
+		return accept
+	end
+
+	function dailyCoordinator.clickTravelChoice(button)
+		if not _G._GenesisIsVisibleGuiButton(button) then return false end
+		local originalSize, originalPosition = button.Size, button.Position
+		local x, y
+		local clicked, mouseDown = false, false
+		local connection = button.MouseButton1Click:Connect(function() clicked = true end)
+		-- firesignal only advances the client dialogue; it does not activate
+		-- the server Script attached to these older NPC buttons. On the live
+		-- Android client a center-position virtual click missed, while the
+		-- existing enlarged-button real-input pattern hit The Squid's Decline.
+		local ok = pcall(function()
+			button.Size = UDim2.new(10, 0, 10, 0)
+			button.Position = UDim2.new(-1.9, 0, -5.5, 0)
+			RunService.RenderStepped:Wait()
+			if not _G._GenesisIsVisibleGuiButton(button) then return end
+			local camera = Workspace.CurrentCamera
+			if not camera then return end
+			local viewport = camera.ViewportSize
+			x, y = math.floor(viewport.X - 20), math.floor(viewport.Y / 15)
+			local position, size = button.AbsolutePosition, button.AbsoluteSize
+			if x < position.X or x > position.X + size.X
+				or y < position.Y or y > position.Y + size.Y then return end
+			VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
+			mouseDown = true
+			task.wait(0.05)
+			VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+			mouseDown = false
+			task.wait(0.15)
+		end)
+		if mouseDown then
+			pcall(function() VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0) end)
+		end
+		pcall(function()
+			button.Size = originalSize
+			button.Position = originalPosition
+		end)
+		connection:Disconnect()
+		return ok and clicked
+	end
+
+	function dailyCoordinator.travelRetry(route, now, message, delay)
+		_G._GenesisDailyQuestTravelPending = false
+		_G._GenesisDailyReturnRequested = false
+		_G.dailyQuestIssue = message
+		route.retryAt = now + (delay or 30)
+		dailyCoordinator.save()
+		if not _G._GenesisDailyTravelWarningAt or now - _G._GenesisDailyTravelWarningAt >= 60 then
+			_G._GenesisDailyTravelWarningAt = now
+			SpectrumX:Notify({ Text = message, Type = "warning", Duration = 5 })
+		end
+	end
+
+	_G._GenesisDailyQuestTravelPending = false
+	_G._GenesisDailyReturnRequested = false
+	spawn(function()
+		while task.wait(2) do
+			pcall(function()
+				if not GetSetting("autoDailyQuestsMaster") then
+					_G._GenesisDailyQuestTravelPending = false
+					_G._GenesisDailyReturnRequested = false
+					return
+				end
+				local current = dailyCoordinator.currentRank()
+				if not current then return end
+				local now = os.time()
+				local journal = dailyCoordinator.journal
+				local main = dailyCoordinator.mainRank()
+				local unlocked = dailyCoordinator.refreshAccess()
+				journal.nextSeaCheck = type(journal.nextSeaCheck) == "table" and journal.nextSeaCheck or {}
+				local route = journal.route
+				if type(route) == "table" then
+					route.visited = type(route.visited) == "table" and route.visited or {}
+					if route.mainSea ~= main or now - (tonumber(route.startedAt) or now) > 7200 then
+						journal.route = nil
+						route = nil
+						_G._GenesisDailyQuestTravelPending = false
+						_G._GenesisDailyReturnRequested = false
+					elseif route.target == current then
+						route.target = nil
+						route.targetAt = nil
+						_G._GenesisDailyQuestTravelPending = false
+						_G._GenesisDailyReturnRequested = false
+						dailyCoordinator.save()
+					elseif route.target and now - (tonumber(route.targetAt) or 0) < 45 then
+						return -- the transfer has been requested; await arrival
+					elseif route.target then
+						local missedSea = dailyCoordinator.sea[tonumber(route.target)]
+						route.target = nil
+						dailyCoordinator.travelRetry(route, now,
+							"NPC sea transfer was not confirmed" .. (missedSea and " toward " .. missedSea.label or "") .. ".", 60)
+					end
+				end
+
+				local activeValue = LocalPlayer:FindFirstChild("CurrentQuest")
+				local activeName = activeValue and activeValue.Value
+				if activeName and activeName ~= "" then
+					for _, quest in ipairs(dailyQuests[game.PlaceId] or {}) do
+						if not quest.disabled and quest.quest == activeName then
+							_G._GenesisDailyQuestTravelPending = false
+							_G._GenesisDailyReturnRequested = false
+							return
+						end
+					end
+				end
+				local pending, state
+				if dailyCoordinator.seaEnabled(current) then
+					pending, state = getDailyQuestPending()
+					if pending then
+						_G._GenesisDailyQuestTravelPending = false
+						_G._GenesisDailyReturnRequested = false
+						return
+					end
+				end
+				if not route then
+					local anyDue = false
+					for rank = 2, unlocked do
+						if dailyCoordinator.seaEnabled(rank) and now >= (tonumber(journal.nextSeaCheck[tostring(rank)]) or 0) then
+							anyDue = true
+							break
+						end
+					end
+					if not anyDue and current == main then
+						_G._GenesisDailyQuestTravelPending = false
+						_G._GenesisDailyReturnRequested = false
+						return
+					end
+					route = { startedAt = now, mainSea = main, visited = {} }
+					journal.route = route
+					dailyCoordinator.save()
+				end
+
+				if not route.visited[tostring(current)] then
+					route.visited[tostring(current)] = true
+					if dailyCoordinator.seaEnabled(current) then
+						journal.nextSeaCheck[tostring(current)] = dailyCoordinator.nextSeaCheck(current, now)
+					end
+					dailyCoordinator.save()
+				end
+				local destination
+				for rank = 2, unlocked do
+					if rank ~= current and dailyCoordinator.seaEnabled(rank) and not route.visited[tostring(rank)]
+						and now >= (tonumber(journal.nextSeaCheck[tostring(rank)]) or 0) then
+						destination = rank
+						break
+					end
+				end
+				if not destination and current ~= main then destination = main end
+				if not destination then
+					journal.route = nil
+					_G._GenesisDailyQuestTravelPending = false
+					_G._GenesisDailyReturnRequested = false
+					dailyCoordinator.save()
+					return
+				end
+				if now < (tonumber(route.retryAt) or 0) then
+					_G._GenesisDailyQuestTravelPending = false
+					_G._GenesisDailyReturnRequested = false
+					return
+				end
+				local returningMain = destination == main and current ~= main
+				_G._GenesisDailyQuestTravelPending = true
+				_G._GenesisDailyReturnRequested = returningMain
+				-- Return-to-main preempts outside-dungeon work, including a dungeon
+				-- entry attempt. A committed picker/transition/active raid still wins.
+				local committed = _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit()
+				if committed or fishingOwnsWeaponSlot() then
+					return
+				end
+				if returningMain then
+					if _G._GenesisPriorityOwner ~= "daily_quest_return" then return end
+				elseif _G._GenesisPriorityOwner ~= "daily_quest_handoff"
+					or _G.storingFruit or _G.isLootingChests or _G.seaEventActive
+					or (_G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation()) then
+					return
+				end
+				if not _G._autoExecuteQueued and not _G.queueAutoExecute(true) then
+					dailyCoordinator.travelRetry(route, now,
+						"Daily sea travel needs Auto Execute and GenesisX/king_legacy.luau in the executor workspace.", 60)
+					return
+				end
+				local npcName, hop = dailyCoordinator.travelNpc(current, destination)
+				local allNpc = Workspace:FindFirstChild("AllNPC")
+				local npc = allNpc and allNpc:FindFirstChild(npcName or "")
+				if not npc or not npc:IsA("BasePart") then
+					dailyCoordinator.travelRetry(route, now, "Daily sea travel NPC is unavailable: " .. tostring(npcName), 60)
+					return
+				end
+				local root = GetRoot(LocalPlayer.Character)
+				if not root then return end
+				if (root.Position - npc.Position).Magnitude > 8 then
+					if type(_G._stopDailyQuestHover) == "function" then
+						_G._stopDailyQuestHover()
+					end
+					tp(CFrame.new(npc.Position + Vector3.new(0, 3, 4), npc.Position), returningMain)
+					return -- let the server observe our position before opening dialogue
+				end
+				local gui = LocalPlayer.PlayerGui:FindFirstChild(npcName)
+				local dialogue = gui and gui:FindFirstChild("Dialogue")
+				if not (gui and gui.Enabled and dialogue and dialogue.Visible) then
+					if dailyCoordinator.npcTalkInFlight
+						and os.clock() - (dailyCoordinator.npcTalkLastAt or 0) > 12 then
+						dailyCoordinator.npcTalkInFlight = false
+						dailyCoordinator.npcTalkGeneration = (dailyCoordinator.npcTalkGeneration or 0) + 1
+						route.npcTalkFailures = (route.npcTalkFailures or 0) + 1
+						if route.npcTalkFailures >= 3 then
+							route.npcTalkFailures = 0
+							dailyCoordinator.travelRetry(route, now, npcName .. " did not open a sea-travel dialogue.", 90)
+							return
+						end
+					end
+					if not dailyCoordinator.npcTalkInFlight
+						and os.clock() - (dailyCoordinator.npcTalkLastAt or 0) >= 6 then
+						dailyCoordinator.npcTalkInFlight = true
+						dailyCoordinator.npcTalkLastAt = os.clock()
+						dailyCoordinator.npcTalkGeneration = (dailyCoordinator.npcTalkGeneration or 0) + 1
+						local generation = dailyCoordinator.npcTalkGeneration
+						task.spawn(function()
+							pcall(function()
+								ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(npc)
+							end)
+							if dailyCoordinator.npcTalkGeneration == generation then
+								dailyCoordinator.npcTalkInFlight = false
+							end
+						end)
+					end
+					return
+				end
+				route.npcTalkFailures = 0
+				local button = dailyCoordinator.findTravelChoice(dialogue, current, hop)
+				if not button then
+					dailyCoordinator.travelRetry(route, now,
+						npcName .. " dialogue has no verified " .. dailyCoordinator.sea[hop].label .. " choice.", 30)
+					return
+				end
+				route.target = hop
+				route.targetAt = now
+				dailyCoordinator.save()
+				if not dailyCoordinator.clickTravelChoice(button) then
+					route.target = nil
+					route.targetAt = nil
+					dailyCoordinator.travelRetry(route, now, "NPC sea-travel button did not receive a real click.", 15)
+				end
+			end)
+		end
+	end)
 
 	local function closeSecondSeaBasicDailyDialogue(quest)
 		if game.PlaceId ~= 6381829480 or quest.npc:sub(1, 5) == "Lore "
@@ -20373,6 +21127,7 @@ local function run(B, T, P, DfT, ...)
 					_G.dailyQuestIssue = nil
 					_G.dailyQuestCheckQueued = false
 					_G.dailyQuestLastCheckAttempt = 0
+					_G.dailyQuestNoResponseCount = 0
 					if hasQuest then
 						closeSecondSeaBasicDailyDialogue(current)
 					end
@@ -20383,8 +21138,9 @@ local function run(B, T, P, DfT, ...)
 					if hasQuest then
 						closeSecondSeaBasicDailyDialogue(current)
 						_G.dailyQuestState = current.kind == "mob" and "kill" or "objective"
-						_G.dailyQuestCheckQueued = false
-						_G.dailyQuestLastCheckAttempt = 0
+							_G.dailyQuestCheckQueued = false
+							_G.dailyQuestLastCheckAttempt = 0
+							_G.dailyQuestNoResponseCount = 0
 						return
 					end
 					if game.PlaceId == 6381829480 then
@@ -20409,12 +21165,35 @@ local function run(B, T, P, DfT, ...)
 						if not dailyQuestCanAct() or _G.dailyQuestState ~= "get_quest" then
 							return
 						end
+						local response
 						pcall(function()
 							local npcPart = Workspace.AllNPC:FindFirstChild(current.npc)
 							if npcPart then
-								ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(npcPart)
+								response = ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(npcPart)
 							end
 						end)
+						task.wait(0.4)
+						local remaining = dailyCoordinator.npcCooldown(current, response)
+						if remaining and remaining > 0 then
+							dailyCoordinator.deferQuest(dailyCoordinator.currentRank(), current.quest,
+									os.time() + remaining + 60)
+							_G.dailyQuestState = "idle"
+							_G.dailyQuestIssue = "NPC cooldown: " .. tostring(math.ceil(remaining / 60)) .. "m"
+						elseif not (currentQuest and currentQuest.Value == current.quest) then
+							local loreQuest = current.npc:sub(1, 5) == "Lore " or current.npc == "Tomb Event Second"
+							local picker = LocalPlayer.PlayerGui:FindFirstChild(loreQuest and "LoreGUI" or current.npc)
+							local dialogue = picker and picker:FindFirstChild("Dialogue")
+							if not (picker and picker.Enabled and dialogue and dialogue.Visible) then
+								_G.dailyQuestNoResponseCount = (_G.dailyQuestNoResponseCount or 0) + 1
+								if _G.dailyQuestNoResponseCount >= 3 then
+									dailyCoordinator.deferQuest(dailyCoordinator.currentRank(), current.quest,
+										os.time() + 600)
+									_G.dailyQuestState = "idle"
+									_G.dailyQuestIssue = "NPC did not offer the quest; retrying later"
+									_G.dailyQuestNoResponseCount = 0
+								end
+							end
+						end
 					end
 					return
 				end
@@ -20487,6 +21266,7 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
+	do
 	local lastInput = tick()
 
 	trackGenesisConnection(UserInputService.InputBegan:Connect(function()
@@ -20510,6 +21290,7 @@ local function run(B, T, P, DfT, ...)
 			end)
 		end
 	end)
+	end
 
 	local autoPlayInFlight = false
 	local autoPlayLastAttempt = 0
@@ -21399,7 +22180,7 @@ local function run(B, T, P, DfT, ...)
 
 	_G.HakiV2.startLock = function(targetCF)
 		_G.HakiV2.stopLock()
-		if not targetCF then
+		if not targetCF or _G._GenesisDailyReturnRequested then
 			return
 		end
 		_G.HakiV2.lockCF = targetCF * CFrame.new(0, 3, 5)
@@ -21464,6 +22245,11 @@ local function run(B, T, P, DfT, ...)
 
 		while task.wait(0.35) do
 			pcall(function()
+				if _G._GenesisDailyReturnRequested then
+					_G.isProgressingBusoV2 = false
+					H.stopLock()
+					return
+				end
 				if not GetSetting("autoBusoV2") then
 					if _G.isProgressingBusoV2 then
 						_G.isProgressingBusoV2 = false
@@ -21680,6 +22466,11 @@ local function run(B, T, P, DfT, ...)
 
 		while task.wait(0.35) do
 			pcall(function()
+				if _G._GenesisDailyReturnRequested then
+					_G.isProgressingObservationV2 = false
+					H.stopLock()
+					return
+				end
 				if not GetSetting("autoKenV2") then
 					if _G.isProgressingObservationV2 then
 						_G.isProgressingObservationV2 = false
