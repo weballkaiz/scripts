@@ -1,6 +1,8 @@
 -- GENESIS_WEBHOOK_ONLY_BUNDLE_V1
 -- GENESIS_DAILY_QUEST_ALL_11_V1
 -- GENESIS_DAILY_QUEST_CODEX_DIALOGUE_GUARD_V1
+-- GENESIS_SEA_KING_ACQUISITION_V1
+-- GENESIS_SECOND_SEA_DAILY_V14
 -- Bundled application with reporting only to the user-configured Discord webhook.
 -- Shared event/server retrieval remains enabled; Event Hub uploads are disabled.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -40,7 +42,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_DAILY_QUEST_CODEX_DIALOGUE_GUARD_V1",
+		buildMarker = "GENESIS_SECOND_SEA_DAILY_V14",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -139,6 +141,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 
 		local cleanupFunctions = {
 			sharedGlobal._stopFishing,
+			sharedGlobal._stopDailyQuestHover,
 			sharedGlobal._removeFarmFix,
 			sharedGlobal._stopSeaEventBypass,
 			sharedGlobal._stopAbyssalAcquisition,
@@ -259,6 +262,9 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._GenesisFindAbyssalLocator = nil
 		sharedGlobal._GenesisApproachAbyssalLocator = nil
 		sharedGlobal._stopAbyssalAcquisition = nil
+		sharedGlobal._GenesisSeaKingAcquisition = nil
+		sharedGlobal._GenesisFindSeaKingRewardChest = nil
+		sharedGlobal._GenesisApproachSeaKingIsland = nil
 		sharedGlobal._autoExecuteQueued = false
 		sharedGlobal._pendingHopJobId = nil
 		executorEnvironment.SpectrumX = runtime.previousSpectrumX
@@ -6764,6 +6770,9 @@ local function run(B, T, P, DfT, ...)
 		if type(_G._removeChestLootFix) == "function" then
 			_G._removeChestLootFix()
 		end
+		if type(_G._stopDailyQuestHover) == "function" then
+			_G._stopDailyQuestHover()
+		end
 		if _G.HakiV2 and type(_G.HakiV2.stopLock) == "function" then
 			_G.HakiV2.stopLock()
 		end
@@ -6799,6 +6808,7 @@ local function run(B, T, P, DfT, ...)
 			autoHuntSerpent = true,
 			autoKillAbyssalTyrant = true,
 			autoDailyQuest = true,
+			autoSecondSeaDailyQuest = true,
 			autoHuntPtero = true,
 			autoRaidBoss_ExpertSwordman = true,
 			autoRaidBoss_MsMother = true,
@@ -6939,6 +6949,7 @@ local function run(B, T, P, DfT, ...)
 		selectedAnimation = { "Standard", "selectedAnimation" },
 
 		autoDailyQuest = { false, "autoDailyQuest" },
+		autoSecondSeaDailyQuest = { false, "autoSecondSeaDailyQuest" },
 
 		autoCollectPearl = { false, "autoCollectPearl" },
 
@@ -8272,6 +8283,7 @@ local function run(B, T, P, DfT, ...)
 			"autoThirdSea",
 			"autoHuntSerpent",
 			"autoDailyQuest",
+			"autoSecondSeaDailyQuest",
 			"autoHuntPtero",
 			"autoRaidBoss_ExpertSwordman",
 			"autoRaidBoss_MsMother",
@@ -8388,11 +8400,54 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		_G.lootState[eventType] = { active = true, startTime = tick(), duration = duration }
+		local seaKingChestSound = nil
+		local seaKingChestConnection = nil
+		local seaKingChestOpenedAt = nil
+		local function disconnectSeaKingChest()
+			if seaKingChestConnection then
+				seaKingChestConnection:Disconnect()
+				local runtime = getGenesisRuntimeState()
+				if runtime then
+					runtime.connections[seaKingChestConnection] = nil
+				end
+				seaKingChestConnection = nil
+			end
+		end
+		local function watchSeaKingChest()
+			if eventType ~= "SeaKing" then
+				return
+			end
+			-- startLootTimer is defined before the local island finder below.
+			-- Resolve its published function at call time instead of a nil global.
+			local islandFinder = _G.findSeaKingIsland
+			local island = type(islandFinder) == "function" and islandFinder() or nil
+			local spawner = island and island:FindFirstChild("ChestSpawner")
+			local chest = spawner and spawner:FindFirstChildWhichIsA("Model")
+			local root = chest and chest:FindFirstChild("RootPart")
+			local sound = root and root:FindFirstChild("OpeningSound")
+			if sound and sound ~= seaKingChestSound then
+				disconnectSeaKingChest()
+				seaKingChestSound = sound
+				seaKingChestConnection = trackGenesisConnection(sound.Played:Connect(function()
+					seaKingChestOpenedAt = tick()
+				end))
+				if sound.IsPlaying then
+					seaKingChestOpenedAt = tick()
+				end
+			end
+		end
+		watchSeaKingChest()
 
 		_G.lootThreads[eventType] = task.spawn(function()
 			local start = tick()
 			while tick() - start < duration do
-				task.wait(0.5)
+				task.wait(eventType == "SeaKing" and 0.1 or 0.5)
+				watchSeaKingChest()
+				-- ChestOpen is the game's server-triggered opening effect. Allow a
+				-- short reward-settlement window, then release the movement lock.
+				if seaKingChestOpenedAt and tick() - seaKingChestOpenedAt >= 1.5 then
+					break
+				end
 				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
 					break
 				end
@@ -8423,6 +8478,7 @@ local function run(B, T, P, DfT, ...)
 				end
 
 				if respawned then
+					disconnectSeaKingChest()
 					removeChestLootFix()
 					_G.isLootingChests = false
 					_G.lootState[eventType] = { active = false }
@@ -8457,6 +8513,7 @@ local function run(B, T, P, DfT, ...)
 			end
 
 			-- Exited the loop (timeout or disabled).
+			disconnectSeaKingChest()
 			removeChestLootFix()
 			_G.isLootingChests = false
 			_G.lootState[eventType] = { active = false }
@@ -8467,6 +8524,17 @@ local function run(B, T, P, DfT, ...)
 			end
 			if not GetSetting("autoSKHD") then
 				return
+			end
+			if eventType == "SeaKing" then
+				_G.seaKingIslandEmpty = true
+				if seaKingChestOpenedAt then
+					_G.seaKingLootUnconfirmed = false
+					_G.currentEventName = "Sea King (Chest Opened)"
+				else
+					_G.seaKingLootUnconfirmed = true
+					_G.currentEventName = "Sea King (Chest unconfirmed)"
+					return
+				end
 			end
 
 			if GetSetting("autoSmartHop") then
@@ -8838,6 +8906,7 @@ local function run(B, T, P, DfT, ...)
 			or GetSetting("autoRaidBoss_BushidoApe")
 			or GetSetting("autoRaidBoss_LordOfSaber")
 			or GetSetting("autoDailyQuest")
+			or GetSetting("autoSecondSeaDailyQuest")
 			or GetSetting("autoSKHD")
 			or GetSetting("autoGhostShip")
 			or GetSetting("autoKillKraken")
@@ -10612,6 +10681,7 @@ local function run(B, T, P, DfT, ...)
 		return nil
 	end
 
+	_G.findSeaKingIsland = findSeaKingIsland
 	_G.findSeaKingMob = findSeaKingMob
 	_G.findHydraMob = findHydraMob
 	_G.findSeaKingChestPosition = findSeaKingChestPosition
@@ -10679,6 +10749,73 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		return hasEvent
+	end
+
+	_G._GenesisSeaKingAcquisition = {
+		island = nil,
+		attempts = 0,
+		lastApproachAt = -math.huge,
+		sawBoss = false,
+	}
+
+	_G._GenesisFindSeaKingRewardChest = function(island)
+		local spawner = island and island:FindFirstChild("ChestSpawner")
+		if not spawner then
+			return nil
+		end
+		for _, child in ipairs(spawner:GetChildren()) do
+			if child:IsA("Model") and child:FindFirstChild("RootPart") and child:FindFirstChild("ChestAnim") then
+				return child
+			end
+		end
+		return nil
+	end
+
+	_G._GenesisApproachSeaKingIsland = function(island)
+		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+			return true
+		end
+		local main = island:FindFirstChild("Main") or island.PrimaryPart
+		if not main or not main:IsA("BasePart") then
+			_G.currentEventName = "Sea King (Island marker unavailable)"
+			return true
+		end
+		_G.seaKingIslandEmpty = false
+		_G.seaKingLootUnconfirmed = false
+		_G.seaKingJoinLootStarted = false
+		_G.isLootingChests = false
+		_G.allowCombat = false
+		_G.seaEventActive = true
+		_G.currentEventHealth = 0
+		_G.currentEventMaxHealth = 0
+		removeFarmFix()
+		stopSeaEventBypass()
+		if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("sea_king_island") then
+			_G.currentEventName = "Sea King (Switching Loadout)"
+			return true
+		end
+		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+			return true
+		end
+		local now = os.clock()
+		if _G._GenesisSeaKingAcquisition.attempts >= 3 or now - _G._GenesisSeaKingAcquisition.lastApproachAt < 4 then
+			_G.currentEventName = "Sea King (Waiting for Spawn)"
+			return true
+		end
+		local character = LocalPlayer.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if not humanoid or humanoid.Health <= 0 or not root then
+			_G.currentEventName = "Sea King (Waiting for Respawn)"
+			return true
+		end
+		_G._GenesisSeaKingAcquisition.attempts = _G._GenesisSeaKingAcquisition.attempts + 1
+		_G._GenesisSeaKingAcquisition.lastApproachAt = now
+		_G.currentEventName = "Sea King (Locating " .. _G._GenesisSeaKingAcquisition.attempts .. "/3)"
+		root.CFrame = CFrame.new(main.Position + Vector3.new(0, 85, 0))
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		return true
 	end
 
 	local function checkSea2Events(phase)
@@ -10903,9 +11040,22 @@ local function run(B, T, P, DfT, ...)
 			-- === SEA KING ===
 			local seaKingMob = findSeaKingMob()
 			local seaKingIsland = findSeaKingIsland()
+			if _G._GenesisSeaKingAcquisition.island ~= seaKingIsland then
+				_G._GenesisSeaKingAcquisition.island = seaKingIsland
+				_G._GenesisSeaKingAcquisition.attempts = 0
+				_G._GenesisSeaKingAcquisition.lastApproachAt = -math.huge
+				_G._GenesisSeaKingAcquisition.sawBoss = false
+				_G.seaKingLootUnconfirmed = false
+			end
+			local rawSeaKing = Workspace.SeaMonster:FindFirstChild("SeaKing")
+			if rawSeaKing and rawSeaKing:FindFirstChild("Humanoid") then
+				_G._GenesisSeaKingAcquisition.sawBoss = true
+			end
 
 			if seaKingMob and seaKingMob:FindFirstChild("Humanoid") and seaKingMob.Humanoid.Health > 0 then
+				_G._GenesisSeaKingAcquisition.sawBoss = true
 				_G.seaKingIslandEmpty = false
+				_G.seaKingLootUnconfirmed = false
 				_G.seaKingJoinLootStarted = false
 				removeFarmFix()
 
@@ -10986,9 +11136,21 @@ local function run(B, T, P, DfT, ...)
 				end
 				return true
 			elseif seaKingIsland then
+				-- Unlike post-kill loot, an UNLEASHED island without a reward chest
+				-- is a pre-spawn locator. The Sea King model appears only after a player
+				-- approaches the island; the island alone is not proof of a kill.
+				if not _G._GenesisSeaKingAcquisition.sawBoss
+					and not _G._GenesisFindSeaKingRewardChest(seaKingIsland)
+					and ReplicatedStorage:GetAttribute("SeaMonsterSpawnText") == "UNLEASHED"
+					and ReplicatedStorage:GetAttribute("Hydra") ~= true
+				then
+					return _G._GenesisApproachSeaKingIsland(seaKingIsland)
+				end
 				removeFarmFix()
 				if _G.seaKingIslandEmpty then
-					_G.currentEventName = "Sea King (Done)"
+					_G.currentEventName = _G.seaKingLootUnconfirmed
+						and "Sea King (Chest unconfirmed)"
+						or "Sea King (Done)"
 					_G.seaEventActive = false
 					return false
 				end
@@ -11022,6 +11184,7 @@ local function run(B, T, P, DfT, ...)
 				return true
 			else
 				_G.seaKingJoinLootStarted = false
+				_G._GenesisSeaKingAcquisition.sawBoss = false
 			end
 		end -- autoSKHD hydra/sk
 
@@ -14756,6 +14919,18 @@ local function run(B, T, P, DfT, ...)
 				end
 			end,
 		})
+	elseif game.PlaceId == 6381829480 then
+		Window:CreateToggle(uiSections.progressDaily, {
+			Text = "Auto Daily Quest (Second Sea)",
+			Default = GetSetting("autoSecondSeaDailyQuest") or false,
+			Callback = function(state)
+				saveAndApply("autoSecondSeaDailyQuest", state)
+				if state then
+					_G.dailyQuestState = "idle"
+					_G.dailyQuestKills = 0
+				end
+			end,
+		})
 	end
 
 	Window:CreateToggle(uiSections.itemFruits, {
@@ -15733,6 +15908,7 @@ local function run(B, T, P, DfT, ...)
 					or GetSetting("autoThirdSea")
 					or GetSetting("autoHuntSerpent")
 					or GetSetting("autoDailyQuest")
+					or GetSetting("autoSecondSeaDailyQuest")
 					or GetSetting("autoHuntPtero")
 					or GetSetting("autoRaidBoss_ExpertSwordman")
 					or GetSetting("autoRaidBoss_MsMother")
@@ -16938,8 +17114,40 @@ local function run(B, T, P, DfT, ...)
 		local codexSubmissions = 0
 		local codexDialogueRetryAt = 0
 		local codexPuzzleRetryAt = 0
+		local boxPortRequestAt = 0
+		local boxPortRequests = 0
+		local boxClickedProgress = nil
+		local boxClickedAt = 0
+		local boxClickAttempts = 0
+		local hoverBodyPosition = nil
+		local hoverRoot = nil
 
-		local function useQuestPrompt(part, prompt)
+		local function stopDailyQuestHover()
+			if hoverBodyPosition then
+				hoverBodyPosition:Destroy()
+				hoverBodyPosition = nil
+			end
+			hoverRoot = nil
+		end
+		_G._stopDailyQuestHover = stopDailyQuestHover
+
+		local function holdDailyQuestHover(root, position)
+			if hoverRoot ~= root then
+				stopDailyQuestHover()
+				hoverRoot = root
+			end
+			if not hoverBodyPosition or not hoverBodyPosition.Parent then
+				hoverBodyPosition = Instance.new("BodyPosition")
+				hoverBodyPosition.MaxForce = Vector3.new(1000000000, 1000000000, 1000000000)
+				hoverBodyPosition.D = 1000
+				hoverBodyPosition.P = 10000
+				hoverBodyPosition.Parent = root
+			end
+			hoverBodyPosition.Position = position
+			root.AssemblyLinearVelocity = Vector3.zero
+		end
+
+		local function useQuestPrompt(part, prompt, holdInAir)
 			if not part or not prompt or not prompt.Enabled then
 				return false
 			end
@@ -16947,9 +17155,15 @@ local function run(B, T, P, DfT, ...)
 			if not root then
 				return false
 			end
+			local destination = part.Position + Vector3.new(0, 3, 0)
+			if holdInAir then
+				holdDailyQuestHover(root, destination)
+			else
+				stopDailyQuestHover()
+			end
 			local reach = math.max(3, prompt.MaxActivationDistance - 2)
 			if (root.Position - part.Position).Magnitude > reach then
-				tp(CFrame.new(part.Position + Vector3.new(0, 3, 0)))
+				tp(CFrame.new(destination))
 				nextActionAt = tick() + 0.7 -- let the server see the new position
 				return false
 			end
@@ -16970,20 +17184,212 @@ local function run(B, T, P, DfT, ...)
 			local ok, err = pcall(function()
 				if not dailyQuestCanAct or not getDailyQuestPending
 					or not dailyQuestCanAct() or _G.dailyQuestState ~= "objective" or tick() < nextActionAt then
+					if not dailyQuestCanAct or not getDailyQuestPending
+						or not dailyQuestCanAct() or _G.dailyQuestState ~= "objective" then
+						stopDailyQuestHover()
+					end
 					return
 				end
 				local current = getDailyQuestPending()
 				local activeQuest = LocalPlayer:FindFirstChild("CurrentQuest")
 				if not current or not activeQuest or activeQuest.Value ~= current.quest then
+					stopDailyQuestHover()
 					return
 				end
 				if objectiveName ~= current.quest then
+					stopDailyQuestHover()
 					objectiveName = current.quest
 					promptCursor = 1
 					codexSubmissions = 0
 					codexDialogueRetryAt = 0
 					codexPuzzleRetryAt = 0
+					boxPortRequestAt = 0
+					boxPortRequests = 0
+					boxClickedProgress = nil
+					boxClickedAt = 0
+					boxClickAttempts = 0
 					_G.dailyQuestIssue = nil
+				end
+
+				if current.kind == "book" then
+					local islands = Workspace:FindFirstChild("Island")
+					local fiore = islands and islands:FindFirstChild("H - Fiore")
+					local book = fiore and fiore:FindFirstChild("Lost Book")
+					local part = book and book:FindFirstChild("Main")
+					local prompt = part and part:FindFirstChildWhichIsA("ProximityPrompt")
+					if not part or not prompt then
+						_G.dailyQuestIssue = "The Lost Book interactable is not present"
+						return
+					end
+					useQuestPrompt(part, prompt, false)
+					return
+				end
+
+				if current.kind == "boxes" then
+					stopDailyQuestHover()
+					local character = LocalPlayer.Character
+					local root = GetRoot(character)
+					local progressValue = LocalPlayer:FindFirstChild("QuestProgress")
+					if not root or not progressValue then
+						return
+					end
+					local progress = progressValue.Value
+					if boxClickedProgress ~= nil then
+						if progress > boxClickedProgress then
+							boxClickedProgress = nil
+							boxPortRequestAt = 0
+							boxPortRequests = 0
+							boxClickAttempts = 0
+							_G.dailyQuestIssue = nil
+						elseif tick() - boxClickedAt < 5 then
+							return
+						else
+							boxClickedProgress = nil
+							if boxClickAttempts >= 3 then
+								_G.dailyQuestIssue = "Port delivery did not advance Box Box! after three confirmed clicks"
+								return
+							end
+							-- A confirmed GUI click can still be rejected by the server.
+							-- Recheck the same package, quest, progress, and dialogue before retrying.
+							nextActionAt = tick() + 1
+							return
+						end
+					end
+					if boxClickAttempts >= 3 then
+						return -- report the failure without clicking indefinitely
+					end
+					if progress >= 3 then
+						return -- the game still needs to record the completed daily
+					end
+
+					local onQuest = character and character:FindFirstChild("onQuest")
+					local package = character and character:FindFirstChild("yazoooonxQuestBox")
+					local portGui = LocalPlayer.PlayerGui:FindFirstChild("Civilian Port")
+					if not (onQuest and package) then
+						if onQuest or package or portGui then
+							return -- wait for pickup replication or the previous Port GUI to close
+						end
+						boxPortRequestAt = 0
+						boxPortRequests = 0
+						local spawnItems = Workspace:FindFirstChild("SpawnItem")
+						local box = spawnItems and spawnItems:FindFirstChild("Box")
+						local prompt = box and box:FindFirstChildWhichIsA("ProximityPrompt")
+						if not box or not prompt then
+							_G.dailyQuestIssue = "Box Box! pickup prompt is not present"
+							return
+						end
+						useQuestPrompt(box, prompt, false)
+						return
+					end
+
+					local port = Workspace.AllNPC:FindFirstChild("Civilian Port")
+					if not port then
+						_G.dailyQuestIssue = "Civilian Port NPC is not present"
+						return
+					end
+					if portGui then
+						local dialogue = portGui:FindFirstChild("Dialogue")
+						local accept = dialogue and dialogue:FindFirstChild("Accept")
+						local label = accept and accept:FindFirstChild("Text")
+						local deliveryText = label and (label.Text == "I'm here to deliver this Package!"
+							or label.Text == "ผมมาส่งของครับ!")
+						if not deliveryText or not _G._GenesisIsVisibleGuiButton(accept) then
+							if tick() - boxPortRequestAt > 6 then
+								_G.dailyQuestIssue = "Waiting for the correct Civilian Port delivery dialogue"
+							end
+							return
+						end
+
+						-- The Port's server-side button handling needs a real GUI click.
+						-- Use only the fruit Collect method, verified live at 0/3 -> 1/3;
+						-- restore the original button layout even if input fails.
+						local oldSize, oldPosition = accept.Size, accept.Position
+						local mouseDown = false
+						local didClick = false
+						local clickConnection = accept.MouseButton1Click:Connect(function()
+							didClick = true
+						end)
+						local clickX, clickY
+						local clickOk, clickError = pcall(function()
+							accept.Size = UDim2.new(10, 0, 10, 0)
+							accept.Position = UDim2.new(-1.9, 0, -5.5, 0)
+							RunService.RenderStepped:Wait()
+							if not dailyQuestCanAct() or not _G._GenesisIsVisibleGuiButton(accept)
+								or LocalPlayer.CurrentQuest.Value ~= "Box Box!"
+								or progressValue.Value ~= progress
+								or not character:FindFirstChild("onQuest")
+								or not character:FindFirstChild("yazoooonxQuestBox") then
+								return
+							end
+							local viewport = Workspace.CurrentCamera.ViewportSize
+							clickX, clickY = viewport.X - 20, viewport.Y / 15
+							local position, size = accept.AbsolutePosition, accept.AbsoluteSize
+							if clickX < position.X or clickX > position.X + size.X
+								or clickY < position.Y or clickY > position.Y + size.Y then
+								error("Port click point is outside the enlarged button")
+							end
+							VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 0)
+							mouseDown = true
+							task.wait(0.02)
+							VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
+							mouseDown = false
+							-- Give Roblox a frame to dispatch MouseButton1Click before
+							-- restoring the enlarged button to its normal layout.
+							task.wait(0.12)
+						end)
+						clickConnection:Disconnect()
+						if mouseDown then
+							pcall(function()
+								VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
+							end)
+						end
+						pcall(function()
+							accept.Size = oldSize
+							accept.Position = oldPosition
+						end)
+						if not clickOk then
+							_G.dailyQuestIssue = "Civilian Port click failed: " .. tostring(clickError)
+							nextActionAt = tick() + 5
+							return
+						end
+						boxClickAttempts = boxClickAttempts + 1
+						if not didClick then
+							_G.dailyQuestIssue = "Civilian Port did not receive the delivery click"
+							nextActionAt = tick() + 1
+							return
+						end
+						boxClickedProgress = progress
+						boxClickedAt = tick()
+						nextActionAt = tick() + 0.5
+						return
+					end
+
+					if (root.Position - port.Position).Magnitude > 8 then
+						root.CFrame = CFrame.new(port.Position)
+						nextActionAt = tick() + 0.8 -- let the server see the arrival
+						return
+					end
+					if boxPortRequests >= 2 then
+						if tick() - boxPortRequestAt > 6 then
+							_G.dailyQuestIssue = "Civilian Port dialogue did not open after two attempts"
+						end
+						return
+					end
+					if tick() - boxPortRequestAt >= 6 then
+						boxPortRequestAt = tick()
+						boxPortRequests = boxPortRequests + 1
+						task.spawn(function()
+							if dailyQuestCanAct() and LocalPlayer.CurrentQuest.Value == "Box Box!"
+								and character:FindFirstChild("onQuest")
+								and character:FindFirstChild("yazoooonxQuestBox") then
+								pcall(function()
+									ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(port)
+								end)
+							end
+						end)
+						nextActionAt = tick() + 0.8
+					end
+					return
 				end
 
 				if current.kind == "prompts" then
@@ -17001,21 +17407,79 @@ local function run(B, T, P, DfT, ...)
 						return a.Position.X < b.Position.X
 					end)
 					if #objects == 0 then
+						stopDailyQuestHover()
 						_G.dailyQuestIssue = "Daily quest objects not present: " .. current.object
 						return
 					end
 					promptCursor = ((promptCursor - 1) % #objects) + 1
 					local part = objects[promptCursor]
-					local prompt = part:FindFirstChild("PromptQuest")
+					local prompt = part:FindFirstChild("PromptQuest") or part:FindFirstChildWhichIsA("ProximityPrompt")
 					if not prompt or not prompt.Enabled then
+						stopDailyQuestHover()
 						promptCursor = promptCursor + 1
 						return
 					end
-					if useQuestPrompt(part, prompt) then
+					if useQuestPrompt(part, prompt, current.object == "Floating Feather") then
 						promptCursor = promptCursor + 1
 					end
 					return
 				end
+
+				if current.kind == "touch" then
+				local spawnItems = Workspace:FindFirstChild("SpawnItem")
+				local objects = {}
+				for _, part in ipairs(spawnItems and spawnItems:GetChildren() or {}) do
+					if part.Name == current.object and part:IsA("BasePart") then
+						table.insert(objects, part)
+					end
+				end
+				if #objects == 0 then
+					stopDailyQuestHover()
+					_G.dailyQuestIssue = "Daily quest touch zones not present: " .. current.object
+					return
+				end
+				table.sort(objects, function(a, b)
+					return a.Position.X < b.Position.X
+				end)
+				promptCursor = ((promptCursor - 1) % #objects) + 1
+				local part = objects[promptCursor]
+				local root = GetRoot(LocalPlayer.Character)
+				if not root then
+					return
+				end
+				-- The land pads are touched while standing above them. The Under The
+				-- Sea volumes are submerged; hold the root inside each volume so water
+				-- buoyancy cannot lift it away before the touch is sent.
+				local underwater = current.object == "Under The Sea~"
+				local contact = underwater and part.Position or part.Position + Vector3.new(0, 3, 0)
+				if underwater then
+					holdDailyQuestHover(root, contact)
+				else
+					stopDailyQuestHover()
+				end
+				local delta = root.Position - contact
+				local horizontalDistance = Vector3.new(delta.X, 0, delta.Z).Magnitude
+				if horizontalDistance > 3 or math.abs(delta.Y) > (underwater and 2 or 5) then
+					root.CFrame = CFrame.new(contact)
+					nextActionAt = tick() + 0.6
+					return
+				end
+				if type(firetouchinterest) ~= "function" then
+					_G.dailyQuestIssue = "Executor cannot trigger daily quest touch zones"
+					nextActionAt = tick() + 5
+					return
+				end
+				local ok = pcall(function()
+					firetouchinterest(root, part, 0)
+					firetouchinterest(root, part, 1)
+				end)
+				if not ok then
+					_G.dailyQuestIssue = "Daily quest touch failed: " .. part.Name
+				end
+				promptCursor = promptCursor + 1
+				nextActionAt = tick() + (ok and 0.8 or 3)
+				return
+			end
 
 				if current.kind == "plates" then
 					local spawnItems = Workspace:FindFirstChild("SpawnItem")
@@ -17149,6 +17613,7 @@ local function run(B, T, P, DfT, ...)
 				end
 			end)
 			if not ok then
+				stopDailyQuestHover()
 				_G.dailyQuestIssue = tostring(err)
 			end
 		end
@@ -18113,7 +18578,7 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		if GetSetting("autoDailyQuest") and _G.dailyQuestState == "kill" then
+		if (GetSetting("autoDailyQuest") or GetSetting("autoSecondSeaDailyQuest")) and _G.dailyQuestState == "kill" then
 			local target = _G.dailyQuestTarget
 			if
 				target
@@ -19077,32 +19542,59 @@ local function run(B, T, P, DfT, ...)
 	end)
 
 	spawn(function()
+		local lastDailyQuestClick = 0
 		while task.wait(0.05) do
 			pcall(function()
-				if not GetSetting("autoDailyQuest") or _G.dailyQuestState ~= "get_quest" then
+				if not dailyQuestCanAct or not getDailyQuestPending
+					or not dailyQuestCanAct() or _G.dailyQuestState ~= "get_quest"
+					or (game.PlaceId == 6381829480 and not _G.dailyQuestCheckQueued)
+					or tick() - lastDailyQuestClick < 0.4 then
 					return
 				end
-				local owner = _G._GenesisPriorityOwner
-				if owner ~= "other_combat" and owner ~= "idle" then
+				local current = getDailyQuestPending()
+				if not current then
 					return
 				end
 
-				local gui = LocalPlayer.PlayerGui:FindFirstChild("LoreGUI")
+				local loreQuest = current.npc:sub(1, 5) == "Lore " or current.npc == "Tomb Event Second"
+				local gui = LocalPlayer.PlayerGui:FindFirstChild(loreQuest and "LoreGUI" or current.npc)
 				local dialogue = gui and gui:FindFirstChild("Dialogue")
-				if not dialogue then
+				if not dialogue or not dialogue.Visible or not gui.Enabled then
 					return
 				end
 
 				-- Existing but hidden buttons must not mask the currently active stage.
 				local button = nil
-				for _, buttonName in ipairs({ "QuestAccept", "Quest 1", "Quest 2" }) do
+				local choices = loreQuest and (current.choice and { "QuestAccept", current.choice }
+					or { "QuestAccept", "Quest 1", "Quest 2" }) or { "Accept" }
+				for _, buttonName in ipairs(choices) do
 					local candidate = dialogue:FindFirstChild(buttonName)
 					if _G._GenesisIsVisibleGuiButton(candidate) then
 						button = candidate
 						break
 					end
 				end
-				_G._GenesisDispatchGuiButton(button)
+				if _G._GenesisDispatchGuiButton(button) then
+					lastDailyQuestClick = tick()
+					if not loreQuest then
+						-- These older NPC GUIs also have a server-side Script under Accept.
+						-- A client-side firesignal advances the dialogue but does not
+						-- replicate that Script's quest-taking action. Use the same
+						-- validated Quest remote after the visible Accept was selected.
+						local expectedQuest = current.quest
+						task.spawn(function()
+							task.wait(0.2)
+							if dailyQuestCanAct() and _G.dailyQuestState == "get_quest" then
+								local activeQuest = LocalPlayer:FindFirstChild("CurrentQuest")
+								if not activeQuest or activeQuest.Value ~= expectedQuest then
+									pcall(function()
+										ReplicatedStorage.Chest.Remotes.Functions.Quest:InvokeServer("take", expectedQuest)
+									end)
+								end
+							end
+						end)
+					end
+				end
 			end)
 		end
 	end)
@@ -19684,11 +20176,14 @@ local function run(B, T, P, DfT, ...)
 
 	_G.dailyQuestState = "idle"
 	_G.dailyQuestCurrentNPC = ""
+	_G.dailyQuestCurrentName = ""
 	_G.dailyQuestCheckQueued = false
 	_G.dailyQuestLastCheckAttempt = 0
 	_G.dailyQuestTarget = nil
+	_G.dailyQuestIssue = nil
 
 	local dailyQuests = {
+		[15759515082] = {
 		{
 			npc = "Lore the Depth",
 			quest = "Rolling in the Depth",
@@ -19712,13 +20207,32 @@ local function run(B, T, P, DfT, ...)
 		{ npc = "Lore Kraken Codex Easy", quest = "Krakenci Codes (Easy)", kind = "codex", words = { 8, 5, 7 } },
 		{ npc = "Lore Kraken Codex Medium", quest = "Krakenci Codes (Medium)", kind = "codex", words = { 1, 9, 4 } },
 		{ npc = "Lore Kraken Codex Hard", quest = "Krakenci Codes (Hard)", kind = "codex", words = { 6, 1, 3 } },
+		},
+		[6381829480] = {
+			{ npc = "Lore Bone Hunter", quest = "Bone Hunter", kind = "prompts", object = "Bone Hunter", level = 3000 },
+			{ npc = "Lore Sea Madness", quest = "Catch me,If you can", kind = "prompts", object = "Catch me,If you can", level = 3000 },
+			{ npc = "Daily Quest DeadAbove", quest = "Dead Above", kind = "prompts", object = "Floating Feather", level = 3000 },
+			{ npc = "Lore Sea Sick!", quest = "I'm not,YOU ARE!", kind = "touch", object = "I'm not,YOU ARE!", level = 3000 },
+			{ npc = "Lore Sea Diving", quest = "Under The Sea~", kind = "touch", object = "Under The Sea~", level = 3000 },
+			{ npc = "Daily Quest Disobey", quest = "Order Disobey", kind = "prompts", object = "PosterQuest", level = 3000 },
+			{ npc = "Braveman", quest = "Box Box!", kind = "boxes", level = 3000 },
+			{ npc = "Daily QuestLvl3800", quest = "The Lost Book", kind = "book", level = 3800 },
+			{ npc = "Daily QuestLvl3000", quest = "One More Time", kind = "mob", mob = "Joey", cframe = CFrame.new(-5287, 57, 2066), spawnOnApproach = true, level = 3000 },
+			{ npc = "Daily QuestLvl3500", quest = "Believer", kind = "mob", mob = "Hefty", cframe = CFrame.new(-10489, 84, 969), spawnOnApproach = true, level = 3500 },
+			{ npc = "Lore Sea Creature", quest = "Left to Dead", kind = "mob", mob = "Dead Troupe Captain", cframe = CFrame.new(10000, 72, -4200), spawnOnApproach = true, level = 3000 },
+			-- The Tomb event giver is seasonal. Its two dailies become eligible only
+			-- while that actual NPC exists; never select Quest 1 (Pumpkin Smasher).
+			{ npc = "Tomb Event Second", quest = "Left For Dead?", kind = "mob", mob = "Dead Troupe Captain", cframe = CFrame.new(10000, 72, -4200), spawnOnApproach = true, choice = "Quest 2", level = 3500 },
+			{ npc = "Tomb Event Second", quest = "Is it Thriller?", kind = "mob", mob = "Skull Pirate", cframe = CFrame.new(-6380, 75, 7030), spawnOnApproach = true, choice = "Quest 3", level = 3800 },
+		},
 	}
 	-- Only the eleven live Third Sea Lore NPCs whose QuestManager entries are
 	-- marked DailyQuest belong here. The Codex indices are the game's UI slots:
 	-- Fallen/Dark/Heroic, Moon/Savior/Bright, Fearful/Moon/Night.
 
 	dailyQuestCanAct = function()
-		if not GetSetting("autoDailyQuest") or game.PlaceId ~= 15759515082 then
+		if not ((game.PlaceId == 15759515082 and GetSetting("autoDailyQuest"))
+			or (game.PlaceId == 6381829480 and GetSetting("autoSecondSeaDailyQuest"))) then
 			return false
 		end
 		if _G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation() then
@@ -19732,6 +20246,43 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	getDailyQuestPending = function()
+	local function objectiveSpawnPresent(quest)
+			if quest.kind == "book" then
+				local islands = Workspace:FindFirstChild("Island")
+				local fiore = islands and islands:FindFirstChild("H - Fiore")
+				local book = fiore and fiore:FindFirstChild("Lost Book")
+				local part = book and book:FindFirstChild("Main")
+				return part ~= nil and part:FindFirstChildWhichIsA("ProximityPrompt") ~= nil
+			end
+			if quest.kind == "boxes" then
+				local spawnItems = Workspace:FindFirstChild("SpawnItem")
+				local npcFolder = Workspace:FindFirstChild("AllNPC")
+				return spawnItems ~= nil and spawnItems:FindFirstChild("Box") ~= nil
+					and npcFolder ~= nil and npcFolder:FindFirstChild("Civilian Port") ~= nil
+			end
+			if quest.kind == "prompts" or quest.kind == "touch" then
+				local spawnItems = Workspace:FindFirstChild("SpawnItem")
+				return spawnItems ~= nil and spawnItems:FindFirstChild(quest.object) ~= nil
+			end
+			if quest.kind == "mob" then
+				if quest.spawnOnApproach and quest.cframe then
+					return true -- the proximity spawn is reached after accepting the daily
+				end
+				local monsters = Workspace:FindFirstChild("Monster")
+				for _, folder in ipairs(monsters and monsters:GetChildren() or {}) do
+					if folder:IsA("Folder") then
+						for _, mob in ipairs(folder:GetChildren()) do
+							local humanoid = mob:FindFirstChild("Humanoid")
+							if humanoid and humanoid.Health > 0 and string.find(mob.Name, quest.mob, 1, true) then
+								return true
+							end
+						end
+					end
+				end
+				return false
+			end
+			return true
+		end
 		local dailyValue = LocalPlayer.PlayerStats:FindFirstChild("DailyQuest")
 		local completed = {}
 		if dailyValue then
@@ -19746,17 +20297,47 @@ local function run(B, T, P, DfT, ...)
 		end
 		local activeQuest = LocalPlayer:FindFirstChild("CurrentQuest")
 		local activeName = activeQuest and activeQuest.Value
-		for _, q in ipairs(dailyQuests) do
+		local list = dailyQuests[game.PlaceId] or {}
+		for _, q in ipairs(list) do
 			if q.quest == activeName and not completed[q.quest] then
 				return q
 			end
 		end
-		for _, q in ipairs(dailyQuests) do
-			if not completed[q.quest] then
-				return q
+		if activeName and activeName ~= "" then
+			return nil, "paused", activeName
+		end
+		local levelValue = LocalPlayer.PlayerStats:FindFirstChild("lvl")
+		local level = levelValue and levelValue.Value or 0
+		local npcFolder = Workspace:FindFirstChild("AllNPC")
+		local unavailable = {}
+		for _, q in ipairs(list) do
+			if not completed[q.quest] and (not q.level or level >= q.level)
+				and (game.PlaceId ~= 6381829480 or (npcFolder and npcFolder:FindFirstChild(q.npc))) then
+				-- Availability gating is for Second Sea only. Third Sea's existing
+				-- travel/spawn workflow must not be skipped by this new guard.
+				if game.PlaceId ~= 6381829480 or objectiveSpawnPresent(q) then
+					return q
+				end
+				table.insert(unavailable, q.quest)
 			end
 		end
-		return nil
+		if #unavailable > 0 then
+			return nil, "waiting", table.concat(unavailable, ", ")
+		end
+		return nil, "done"
+	end
+
+	local function closeSecondSeaBasicDailyDialogue(quest)
+		if game.PlaceId ~= 6381829480 or quest.npc:sub(1, 5) == "Lore "
+			or quest.npc == "Tomb Event Second" then
+			return
+		end
+		local gui = LocalPlayer.PlayerGui:FindFirstChild(quest.npc)
+		local dialogue = gui and gui:FindFirstChild("Dialogue")
+		local close = gui and gui:FindFirstChild("DelGui")
+		if dialogue and dialogue.Visible and close and close:IsA("RemoteEvent") then
+			close:FireServer()
+		end
 	end
 
 	spawn(function()
@@ -19766,29 +20347,52 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
-				local current = getDailyQuestPending()
+				local current, pendingState, pendingDetail = getDailyQuestPending()
 				if not current then
-					_G.dailyQuestState = "done"
+					_G.dailyQuestState = pendingState or "done"
+					if pendingState == "waiting" then
+						_G.dailyQuestIssue = "Waiting for daily objectives: " .. pendingDetail
+					elseif pendingState == "paused" then
+						_G.dailyQuestIssue = "Another quest is active: " .. pendingDetail
+					else
+						_G.dailyQuestIssue = nil
+					end
 					return
 				end
 
 				local currentQuest = LocalPlayer:FindFirstChild("CurrentQuest")
 				local hasQuest = currentQuest and currentQuest.Value == current.quest
 
-				if _G.dailyQuestState == "idle" or _G.dailyQuestState == "done" or _G.dailyQuestCurrentNPC ~= current.npc then
+				if _G.dailyQuestState == "idle" or _G.dailyQuestState == "done"
+					or _G.dailyQuestState == "waiting" or _G.dailyQuestState == "paused"
+					or _G.dailyQuestCurrentNPC ~= current.npc or _G.dailyQuestCurrentName ~= current.quest then
 					_G.dailyQuestState = hasQuest and (current.kind == "mob" and "kill" or "objective") or "get_quest"
 					_G.dailyQuestCurrentNPC = current.npc
+					_G.dailyQuestCurrentName = current.quest
+					_G.dailyQuestIssue = nil
 					_G.dailyQuestCheckQueued = false
 					_G.dailyQuestLastCheckAttempt = 0
+					if hasQuest then
+						closeSecondSeaBasicDailyDialogue(current)
+					end
 					return
 				end
 
 				if _G.dailyQuestState == "get_quest" then
 					if hasQuest then
+						closeSecondSeaBasicDailyDialogue(current)
 						_G.dailyQuestState = current.kind == "mob" and "kill" or "objective"
 						_G.dailyQuestCheckQueued = false
 						_G.dailyQuestLastCheckAttempt = 0
 						return
+					end
+					if game.PlaceId == 6381829480 then
+						local loreQuest = current.npc:sub(1, 5) == "Lore " or current.npc == "Tomb Event Second"
+						local gui = LocalPlayer.PlayerGui:FindFirstChild(loreQuest and "LoreGUI" or current.npc)
+						local dialogue = gui and gui:FindFirstChild("Dialogue")
+						if dialogue and dialogue.Visible and gui.Enabled then
+							return -- let the visible quest picker finish before reopening this NPC
+						end
 					end
 					local npc = Workspace.AllNPC:FindFirstChild(current.npc)
 					if npc and npc:IsA("BasePart") then
