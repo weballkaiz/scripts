@@ -4,6 +4,8 @@
 -- GENESIS_SEA_KING_ACQUISITION_V1
 -- GENESIS_DAILY_BEFORE_FISHING_V17
 -- GENESIS_DAILY_NPC_SEA_TRAVEL_V22
+-- GENESIS_DAILY_PUZZLE_ADAPTIVE_V23
+-- GENESIS_DAILY_PUZZLE_CODEX_HANDOFF_V24
 -- Bundled application with reporting only to the user-configured Discord webhook.
 -- Shared event/server retrieval remains enabled; Event Hub uploads are disabled.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -43,7 +45,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_DAILY_NPC_SEA_TRAVEL_V22",
+		buildMarker = "GENESIS_DAILY_PUZZLE_CODEX_HANDOFF_V24",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -275,6 +277,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._GenesisDailyQuestPriorityCheckedAt = nil
 		sharedGlobal._GenesisDailyQuestPriorityCandidate = nil
 		sharedGlobal._GenesisDailyQuestReleaseUntil = nil
+		sharedGlobal._GenesisDailyPuzzleStatus = nil
 		sharedGlobal._autoExecuteQueued = false
 		sharedGlobal._pendingHopJobId = nil
 		executorEnvironment.SpectrumX = runtime.previousSpectrumX
@@ -6679,7 +6682,8 @@ local function run(B, T, P, DfT, ...)
 		end)
 		local marker = "-- GENESIS_WEBHOOK_ONLY_BUNDLE_V1"
 		if ok and type(src) == "string" and #src > 200 and src:sub(1, #marker) == marker
-			and src:find("-- GENESIS_DAILY_NPC_SEA_TRAVEL_V22", 1, true) then
+			and src:find("-- GENESIS_DAILY_NPC_SEA_TRAVEL_V22", 1, true)
+			and src:find("-- GENESIS_DAILY_PUZZLE_CODEX_HANDOFF_V24", 1, true) then
 			return src
 		end
 		return nil
@@ -17379,11 +17383,23 @@ local function run(B, T, P, DfT, ...)
 		local codexSubmissions = 0
 		local codexDialogueRetryAt = 0
 		local codexPuzzleRetryAt = 0
+		local codexDialogueBlockedAt = 0
 		local boxPortRequestAt = 0
 		local boxPortRequests = 0
 		local boxClickedProgress = nil
 		local boxClickedAt = 0
 		local boxClickAttempts = 0
+		-- Puzzle Mania can choose different labels for the three pieces. The game
+		-- validates the full placement, then resets the board on an incorrect order.
+		local puzzleOrders = {
+			{ 1, 2, 3 }, { 1, 3, 2 }, { 2, 1, 3 },
+			{ 2, 3, 1 }, { 3, 1, 2 }, { 3, 2, 1 },
+		}
+		local puzzleOrderIndex = 1
+		local puzzleAttemptStarted = false
+		local puzzleRecovering = false
+		local puzzleAwaitingResultAt = 0
+		local puzzleExhausted = false
 		local hoverBodyPosition = nil
 		local hoverRoot = nil
 
@@ -17468,11 +17484,18 @@ local function run(B, T, P, DfT, ...)
 					codexSubmissions = 0
 					codexDialogueRetryAt = 0
 					codexPuzzleRetryAt = 0
+					codexDialogueBlockedAt = 0
 					boxPortRequestAt = 0
 					boxPortRequests = 0
 					boxClickedProgress = nil
 					boxClickedAt = 0
 					boxClickAttempts = 0
+					puzzleOrderIndex = 1
+					puzzleAttemptStarted = false
+					puzzleRecovering = false
+					puzzleAwaitingResultAt = 0
+					puzzleExhausted = false
+					_G._GenesisDailyPuzzleStatus = nil
 					_G.dailyQuestIssue = nil
 				end
 
@@ -17766,27 +17789,117 @@ local function run(B, T, P, DfT, ...)
 						_G.dailyQuestIssue = "Puzzle Mania plate layout changed"
 						return
 					end
-					-- Verified live: Message1 (Kraken), Message2 (Shell), Message3
-					-- (Giant Crab) go on the plates from lowest to highest X.
+					local pieces, pickups, places, labels = {}, {}, {}, {}
+					local boardClear, boardComplete = true, true
+					local pickedCount, placedCount = 0, 0
 					for i = 1, 3 do
 						local piece = puzzle:FindFirstChild("Message" .. i)
 						local pickup = piece and piece:FindFirstChildOfClass("ProximityPrompt")
-						local plate = plates[i]
-						local place = plate:FindFirstChildOfClass("ProximityPrompt")
+						local place = plates[i]:FindFirstChildOfClass("ProximityPrompt")
 						if not piece or not pickup or not place then
 							_G.dailyQuestIssue = "Puzzle Mania prompt layout changed"
 							return
 						end
-						if pickup.Enabled then
-							useQuestPrompt(piece, pickup)
-							return
+						pieces[i], pickups[i], places[i] = piece, pickup, place
+						local billboard = piece:FindFirstChildOfClass("BillboardGui")
+						local textLabel = billboard and billboard:FindFirstChildOfClass("TextLabel")
+						labels[i] = textLabel and textLabel.Text or piece.Name
+						boardClear = boardClear and pickup.Enabled and place.Enabled
+						boardComplete = boardComplete and not pickup.Enabled and not place.Enabled
+						if not pickup.Enabled then pickedCount = pickedCount + 1 end
+						if not place.Enabled then placedCount = placedCount + 1 end
+					end
+					_G._GenesisDailyPuzzleStatus = {
+						labels = labels,
+						orderIndex = puzzleOrderIndex,
+						order = puzzleOrders[puzzleOrderIndex],
+						state = puzzleExhausted and "exhausted"
+							or puzzleAwaitingResultAt > 0 and "awaiting_result"
+							or puzzleRecovering and "recovering" or "placing",
+						picked = pickedCount,
+						placed = placedCount,
+					}
+					if puzzleExhausted then
+						return
+					end
+					if puzzleAwaitingResultAt > 0 then
+						if boardClear and tick() - puzzleAwaitingResultAt >= 0.6 then
+							-- A rejected full order resets every prompt. Never repeat it.
+							puzzleAwaitingResultAt = 0
+							puzzleAttemptStarted = false
+							if puzzleRecovering then
+								puzzleRecovering = false
+							else
+								puzzleOrderIndex = puzzleOrderIndex + 1
+							end
+							if puzzleOrderIndex > #puzzleOrders then
+								puzzleExhausted = true
+								_G.dailyQuestIssue = "Puzzle Mania rejected all six placement orders"
+							else
+								_G.dailyQuestIssue = nil
+							end
+							nextActionAt = tick() + 0.5
+						elseif tick() - puzzleAwaitingResultAt > 10 then
+							puzzleExhausted = true
+							_G.dailyQuestIssue = "Puzzle Mania did not complete or reset after placement"
 						end
-						if place.Enabled then
-							useQuestPrompt(plate, place)
+						return
+					end
+					if not puzzleAttemptStarted then
+						puzzleRecovering = not boardClear
+						puzzleAttemptStarted = true
+					end
+					if puzzleRecovering then
+						-- A reload can interrupt a held piece or a partly filled board.
+						-- Finish that board once, then begin the six-order search cleanly.
+						if boardClear then
+							puzzleRecovering = false
+							puzzleAttemptStarted = false
+						elseif boardComplete then
+							puzzleAwaitingResultAt = tick()
+						elseif pickedCount > placedCount then
+							for i = 1, 3 do
+								if places[i].Enabled then
+									if useQuestPrompt(plates[i], places[i]) and placedCount == 2 then
+										puzzleAwaitingResultAt = tick()
+									end
+									break
+								end
+							end
+						elseif pickedCount == placedCount then
+							for i = 1, 3 do
+								if pickups[i].Enabled then
+									useQuestPrompt(pieces[i], pickups[i])
+									break
+								end
+							end
+						else
+							puzzleExhausted = true
+							_G.dailyQuestIssue = "Puzzle Mania prompt state is inconsistent"
+						end
+						return
+					end
+					local order = puzzleOrders[puzzleOrderIndex]
+					for plateIndex = 1, 3 do
+						if places[plateIndex].Enabled then
+							local pieceIndex = order[plateIndex]
+							if pickups[pieceIndex].Enabled then
+								if pickedCount > placedCount then
+									puzzleRecovering = true
+								else
+									useQuestPrompt(pieces[pieceIndex], pickups[pieceIndex])
+								end
+							elseif useQuestPrompt(plates[plateIndex], places[plateIndex])
+								and plateIndex == 3 then
+								puzzleAwaitingResultAt = tick()
+							end
 							return
 						end
 					end
-					return -- wait for the completion record after the last placement
+					if boardComplete then
+						puzzleAwaitingResultAt = tick() -- wait for the game's completion record
+					end
+					return
 				end
 
 				if current.kind == "codex" then
@@ -17826,17 +17939,38 @@ local function run(B, T, P, DfT, ...)
 							and (not lore:IsA("LayerCollector") or lore.Enabled)
 						if dialogueOpen then
 							codexDialogueRetryAt = 0
+							local npcName = dialogue:FindFirstChild("NpcName")
+							local speaker = npcName and npcName:IsA("TextLabel") and npcName.Text or "unknown"
 							local yes = dialogue:FindFirstChild("Quest 1")
+							-- The prior Puzzle Mania researcher dialogue can remain on screen
+							-- after the game has already switched CurrentQuest to the Codex.
+							-- In the live game its visible "Hint,Please" choice advances
+							-- that stale screen; "Quest 1" is still hidden at this stage.
+							if speaker == "Sea's Researcher" then
+								local hint = dialogue:FindFirstChild("QuestAccept")
+								local hintText = hint and hint:FindFirstChild("Text")
+								yes = hintText and hintText:IsA("TextLabel")
+									and hintText.Text == "Hint,Please" and hint or nil
+							end
 							if yes and _G._GenesisIsVisibleGuiButton(yes) then
 								local sent = _G._GenesisDispatchGuiButton(yes)
 								if sent then
+									codexDialogueBlockedAt = 0
+									_G.dailyQuestIssue = nil
 									codexPuzzleRetryAt = tick() + 6
+								end
+							else
+								if codexDialogueBlockedAt == 0 then
+									codexDialogueBlockedAt = now
+								elseif now - codexDialogueBlockedAt > 10 then
+									_G.dailyQuestIssue = "Codex dialogue has no visible choice: " .. speaker
 								end
 							end
 							-- While text animates and the answer is hidden, just wait.
 							nextActionAt = tick() + 0.25
 							return
 						end
+						codexDialogueBlockedAt = 0
 						if now < codexDialogueRetryAt then
 							return
 						end
@@ -17849,6 +17983,8 @@ local function run(B, T, P, DfT, ...)
 					end
 					codexDialogueRetryAt = 0
 					codexPuzzleRetryAt = 0
+					codexDialogueBlockedAt = 0
+					_G.dailyQuestIssue = nil
 					local pack = gui:FindFirstChild("PuzzlePack")
 					if not pack then
 						_G.dailyQuestIssue = "Kraken Codex UI has no PuzzlePack"
