@@ -11,6 +11,9 @@
 -- GENESIS_KAIDO_PRIORITY_ACQUISITION_V27
 -- GENESIS_KAIDO_BOUNDED_DIALOGUE_V28
 -- GENESIS_KAIDO_RENDER_SYNC_CLICK_V29
+-- GENESIS_KAIDO_ORB_FARM_WAIT_V30
+-- GENESIS_DAILY_TRAVEL_RETRY_EVENT_PRIORITY_V31
+-- GENESIS_KAIDO_LIVE_BOSS_DAILY_YIELD_V32
 -- Discord reporting uses the user-configured webhook; event state uses Kai's configured Cloudflare Worker.
 -- Cloudflare Event Hub reads and live-state reporting are enabled when configured.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -49,7 +52,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_KAIDO_RENDER_SYNC_CLICK_V29",
+		buildMarker = "GENESIS_KAIDO_LIVE_BOSS_DAILY_YIELD_V32",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -7256,11 +7259,11 @@ local function run(B, T, P, DfT, ...)
 	_G._GenesisPriorityUpdatedAt = os.clock()
 	_G._GenesisPriorityRank = {
 		dungeon_committed = 0,
-		daily_quest_return = 1,
-		major_sea_event = 2,
-		world_raid_boss = 3,
-		serpent = 4,
-		galleon = 5,
+		major_sea_event = 1,
+		world_raid_boss = 2,
+		serpent = 3,
+		galleon = 4,
+		daily_quest_return = 5,
 		dungeon_entry = 6,
 		daily_quest = 7,
 		fishing = 8,
@@ -18739,41 +18742,6 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		-- Once there are no available dailies in this sea, getting back to the
-		-- selected main sea preempts every outside-dungeon automation. A visible
-		-- picker/transition is already committed and was handled above.
-		if GetSetting("autoDailyQuestsMaster") and _G._GenesisDailyReturnRequested then
-			local enteringReturn = _G._GenesisPriorityOwner ~= "daily_quest_return"
-			_G._GenesisSetPriorityOwner("daily_quest_return", "main_sea")
-			_G.allowCombat = false
-			if fishingOwnsWeaponSlot() then
-				_G._GenesisPrepareCombatFromFishing("daily_quest_return")
-			end
-			if _G.farmFixThread or _G.farmFixBodyPos then
-				removeFarmFix()
-			end
-			if removeChestLootFix and (enteringReturn or _G.isLootingChests) then
-				removeChestLootFix()
-			end
-			if _G.conquestActive and removeConquestPosition then
-				removeConquestPosition()
-			end
-			if _G.HakiV2 and (_G.HakiV2.lockCF or _G.HakiV2.lockConn)
-				and type(_G.HakiV2.stopLock) == "function" then
-				_G.HakiV2.stopLock()
-			end
-			if enteringReturn and type(_G._stopSeaEventBypass) == "function" then
-				_G._stopSeaEventBypass()
-			end
-			if enteringReturn and type(_G._stopAbyssalAcquisition) == "function" then
-				_G._stopAbyssalAcquisition()
-			end
-			if enteringReturn and type(_G._stopDailyQuestHover) == "function" then
-				_G._stopDailyQuestHover()
-			end
-			return
-		end
-
 		if _G.storingFruit then
 			_G._GenesisSetPriorityOwner("fruit_transaction", "storing")
 			if _G.conquestActive and removeConquestPosition then
@@ -18833,6 +18801,41 @@ local function run(B, T, P, DfT, ...)
 			_G._GenesisSetPriorityOwner("galleon", _G.currentEventName)
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
+			end
+			return
+		end
+
+		-- Daily return remains committed, but every live world boss and sea event
+		-- above may pause it. Once that higher-priority target is gone, the same
+		-- route resumes without losing its selected destination.
+		if GetSetting("autoDailyQuestsMaster") and _G._GenesisDailyReturnRequested then
+			local enteringReturn = _G._GenesisPriorityOwner ~= "daily_quest_return"
+			_G._GenesisSetPriorityOwner("daily_quest_return", "main_sea")
+			_G.allowCombat = false
+			if fishingOwnsWeaponSlot() then
+				_G._GenesisPrepareCombatFromFishing("daily_quest_return")
+			end
+			if _G.farmFixThread or _G.farmFixBodyPos then
+				removeFarmFix()
+			end
+			if removeChestLootFix and (enteringReturn or _G.isLootingChests) then
+				removeChestLootFix()
+			end
+			if _G.conquestActive and removeConquestPosition then
+				removeConquestPosition()
+			end
+			if _G.HakiV2 and (_G.HakiV2.lockCF or _G.HakiV2.lockConn)
+				and type(_G.HakiV2.stopLock) == "function" then
+				_G.HakiV2.stopLock()
+			end
+			if enteringReturn and type(_G._stopSeaEventBypass) == "function" then
+				_G._stopSeaEventBypass()
+			end
+			if enteringReturn and type(_G._stopAbyssalAcquisition) == "function" then
+				_G._stopAbyssalAcquisition()
+			end
+			if enteringReturn and type(_G._stopDailyQuestHover) == "function" then
+				_G._stopDailyQuestHover()
 			end
 			return
 		end
@@ -18999,6 +19002,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		if GetSetting("autoFarmKaido") then
+			local kaidoHandled = false
 			pcall(function()
 				local dragon = _G._GenesisFindLiveKaido()
 				local orbCount = _G._GenesisGetDragonOrbCount()
@@ -19006,6 +19010,8 @@ local function run(B, T, P, DfT, ...)
 				_G.kaidoHasOrb = orbCount >= 1
 
 				if dragon then
+					kaidoHandled = true
+					_G._GenesisSetPriorityOwner("world_raid_boss", dragon.Name)
 					if type(_G._stopKaidoAcquisition) == "function" then
 						_G._stopKaidoAcquisition("boss_spawned")
 					end
@@ -19032,6 +19038,17 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
+				-- Orb farming and summoning are fallback work, not the Kaido boss
+				-- itself. Let a pending daily objective or sea transfer reach its
+				-- own resolver branch; a live Dragon above still preempts it.
+				if dailyQuest then
+					if type(_G._stopKaidoAcquisition) == "function" then
+						_G._stopKaidoAcquisition("daily_quest")
+					end
+					return
+				end
+				kaidoHandled = true
+
 				_G.allowCombat = false
 				removeFarmFix()
 				if orbCount >= 1 then
@@ -19046,42 +19063,68 @@ local function run(B, T, P, DfT, ...)
 					_G._stopKaidoAcquisition("orb_missing")
 				end
 				_G._GenesisSetPriorityOwner("other_combat", "kaido_orb_farm")
-				for _, folder in pairs(Workspace.Monster:GetChildren()) do
-					if folder:IsA("Folder") then
-						for _, mob in pairs(folder:GetChildren()) do
-							if
-								mob:FindFirstChild("Humanoid")
-								and mob.Humanoid.Health > 0
-								and string.find(mob.Name, "Elite Skeleton")
-							then
-								usetool()
-								buso()
-								ken()
-
-								local hrp2 = mob.HumanoidRootPart
-								if hrp2 then
-									getDownwardCFrame(hrp2.CFrame)
-									local height = GetSetting("distance") or 8
-									local targetCF =
-										CFrame.new(hrp2.Position + Vector3.new(0, height, 0), hrp2.Position)
-									updateFarmFix(targetCF, hrp2)
-									if not _G.farmFixThread then
-										applyFarmFix(targetCF, hrp2)
-									end
+				local eliteSkeleton = nil
+				local monsterRoot = Workspace:FindFirstChild("Monster")
+				if monsterRoot then
+					for _, folder in pairs(monsterRoot:GetChildren()) do
+						if folder:IsA("Folder") then
+							for _, mob in pairs(folder:GetChildren()) do
+								local humanoid = mob:FindFirstChild("Humanoid")
+								local mobRoot = mob:FindFirstChild("HumanoidRootPart")
+								if
+									humanoid
+									and humanoid.Health > 0
+									and mobRoot
+									and string.find(mob.Name, "Elite Skeleton")
+								then
+									eliteSkeleton = mob
+									break
 								end
-
-								_G.pos_skill = mob.HumanoidRootPart.CFrame
-								_G.allowCombat = true
-								click()
-								autoskill()
-								handleOpeMethod()
-								return
 							end
+						end
+						if eliteSkeleton then
+							break
 						end
 					end
 				end
+
+				if eliteSkeleton then
+					usetool()
+					buso()
+					ken()
+
+					local hrp2 = eliteSkeleton:FindFirstChild("HumanoidRootPart")
+					if hrp2 then
+						getDownwardCFrame(hrp2.CFrame)
+						local height = GetSetting("distance") or 8
+						local targetCF = CFrame.new(hrp2.Position + Vector3.new(0, height, 0), hrp2.Position)
+						updateFarmFix(targetCF, hrp2)
+						if not _G.farmFixThread then
+							applyFarmFix(targetCF, hrp2)
+						end
+						_G.pos_skill = hrp2.CFrame
+						_G.allowCombat = true
+						click()
+						autoskill()
+						handleOpeMethod()
+					end
+					return
+				end
+
+				-- The previous branch returned here with no movement owner after the
+				-- current Elite Skeleton died. Wait at its spawn so the next replica is
+				-- acquired immediately. Fishing and daily work still win above this
+				-- low-priority leaf.
+				_G._GenesisSetPriorityOwner("other_combat", "kaido_orb_waiting")
+				local eliteSpawnCFrame = CFrame.new(-5926, 98, 7183)
+				local root = GetRoot(LocalPlayer.Character)
+				if root and (root.Position - eliteSpawnCFrame.Position).Magnitude > 8 then
+					tp(eliteSpawnCFrame)
+				end
 			end)
-			return
+			if kaidoHandled then
+				return
+			end
 		end
 
 		if GetSetting("autoDarkBeard") then
@@ -21651,16 +21694,25 @@ local function run(B, T, P, DfT, ...)
 					elseif route.target == current then
 						route.target = nil
 						route.targetAt = nil
+						route.transferAttempts = 0
 						_G._GenesisDailyQuestTravelPending = false
 						_G._GenesisDailyReturnRequested = false
 						dailyCoordinator.save()
-					elseif route.target and now - (tonumber(route.targetAt) or 0) < 45 then
-						return -- the transfer has been requested; await arrival
 					elseif route.target then
-						local missedSea = dailyCoordinator.sea[tonumber(route.target)]
+						-- A real UI click is not proof that the server accepted the sea
+						-- transfer. Keep the route locked for a short handoff window, then
+						-- resume the Squid approach/dialogue loop in this same pass if the
+						-- PlaceId still has not changed.
+						if now - (tonumber(route.targetAt) or 0) < 8 then
+							_G._GenesisDailyQuestTravelPending = true
+							_G._GenesisDailyReturnRequested = tonumber(route.target) == main and current ~= main
+							return
+						end
 						route.target = nil
-						dailyCoordinator.travelRetry(route, now,
-							"NPC sea transfer was not confirmed" .. (missedSea and " toward " .. missedSea.label or "") .. ".", 60)
+						route.targetAt = nil
+						route.retryAt = nil
+						route.transferAttempts = (tonumber(route.transferAttempts) or 0) + 1
+						dailyCoordinator.save()
 					end
 				end
 
