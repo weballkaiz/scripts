@@ -10,6 +10,7 @@
 -- GENESIS_SECOND_SEA_DAILY_OBJECTIVES_V26
 -- GENESIS_KAIDO_PRIORITY_ACQUISITION_V27
 -- GENESIS_KAIDO_BOUNDED_DIALOGUE_V28
+-- GENESIS_KAIDO_RENDER_SYNC_CLICK_V29
 -- Discord reporting uses the user-configured webhook; event state uses Kai's configured Cloudflare Worker.
 -- Cloudflare Event Hub reads and live-state reporting are enabled when configured.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -48,7 +49,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_KAIDO_BOUNDED_DIALOGUE_V28",
+		buildMarker = "GENESIS_KAIDO_RENDER_SYNC_CLICK_V29",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -20052,6 +20053,11 @@ local function run(B, T, P, DfT, ...)
 			originalPosition = button.Position
 			button.Size = UDim2.new(10, 0, 10, 0)
 			button.Position = UDim2.new(-1.9, 0, -5.5, 0)
+			-- Absolute bounds and GUI hit-testing do not adopt the temporary
+			-- geometry until a render boundary. Clicking in this same frame can
+			-- therefore miss Accept even though the properties already changed.
+			RunService.RenderStepped:Wait()
+			RunService.RenderStepped:Wait()
 		end
 
 		local screenSize = camera.ViewportSize
@@ -20065,7 +20071,9 @@ local function run(B, T, P, DfT, ...)
 
 		if button and originalSize and originalPosition then
 			task.delay(0.35, function()
-				if button and button.Parent and button.Visible then
+				-- Restore even after Accept becomes hidden so a later summon cycle
+				-- cannot inherit the temporary full-dialogue hitbox.
+				if button and button.Parent then
 					button.Size = originalSize
 					button.Position = originalPosition
 				end
