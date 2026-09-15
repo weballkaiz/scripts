@@ -15,6 +15,7 @@
 -- GENESIS_DAILY_TRAVEL_RETRY_EVENT_PRIORITY_V31
 -- GENESIS_KAIDO_LIVE_BOSS_DAILY_YIELD_V32
 -- GENESIS_KAIDO_SEA2_SCOPE_V33
+-- GENESIS_CURRENT_SEA_PRIORITY_SCOPE_V34
 -- Discord reporting uses the user-configured webhook; event state uses Kai's configured Cloudflare Worker.
 -- Cloudflare Event Hub reads and live-state reporting are enabled when configured.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -53,7 +54,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_KAIDO_SEA2_SCOPE_V33",
+		buildMarker = "GENESIS_CURRENT_SEA_PRIORITY_SCOPE_V34",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -270,6 +271,13 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._GenesisDispatchM1IfReady = nil
 		sharedGlobal._GenesisSkillLastSent = nil
 		sharedGlobal._GenesisSkillReady = nil
+		sharedGlobal._GenesisIsFeatureEnabledInCurrentSea = nil
+		sharedGlobal._GenesisGetCurrentSeaSelectedBoss = nil
+		sharedGlobal._GenesisGetCurrentSeaSelectedMaterial = nil
+		sharedGlobal._GenesisSettingPlaceIds = nil
+		sharedGlobal.isFeatureEnabledInCurrentSea = nil
+		sharedGlobal.getCurrentSeaSelectedBoss = nil
+		sharedGlobal.getCurrentSeaSelectedMaterial = nil
 		sharedGlobal._GenesisDailyQuestTravelPending = nil
 		sharedGlobal._GenesisDailyReturnRequested = nil
 		sharedGlobal._GenesisDailyTravelWarningAt = nil
@@ -301,6 +309,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		end
 		sharedGlobal._GenesisEventHubClient = nil
 		sharedGlobal._GenesisFruitLiveState = nil
+		sharedGlobal.fishingPositionIssue = nil
 		sharedGlobal._GenesisManualRefreshAt = nil
 		sharedGlobal.GENESIS_SCRIPT_URL = nil
 		sharedGlobal.GENESIS_SCRIPT_FILE = nil
@@ -7047,6 +7056,10 @@ local function run(B, T, P, DfT, ...)
 		autoFish = { false, "autoFish" },
 		fishCFrame = { "CFrame.new(0,0,0)", "fishCFrame" },
 		fishPositionSet = { false, "fishPositionSet" },
+		-- A CFrame has no sea identity by itself. Bind saved fishing positions to
+		-- the PlaceId where the user recorded them so a sea transfer cannot reuse
+		-- coordinates from a different world.
+		fishPlaceId = { 0, "fishPlaceId" },
 		fishWhenNotSpawned = { false, "fishWhenNotSpawned" },
 		-- Hidden loadout fallback. The rod occupies the game's Sword/Primary slot,
 		-- so preserve the last real sword across fresh joins and script reloads.
@@ -8352,6 +8365,93 @@ local function run(B, T, P, DfT, ...)
 		end)
 	end
 
+	-- Saved settings are preferences, not proof that their target exists in this
+	-- sea. This is the single eligibility boundary used by priority resolution and
+	-- by workers that can otherwise move independently of the resolver.
+	_G._GenesisSettingPlaceIds = {
+		autoFarmKaido = 6381829480,
+		autoDarkBeard = 6381829480,
+		autoCrimsonDemon = 6381829480,
+		autoIceKing = 6381829480,
+		autoSKHD = 6381829480,
+		autoGhostShip = 6381829480,
+		autoRaidBoss_ExpertSwordman = 4520749081,
+		autoRaidBoss_MsMother = 6381829480,
+		autoRaidBoss_KingSamurai = 6381829480,
+		autoHuntPtero = 15759515082,
+		autoRaidBoss_BushidoApe = 15759515082,
+		autoRaidBoss_LordOfSaber = 15759515082,
+		autoKillKraken = 15759515082,
+		autoKillDrakenfyr = 15759515082,
+		autoKillAbyssalTyrant = 15759515082,
+		autoKillDeepseaCrusher = 15759515082,
+		autoKillGalleons = 15759515082,
+		autoCollectPearl = 15759515082,
+		autoDailyQuest = 15759515082,
+		autoSecondSeaDailyQuest = 6381829480,
+	}
+
+	getCurrentSeaSelectedBoss = function()
+		if not GetSetting("autoFarmBoss") or type(getBossNameFromDropdown) ~= "function"
+			or type(getBossCFrame) ~= "function" then
+			return nil, nil
+		end
+		local selectedBoss = GetSetting("selectedBoss")
+		if type(selectedBoss) ~= "string" or selectedBoss == "" then
+			return nil, nil
+		end
+		local bossName = getBossNameFromDropdown(selectedBoss)
+		local bossCFrame = bossName and getBossCFrame(bossName) or nil
+		if not bossName or typeof(bossCFrame) ~= "CFrame" then
+			return nil, nil
+		end
+		return bossName, bossCFrame
+	end
+
+	getCurrentSeaSelectedMaterial = function()
+		if not GetSetting("farmmaterial") or type(getMaterialsForCurrentSea) ~= "function" then
+			return nil
+		end
+		if game.PlaceId ~= 4520749081 and game.PlaceId ~= 6381829480 and game.PlaceId ~= 15759515082 then
+			return nil
+		end
+		local selectedMaterial = GetSetting("material")
+		for _, materialName in ipairs(getMaterialsForCurrentSea()) do
+			if selectedMaterial == materialName then
+				return selectedMaterial
+			end
+		end
+		return nil
+	end
+
+	isFeatureEnabledInCurrentSea = function(settingKey)
+		if not GetSetting(settingKey) then
+			return false
+		end
+		local requiredPlaceId = _G._GenesisSettingPlaceIds[settingKey]
+		if requiredPlaceId and game.PlaceId ~= requiredPlaceId then
+			return false
+		end
+		if settingKey == "autoSecondSea" then
+			local playerStats = LocalPlayer:FindFirstChild("PlayerStats")
+			local levelValue = playerStats and playerStats:FindFirstChild("lvl")
+			return game.PlaceId == 4520749081 and levelValue ~= nil and levelValue.Value >= 2250
+		end
+		if settingKey == "autoThirdSea" then
+			return game.PlaceId == 4520749081 or game.PlaceId == 6381829480
+		end
+		if settingKey == "autoFarmBoss" then
+			return getCurrentSeaSelectedBoss() ~= nil
+		end
+		if settingKey == "farmmaterial" then
+			return getCurrentSeaSelectedMaterial() ~= nil
+		end
+		return true
+	end
+	_G._GenesisIsFeatureEnabledInCurrentSea = isFeatureEnabledInCurrentSea
+	_G._GenesisGetCurrentSeaSelectedBoss = getCurrentSeaSelectedBoss
+	_G._GenesisGetCurrentSeaSelectedMaterial = getCurrentSeaSelectedMaterial
+
 	_G.isAnyCombatActive = function()
 		if _G.isLootingChests or _G.storingFruit or _G.seaEventActive then
 			return true
@@ -8362,11 +8462,9 @@ local function run(B, T, P, DfT, ...)
 		if _G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation() then
 			return true
 		end
-		-- Auto Kaido is a dormant saved preference outside Second Sea. It must not
-		-- make unrelated seas look combat-busy merely because the toggle persists.
-		if game.PlaceId == 6381829480 and GetSetting("autoFarmKaido") then
-			return true
-		end
+		-- Only continuous current-sea work belongs here. Live sea events, raid
+		-- bosses, conquest, and daily travel are resolved from observed state above
+		-- this fallback; their saved toggles alone must never block other work.
 		local keys = {
 			"auto_farm",
 			"farmmaterial",
@@ -8374,32 +8472,15 @@ local function run(B, T, P, DfT, ...)
 			"easybounty",
 			"autoKillMobs",
 			"autoFarmBoss",
+			"autoFarmKaido",
 			"autoDarkBeard",
 			"autoCrimsonDemon",
 			"autoIceKing",
 			"autoSecondSea",
 			"autoThirdSea",
-			"autoHuntSerpent",
-			"autoDailyQuestsMaster",
-			"autoDailyQuest",
-			"autoSecondSeaDailyQuest",
-			"autoHuntPtero",
-			"autoRaidBoss_ExpertSwordman",
-			"autoRaidBoss_MsMother",
-			"autoRaidBoss_KingSamurai",
-			"autoRaidBoss_BushidoApe",
-			"autoRaidBoss_LordOfSaber",
-			"autoSKHD",
-			"autoGhostShip",
-			"autoConquest",
-			"autoKillKraken",
-			"autoKillDrakenfyr",
-			"autoKillAbyssalTyrant",
-			"autoKillDeepseaCrusher",
-			"autoKillGalleons",
 		}
 		for _, k in ipairs(keys) do
-			if GetSetting(k) then
+			if isFeatureEnabledInCurrentSea(k) then
 				return true
 			end
 		end
@@ -8495,6 +8576,9 @@ local function run(B, T, P, DfT, ...)
 	_G._removeChestLootFix = removeChestLootFix
 
 	local function startLootTimer(eventType, duration)
+		if not isFeatureEnabledInCurrentSea("autoSKHD") then
+			return
+		end
 		if _G.lootThreads[eventType] then
 			_G.lootThreads[eventType] = nil
 		end
@@ -8553,7 +8637,7 @@ local function run(B, T, P, DfT, ...)
 				end
 
 				-- Immediate kill switch if autoSKHD was disabled.
-				if not GetSetting("autoSKHD") then
+				if not isFeatureEnabledInCurrentSea("autoSKHD") then
 					break
 				end
 
@@ -8622,7 +8706,7 @@ local function run(B, T, P, DfT, ...)
 			if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
 				return
 			end
-			if not GetSetting("autoSKHD") then
+			if not isFeatureEnabledInCurrentSea("autoSKHD") then
 				return
 			end
 			if eventType == "SeaKing" then
@@ -8988,33 +9072,34 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		local farmActive = GetSetting("auto_farm")
-			or GetSetting("farmmaterial")
-			or GetSetting("allboss")
-			or GetSetting("easybounty")
-			or GetSetting("autoKillMobs")
-			or GetSetting("autoFarmBoss")
-			or GetSetting("autoDarkBeard")
-			or (game.PlaceId == 6381829480 and GetSetting("autoFarmKaido"))
-			or GetSetting("autoCrimsonDemon")
-			or GetSetting("autoIceKing")
+		local farmActive = isFeatureEnabledInCurrentSea("auto_farm")
+			or isFeatureEnabledInCurrentSea("farmmaterial")
+			or isFeatureEnabledInCurrentSea("allboss")
+			or isFeatureEnabledInCurrentSea("easybounty")
+			or isFeatureEnabledInCurrentSea("autoKillMobs")
+			or isFeatureEnabledInCurrentSea("autoFarmBoss")
+			or isFeatureEnabledInCurrentSea("autoDarkBeard")
+			or isFeatureEnabledInCurrentSea("autoFarmKaido")
+			or isFeatureEnabledInCurrentSea("autoCrimsonDemon")
+			or isFeatureEnabledInCurrentSea("autoIceKing")
 			or _G.seaEventActive
-			or GetSetting("autoHuntPtero")
-			or GetSetting("autoRaidBoss_ExpertSwordman")
-			or GetSetting("autoRaidBoss_MsMother")
-			or GetSetting("autoRaidBoss_KingSamurai")
-			or GetSetting("autoRaidBoss_BushidoApe")
-			or GetSetting("autoRaidBoss_LordOfSaber")
+			or isFeatureEnabledInCurrentSea("autoHuntPtero")
+			or isFeatureEnabledInCurrentSea("autoRaidBoss_ExpertSwordman")
+			or isFeatureEnabledInCurrentSea("autoRaidBoss_MsMother")
+			or isFeatureEnabledInCurrentSea("autoRaidBoss_KingSamurai")
+			or isFeatureEnabledInCurrentSea("autoRaidBoss_BushidoApe")
+			or isFeatureEnabledInCurrentSea("autoRaidBoss_LordOfSaber")
 			or (GetSetting("autoDailyQuestsMaster") and
-				(GetSetting("autoDailyQuest") or GetSetting("autoSecondSeaDailyQuest")))
-			or GetSetting("autoSKHD")
-			or GetSetting("autoGhostShip")
-			or GetSetting("autoKillKraken")
-			or GetSetting("autoKillDrakenfyr")
-			or GetSetting("autoKillAbyssalTyrant")
-			or GetSetting("autoKillDeepseaCrusher")
-			or GetSetting("autoKillGalleons")
-			or GetSetting("autoHuntSerpent")
+				(isFeatureEnabledInCurrentSea("autoDailyQuest")
+					or isFeatureEnabledInCurrentSea("autoSecondSeaDailyQuest")))
+			or isFeatureEnabledInCurrentSea("autoSKHD")
+			or isFeatureEnabledInCurrentSea("autoGhostShip")
+			or isFeatureEnabledInCurrentSea("autoKillKraken")
+			or isFeatureEnabledInCurrentSea("autoKillDrakenfyr")
+			or isFeatureEnabledInCurrentSea("autoKillAbyssalTyrant")
+			or isFeatureEnabledInCurrentSea("autoKillDeepseaCrusher")
+			or isFeatureEnabledInCurrentSea("autoKillGalleons")
+			or isFeatureEnabledInCurrentSea("autoHuntSerpent")
 		if not farmActive then
 			return
 		end
@@ -10606,6 +10691,12 @@ local function run(B, T, P, DfT, ...)
 		if type(state) ~= "table" then
 			return false
 		end
+		if not isFeatureEnabledInCurrentSea("autoKillAbyssalTyrant") then
+			if type(_G._stopAbyssalAcquisition) == "function" then
+				_G._stopAbyssalAcquisition()
+			end
+			return false
+		end
 		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
 			if type(_G._stopAbyssalAcquisition) == "function" then
 				_G._stopAbyssalAcquisition()
@@ -10999,6 +11090,12 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	_G._GenesisApproachSeaKingIsland = function(island)
+		if not isFeatureEnabledInCurrentSea("autoSKHD") then
+			removeChestLootFix()
+			_G.isLootingChests = false
+			_G.seaEventActive = false
+			return false
+		end
 		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
 			return true
 		end
@@ -11087,8 +11184,8 @@ local function run(B, T, P, DfT, ...)
 			end
 		end
 
-		local autoSKHD = GetSetting("autoSKHD")
-		local autoGhostShip = GetSetting("autoGhostShip")
+		local autoSKHD = isFeatureEnabledInCurrentSea("autoSKHD")
+		local autoGhostShip = isFeatureEnabledInCurrentSea("autoGhostShip")
 
 		-- Serpent is independent (it does not require SK/HD or Ghost Ship).
 		if wantsSerpent and GetSetting("autoHuntSerpent") then
@@ -11160,13 +11257,13 @@ local function run(B, T, P, DfT, ...)
 							and target.Humanoid.Health > 0
 						do
 							task.wait(0.2)
-							if not GetSetting("autoSKHD") then
+							if not isFeatureEnabledInCurrentSea("autoSKHD") then
 								break
 							end
 						end
 
 						_G.monitoringHydra = false
-						if not GetSetting("autoSKHD") then
+						if not isFeatureEnabledInCurrentSea("autoSKHD") then
 							return
 						end
 						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
@@ -11181,10 +11278,14 @@ local function run(B, T, P, DfT, ...)
 							(not _G._GenesisUpdateDungeonCommit or not _G._GenesisUpdateDungeonCommit())
 							and _G._GenesisPrepareCombatFromFishing
 							and not _G._GenesisPrepareCombatFromFishing("hydra_loot")
-							and GetSetting("autoSKHD")
+							and isFeatureEnabledInCurrentSea("autoSKHD")
 							and os.clock() < handoffDeadline
 						do
 							task.wait(0.1)
+						end
+						if not isFeatureEnabledInCurrentSea("autoSKHD") then
+							_G.isLootingChests = false
+							return
 						end
 						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
 							_G.isLootingChests = false
@@ -11297,13 +11398,13 @@ local function run(B, T, P, DfT, ...)
 							and target.Humanoid.Health > 0
 						do
 							task.wait(0.2)
-							if not GetSetting("autoSKHD") then
+							if not isFeatureEnabledInCurrentSea("autoSKHD") then
 								break
 							end
 						end
 
 						_G.monitoringSeaKing = false
-						if not GetSetting("autoSKHD") then
+						if not isFeatureEnabledInCurrentSea("autoSKHD") then
 							return
 						end
 						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
@@ -11316,10 +11417,14 @@ local function run(B, T, P, DfT, ...)
 							(not _G._GenesisUpdateDungeonCommit or not _G._GenesisUpdateDungeonCommit())
 							and _G._GenesisPrepareCombatFromFishing
 							and not _G._GenesisPrepareCombatFromFishing("sea_king_loot")
-							and GetSetting("autoSKHD")
+							and isFeatureEnabledInCurrentSea("autoSKHD")
 							and os.clock() < handoffDeadline
 						do
 							task.wait(0.1)
+						end
+						if not isFeatureEnabledInCurrentSea("autoSKHD") then
+							_G.isLootingChests = false
+							return
 						end
 						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
 							_G.isLootingChests = false
@@ -11429,7 +11534,7 @@ local function run(B, T, P, DfT, ...)
 					return "daily_return"
 				end
 				-- Turning the feature off remains an immediate manual kill switch.
-				if not GetSetting("autoGhostShip") then
+				if not isFeatureEnabledInCurrentSea("autoGhostShip") then
 					return "disabled"
 				end
 				return nil
@@ -11574,7 +11679,7 @@ local function run(B, T, P, DfT, ...)
 				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
 					return true
 				end
-				if not GetSetting("autoGhostShip") then
+				if not isFeatureEnabledInCurrentSea("autoGhostShip") then
 					return true
 				end
 				local remainingChests = 0
@@ -12454,8 +12559,11 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	function getMaterialQuest()
-		local selectedMaterial = GetSetting("material")
+		local selectedMaterial = getCurrentSeaSelectedMaterial()
 		local questName = ""
+		if not selectedMaterial then
+			return questName
+		end
 
 		if game.PlaceId == 15759515082 then
 			if selectedMaterial == "Sea Artifact" then
@@ -12525,7 +12633,14 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	function material()
-		local selectedMaterial = GetSetting("material")
+		local selectedMaterial = getCurrentSeaSelectedMaterial()
+		-- Never carry a target list or coordinates across a sea transfer. An
+		-- ineligible saved selection leaves this worker completely inert.
+		_G.mob = {}
+		_G.MX, _G.MY, _G.MZ = nil, nil, nil
+		if not selectedMaterial then
+			return false
+		end
 
 		if game.PlaceId == 15759515082 then
 			if selectedMaterial == "Sea Artifact" then
@@ -12625,6 +12740,7 @@ local function run(B, T, P, DfT, ...)
 				_G.MZ, _G.MY, _G.MX = 4319, 20, -2849
 			end
 		end
+		return #_G.mob > 0 and type(_G.MX) == "number" and type(_G.MY) == "number" and type(_G.MZ) == "number"
 	end
 
 	function getMaterialsForCurrentSea()
@@ -12646,7 +12762,7 @@ local function run(B, T, P, DfT, ...)
 				"Dark Beard's Totem",
 				"Essence of Fire",
 			}
-		else
+		elseif game.PlaceId == 4520749081 then
 			return {
 				"Rusted Scrap",
 				"Fresh Fish",
@@ -12658,6 +12774,7 @@ local function run(B, T, P, DfT, ...)
 				"Twilight's Orb",
 			}
 		end
+		return {}
 	end
 
 	_G.table_bosses = {}
@@ -13719,7 +13836,7 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	local function collectPearls()
-		if not GetSetting("autoCollectPearl") then
+		if not isFeatureEnabledInCurrentSea("autoCollectPearl") then
 			return
 		end
 		if _G.collectingPearls then
@@ -13728,6 +13845,10 @@ local function run(B, T, P, DfT, ...)
 		-- Pearl collection moves the root part directly. Let combat/event modes own
 		-- movement instead of starting a second controller alongside them.
 		if _G.isAnyCombatActive and _G.isAnyCombatActive() then
+			return
+		end
+		if _G._GenesisDailyQuestTravelPending or _G._GenesisDailyReturnRequested
+			or (_G._GenesisGetDailyQuestPriorityCandidate and _G._GenesisGetDailyQuestPriorityCandidate()) then
 			return
 		end
 
@@ -13756,7 +13877,11 @@ local function run(B, T, P, DfT, ...)
 
 		pcall(function()
 			for _, clam in ipairs(clams) do
-				if not GetSetting("autoCollectPearl") or _G.seaEventActive or _G.isLootingChests or _G.storingFruit then
+				if not isFeatureEnabledInCurrentSea("autoCollectPearl")
+					or _G.seaEventActive or _G.isLootingChests or _G.storingFruit
+					or _G._GenesisDailyQuestTravelPending or _G._GenesisDailyReturnRequested
+					or (_G._GenesisGetDailyQuestPriorityCandidate
+						and _G._GenesisGetDailyQuestPriorityCandidate()) then
 					break
 				end
 				local clamPos = nil
@@ -13782,8 +13907,12 @@ local function run(B, T, P, DfT, ...)
 					end
 
 					local startTime = tick()
-					while tick() - startTime < 1.5 do
-						if not GetSetting("autoCollectPearl") or _G.seaEventActive or _G.isLootingChests or _G.storingFruit then
+				while tick() - startTime < 1.5 do
+					if not isFeatureEnabledInCurrentSea("autoCollectPearl")
+						or _G.seaEventActive or _G.isLootingChests or _G.storingFruit
+						or _G._GenesisDailyQuestTravelPending or _G._GenesisDailyReturnRequested
+						or (_G._GenesisGetDailyQuestPriorityCandidate
+							and _G._GenesisGetDailyQuestPriorityCandidate()) then
 							break
 						end
 						VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
@@ -14219,21 +14348,27 @@ local function run(B, T, P, DfT, ...)
 		Size = UDim2.new(1, 0, 0, 25),
 	})
 
-	local savedFishCF = GetSetting("fishCFrame")
-	if savedFishCF and savedFishCF ~= "CFrame.new(0,0,0)" then
-		pcall(function()
-			local cf = loadstring("return " .. savedFishCF)()
-			if cf then
-				fishPositionLabel.SetText(
-					"Pos: "
-						.. tostring(math.floor(cf.X))
-						.. ", "
-						.. tostring(math.floor(cf.Y))
-						.. ", "
-						.. tostring(math.floor(cf.Z))
-				)
-			end
-		end)
+	do
+		local savedFishCF = GetSetting("fishCFrame")
+		local savedFishPlaceId = tonumber(GetSetting("fishPlaceId")) or 0
+		if savedFishCF and savedFishCF ~= "CFrame.new(0,0,0)" and savedFishPlaceId == game.PlaceId then
+			pcall(function()
+				local cf = loadstring("return " .. savedFishCF)()
+				if cf then
+					fishPositionLabel.SetText(
+						"Pos: "
+							.. tostring(math.floor(cf.X))
+							.. ", "
+							.. tostring(math.floor(cf.Y))
+							.. ", "
+							.. tostring(math.floor(cf.Z))
+					)
+				end
+			end)
+		elseif savedFishCF and savedFishCF ~= "CFrame.new(0,0,0)" then
+			fishPositionLabel.SetText(savedFishPlaceId == 0 and "Pos: Re-save to bind this sea"
+				or "Pos: Saved for another sea")
+		end
 	end
 
 	Window:CreateButton(uiSections.farmFishing, {
@@ -14244,6 +14379,7 @@ local function run(B, T, P, DfT, ...)
 				local cfString = "CFrame.new(" .. tostring(root.CFrame) .. ")"
 				saveAndApply("fishCFrame", cfString)
 				saveAndApply("fishPositionSet", true)
+				saveAndApply("fishPlaceId", game.PlaceId)
 				fishPositionLabel.SetText(
 					"Pos: "
 						.. tostring(math.floor(root.Position.X))
@@ -16164,27 +16300,28 @@ local function run(B, T, P, DfT, ...)
 				end
 
 				if
-					GetSetting("auto_farm")
-					or GetSetting("farmmaterial")
-					or GetSetting("allboss")
-					or GetSetting("easybounty")
-					or GetSetting("autoKillMobs")
-					or GetSetting("autoFarmBoss")
-					or (game.PlaceId == 6381829480 and GetSetting("autoFarmKaido"))
-					or GetSetting("autoDarkBeard")
-					or GetSetting("autoCrimsonDemon")
-					or GetSetting("autoIceKing")
-					or GetSetting("autoSecondSea")
-					or GetSetting("autoThirdSea")
-					or GetSetting("autoHuntSerpent")
+					isFeatureEnabledInCurrentSea("auto_farm")
+					or isFeatureEnabledInCurrentSea("farmmaterial")
+					or isFeatureEnabledInCurrentSea("allboss")
+					or isFeatureEnabledInCurrentSea("easybounty")
+					or isFeatureEnabledInCurrentSea("autoKillMobs")
+					or isFeatureEnabledInCurrentSea("autoFarmBoss")
+					or isFeatureEnabledInCurrentSea("autoFarmKaido")
+					or isFeatureEnabledInCurrentSea("autoDarkBeard")
+					or isFeatureEnabledInCurrentSea("autoCrimsonDemon")
+					or isFeatureEnabledInCurrentSea("autoIceKing")
+					or isFeatureEnabledInCurrentSea("autoSecondSea")
+					or isFeatureEnabledInCurrentSea("autoThirdSea")
+					or isFeatureEnabledInCurrentSea("autoHuntSerpent")
 					or (GetSetting("autoDailyQuestsMaster") and
-						(GetSetting("autoDailyQuest") or GetSetting("autoSecondSeaDailyQuest")))
-					or GetSetting("autoHuntPtero")
-					or GetSetting("autoRaidBoss_ExpertSwordman")
-					or GetSetting("autoRaidBoss_MsMother")
-					or GetSetting("autoRaidBoss_KingSamurai")
-					or GetSetting("autoRaidBoss_BushidoApe")
-					or GetSetting("autoRaidBoss_LordOfSaber")
+						(isFeatureEnabledInCurrentSea("autoDailyQuest")
+							or isFeatureEnabledInCurrentSea("autoSecondSeaDailyQuest")))
+					or isFeatureEnabledInCurrentSea("autoHuntPtero")
+					or isFeatureEnabledInCurrentSea("autoRaidBoss_ExpertSwordman")
+					or isFeatureEnabledInCurrentSea("autoRaidBoss_MsMother")
+					or isFeatureEnabledInCurrentSea("autoRaidBoss_KingSamurai")
+					or isFeatureEnabledInCurrentSea("autoRaidBoss_BushidoApe")
+					or isFeatureEnabledInCurrentSea("autoRaidBoss_LordOfSaber")
 					or _G.seaEventActive
 				then
 					local tools = GetSetting("selectedTools")
@@ -16311,7 +16448,8 @@ local function run(B, T, P, DfT, ...)
 		while task.wait(0.5) do
 			pcall(function()
 				local fishCF = GetSetting("fishCFrame")
-				if fishCF and fishCF ~= "CFrame.new(0,0,0)" then
+				local fishPlaceId = tonumber(GetSetting("fishPlaceId")) or 0
+				if fishCF and fishCF ~= "CFrame.new(0,0,0)" and fishPlaceId == game.PlaceId then
 					pcall(function()
 						local cf = loadstring("return " .. fishCF)()
 						if cf then
@@ -16326,6 +16464,10 @@ local function run(B, T, P, DfT, ...)
 							fishPositionLabel.Label.TextColor3 = SpectrumX.Theme.TextSecondary
 						end
 					end)
+				elseif fishCF and fishCF ~= "CFrame.new(0,0,0)" then
+					fishPositionLabel.SetText(fishPlaceId == 0 and "Pos: Re-save to bind this sea"
+						or "Pos: Saved for another sea")
+					fishPositionLabel.Label.TextColor3 = SpectrumX.Theme.Warning
 				else
 					fishPositionLabel.SetText("Position: Not Set")
 					fishPositionLabel.Label.TextColor3 = SpectrumX.Theme.TextSecondary
@@ -16989,11 +17131,18 @@ local function run(B, T, P, DfT, ...)
 		if not fishCF or fishCF == "CFrame.new(0,0,0)" then
 			return nil
 		end
+		local fishPlaceId = tonumber(GetSetting("fishPlaceId")) or 0
+		if fishPlaceId ~= game.PlaceId then
+			_G.fishingPositionIssue = fishPlaceId == 0 and "Saved fishing position has no sea binding"
+				or "Saved fishing position belongs to another sea"
+			return nil
+		end
 		local ok, cf = pcall(function()
 			local buildCFrame = loadstring("return " .. fishCF)
 			return buildCFrame()
 		end)
 		if ok and typeof(cf) == "CFrame" then
+			_G.fishingPositionIssue = nil
 			return cf
 		end
 		return nil
@@ -17046,6 +17195,10 @@ local function run(B, T, P, DfT, ...)
 
 	_G._GenesisGetDragonOrbCount = function()
 		local cache = _G._GenesisKaidoCache
+		if game.PlaceId ~= 6381829480 then
+			cache.orbCount = 0
+			return 0
+		end
 		local now = os.clock()
 		if now - cache.orbCheckedAt < 0.2 then
 			return cache.orbCount
@@ -17100,7 +17253,7 @@ local function run(B, T, P, DfT, ...)
 		-- including when another player spawned it and regardless of whether the
 		-- downtime-only "Fish Between Boss Spawns" option is enabled. The summon
 		-- NPC itself is deliberately not considered a boss target here.
-		if game.PlaceId == 6381829480 and GetSetting("autoFarmKaido") then
+		if isFeatureEnabledInCurrentSea("autoFarmKaido") then
 			_G.kaidoDragon = _G._GenesisFindLiveKaido()
 			if _G.kaidoDragon then
 				bossFishingBlockCached = true
@@ -17118,11 +17271,11 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		if
-			(game.PlaceId == 6381829480 and GetSetting("autoFarmKaido") and isAlive(_G.kaidoDragon))
-			or (GetSetting("autoDarkBeard") and isAlive(_G.darkBeardBoss))
-			or (GetSetting("autoCrimsonDemon") and isAlive(_G.crimsonBoss))
-			or (GetSetting("autoIceKing") and isAlive(_G.iceKingBoss))
-			or (GetSetting("autoThirdSea") and isAlive(_G.thirdSeaKrakenBoss))
+			(isFeatureEnabledInCurrentSea("autoFarmKaido") and isAlive(_G.kaidoDragon))
+			or (isFeatureEnabledInCurrentSea("autoDarkBeard") and isAlive(_G.darkBeardBoss))
+			or (isFeatureEnabledInCurrentSea("autoCrimsonDemon") and isAlive(_G.crimsonBoss))
+			or (isFeatureEnabledInCurrentSea("autoIceKing") and isAlive(_G.iceKingBoss))
+			or (isFeatureEnabledInCurrentSea("autoThirdSea") and isAlive(_G.thirdSeaKrakenBoss))
 		then
 			bossFishingBlockCached = true
 			return true
@@ -17134,29 +17287,25 @@ local function run(B, T, P, DfT, ...)
 			return true
 		end
 
-		local selectedBossName = nil
-		if GetSetting("autoFarmBoss") then
-			local selectedBoss = GetSetting("selectedBoss")
-			selectedBossName = _G.selectedBossName or getBossNameFromDropdown(selectedBoss)
-		end
+		local selectedBossName = getCurrentSeaSelectedBoss()
 
 		local matchNames = {}
-		if game.PlaceId == 6381829480 and GetSetting("autoFarmKaido") then
+		if isFeatureEnabledInCurrentSea("autoFarmKaido") then
 			table.insert(matchNames, "Dragon")
 		end
-		if GetSetting("autoDarkBeard") then
+		if isFeatureEnabledInCurrentSea("autoDarkBeard") then
 			table.insert(matchNames, "Dark Beard")
 		end
-		if GetSetting("autoCrimsonDemon") then
+		if isFeatureEnabledInCurrentSea("autoCrimsonDemon") then
 			table.insert(matchNames, "Crimson Demon")
 		end
-		if GetSetting("autoIceKing") then
+		if isFeatureEnabledInCurrentSea("autoIceKing") then
 			table.insert(matchNames, "Ice King")
 		end
-		if GetSetting("autoSecondSea") then
+		if isFeatureEnabledInCurrentSea("autoSecondSea") then
 			table.insert(matchNames, "Seasoned Fishman")
 		end
-		if GetSetting("autoThirdSea") then
+		if isFeatureEnabledInCurrentSea("autoThirdSea") then
 			table.insert(matchNames, "Kraken")
 			table.insert(matchNames, "Tentacle")
 		end
@@ -18266,7 +18415,8 @@ local function run(B, T, P, DfT, ...)
 	spawn(function()
 		while task.wait(1) do
 			pcall(function()
-				if GetSetting("farmmaterial") and GetSetting("getQuestMaterial") and not _G.seaEventActive then
+				if isFeatureEnabledInCurrentSea("farmmaterial")
+					and GetSetting("getQuestMaterial") and not _G.seaEventActive then
 					local questName = getMaterialQuest()
 					if questName and questName ~= "" then
 						ReplicatedStorage.Chest.Remotes.Functions.Quest:InvokeServer("take", questName)
@@ -18650,23 +18800,42 @@ local function run(B, T, P, DfT, ...)
 		updateRaidCache()
 		updateRaidStatusLabel()
 
+		-- Kaido's live Dragon is a world boss, so it belongs in this early phase
+		-- with the other current-sea raid bosses. Orb farming and summoning remain
+		-- in the low-priority Kaido fallback later in the resolver.
+		local activeTarget = cachedTarget
+		local activeBossName = cachedBossName
+		if isFeatureEnabledInCurrentSea("autoFarmKaido")
+			and type(_G._GenesisFindLiveKaido) == "function" then
+			local liveKaido = _G._GenesisFindLiveKaido()
+			if liveKaido then
+				activeTarget = liveKaido
+				activeBossName = liveKaido.Name
+				_G.kaidoDragon = liveKaido
+				if type(_G._stopKaidoAcquisition) == "function" then
+					_G._stopKaidoAcquisition("boss_spawned")
+				end
+			end
+		end
+
 		if
-			cachedTarget
-			and cachedTarget.Parent
-			and cachedTarget:FindFirstChild("HumanoidRootPart")
-			and cachedTarget.Humanoid.Health > 0
+			activeTarget
+			and activeTarget.Parent
+			and activeTarget:FindFirstChild("HumanoidRootPart")
+			and activeTarget:FindFirstChild("Humanoid")
+			and activeTarget.Humanoid.Health > 0
 		then
 			if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
-				return true, cachedBossName
+				return true, activeBossName
 			end
 			if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("raid_boss") then
-				return true, cachedBossName
+				return true, activeBossName
 			end
 			if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
-				return true, cachedBossName
+				return true, activeBossName
 			end
 			pcall(function()
-				local hrp = cachedTarget.HumanoidRootPart
+				local hrp = activeTarget.HumanoidRootPart
 				if hrp then
 					getDownwardCFrame(hrp.CFrame)
 					local height = GetSetting("distance") or 8
@@ -18676,7 +18845,7 @@ local function run(B, T, P, DfT, ...)
 						applyFarmFix(targetCF, hrp)
 					end
 				end
-				_G.pos_skill = cachedTarget.HumanoidRootPart.CFrame
+				_G.pos_skill = activeTarget.HumanoidRootPart.CFrame
 				usetool()
 				buso()
 				ken()
@@ -18684,7 +18853,7 @@ local function run(B, T, P, DfT, ...)
 				autoskill()
 				handleOpeMethod()
 			end)
-			return true, cachedBossName
+			return true, activeBossName
 		end
 		removeFarmFix()
 		return false, nil
@@ -18960,18 +19129,16 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		if GetSetting("autoFarmBoss") and not _G.raidBossTarget and not _G.seaEventActive and not _G.storingFruit then
+		local selectedBossName, selectedBossCFrame = getCurrentSeaSelectedBoss()
+		if not selectedBossName then
+			_G.selectedBossName = nil
+			_G.selectedBossCFrame = nil
+		end
+		if selectedBossName and not _G.raidBossTarget and not _G.seaEventActive and not _G.storingFruit then
 			pcall(function()
-				local selectedBoss = GetSetting("selectedBoss")
-				if not selectedBoss then
-					return
-				end
-
-				local bossName = _G.selectedBossName or getBossNameFromDropdown(selectedBoss)
-				if not bossName then
-					return
-				end
+				local bossName = selectedBossName
 				_G.selectedBossName = bossName
+				_G.selectedBossCFrame = selectedBossCFrame
 
 				if not isValidFarmMob(currentFarmTarget, bossName) then
 					currentFarmTarget = findFarmMob(bossName, nil)
@@ -19003,7 +19170,7 @@ local function run(B, T, P, DfT, ...)
 					isFarmingMob = false
 					currentFarmTarget = nil
 					removeFarmFix()
-					local bossCF = _G.selectedBossCFrame or getBossCFrame(bossName)
+					local bossCF = selectedBossCFrame
 					if bossCF then
 						tp(bossCF)
 					end
@@ -19014,7 +19181,7 @@ local function run(B, T, P, DfT, ...)
 
 		-- The entire Kaido resolver branch is Second Sea-only. Keeping the toggle
 		-- enabled while travelling must never publish a Kaido owner in another sea.
-		if game.PlaceId == 6381829480 and GetSetting("autoFarmKaido") then
+		if isFeatureEnabledInCurrentSea("autoFarmKaido") then
 			local kaidoHandled = false
 			pcall(function()
 				local dragon = _G._GenesisFindLiveKaido()
@@ -19140,7 +19307,7 @@ local function run(B, T, P, DfT, ...)
 			end
 		end
 
-		if GetSetting("autoDarkBeard") then
+		if isFeatureEnabledInCurrentSea("autoDarkBeard") then
 			pcall(function()
 				local darkBeard = _G.darkBeardBoss
 				if darkBeard and darkBeard.Parent and darkBeard.Humanoid.Health > 0 then
@@ -19211,7 +19378,7 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		if GetSetting("autoCrimsonDemon") then
+		if isFeatureEnabledInCurrentSea("autoCrimsonDemon") then
 			pcall(function()
 				if _G.crimsonCrystalCount == nil then
 					_G.crimsonCrystalCount = 0
@@ -19284,7 +19451,7 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		if GetSetting("autoIceKing") then
+		if isFeatureEnabledInCurrentSea("autoIceKing") then
 			pcall(function()
 				if _G.iceCrystalCount == nil then
 					_G.iceCrystalCount = 0
@@ -19357,7 +19524,7 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		if GetSetting("autoSecondSea") then
+		if isFeatureEnabledInCurrentSea("autoSecondSea") then
 			local level = LocalPlayer.PlayerStats:FindFirstChild("lvl")
 			local playerLevel = level and level.Value or 0
 
@@ -19407,7 +19574,7 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		if GetSetting("autoThirdSea") then
+		if isFeatureEnabledInCurrentSea("autoThirdSea") then
 			local thirdSeaState = _G.thirdSeaState
 			-- The summon worker never assigned farming_kraken itself.  Watch for the
 			-- boss while it is summoning too, then promote the state only after it
@@ -19561,13 +19728,16 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		if
-			GetSetting("farmmaterial")
+			isFeatureEnabledInCurrentSea("farmmaterial")
 			and not GetSetting("auto_farm")
 			and not _G.raidBossTarget
 			and not _G.seaEventActive
 			and not _G.storingFruit
 		then
 			pcall(function()
+				if not material() then
+					return
+				end
 				local now = tick()
 				if now - lastFarmUpdate > 0.01 or not isValidFarmMob(currentFarmTarget, nil) then
 					lastFarmUpdate = now
@@ -19576,7 +19746,6 @@ local function run(B, T, P, DfT, ...)
 
 				if currentFarmTarget then
 					isFarmingMob = true
-					material()
 					usetool()
 					buso()
 					ken()
@@ -19601,7 +19770,6 @@ local function run(B, T, P, DfT, ...)
 					isFarmingMob = false
 					currentFarmTarget = nil
 					removeFarmFix()
-					material()
 					tp(CFrame.new(_G.MX, _G.MY, _G.MZ))
 				end
 			end)
@@ -19881,21 +20049,20 @@ local function run(B, T, P, DfT, ...)
 						ReplicatedStorage.Chest.Remotes.Functions.Quest:InvokeServer("take", _G.NameQuest)
 					end
 				end
-				if GetSetting("farmmaterial") and GetSetting("getQuestMaterial") and not _G.seaEventActive then
+				if isFeatureEnabledInCurrentSea("farmmaterial")
+					and GetSetting("getQuestMaterial") and not _G.seaEventActive then
 					local questName = getMaterialQuest()
 					if questName and questName ~= "" then
 						ReplicatedStorage.Chest.Remotes.Functions.Quest:InvokeServer("take", questName)
 					end
 				end
-				if GetSetting("autoFarmBoss") and GetSetting("getQuestMaterial") and not _G.seaEventActive then
-					local selectedBoss = GetSetting("selectedBoss")
-					if selectedBoss then
-						local bossName = getBossNameFromDropdown(selectedBoss)
-						if bossName then
-							local questName = getBossQuest(bossName)
-							if questName then
-								ReplicatedStorage.Chest.Remotes.Functions.Quest:InvokeServer("take", questName)
-							end
+				if isFeatureEnabledInCurrentSea("autoFarmBoss")
+					and GetSetting("getQuestMaterial") and not _G.seaEventActive then
+					local bossName = getCurrentSeaSelectedBoss()
+					if bossName then
+						local questName = getBossQuest(bossName)
+						if questName then
+							ReplicatedStorage.Chest.Remotes.Functions.Quest:InvokeServer("take", questName)
 						end
 					end
 				end
@@ -19955,15 +20122,10 @@ local function run(B, T, P, DfT, ...)
 	spawn(function()
 		while task.wait(1) do
 			pcall(function()
-				if not GetSetting("autoSecondSea") then
+				if not isFeatureEnabledInCurrentSea("autoSecondSea") then
 					return
 				end
 				if _G._GenesisDailyReturnRequested then return end
-
-				if game.PlaceId ~= 4520749081 then
-					saveAndApply("autoSecondSea", false)
-					return
-				end
 
 				local level = LocalPlayer.PlayerStats:FindFirstChild("lvl")
 				local playerLevel = level and level.Value or 0
@@ -20341,7 +20503,9 @@ local function run(B, T, P, DfT, ...)
 	spawn(function()
 		while task.wait(0.5) do
 			pcall(function()
-				if not GetSetting("autoDarkBeard") then
+				if not isFeatureEnabledInCurrentSea("autoDarkBeard") then
+					_G.darkBeardBoss = nil
+					_G.darkBeardTotemCount = 0
 					return
 				end
 
@@ -20394,7 +20558,9 @@ local function run(B, T, P, DfT, ...)
 	spawn(function()
 		while task.wait(0.5) do
 			pcall(function()
-				if not GetSetting("autoCrimsonDemon") then
+				if not isFeatureEnabledInCurrentSea("autoCrimsonDemon") then
+					_G.crimsonBoss = nil
+					_G.crimsonCrystalCount = 0
 					return
 				end
 
@@ -20447,7 +20613,9 @@ local function run(B, T, P, DfT, ...)
 	spawn(function()
 		while task.wait(0.5) do
 			pcall(function()
-				if not GetSetting("autoIceKing") then
+				if not isFeatureEnabledInCurrentSea("autoIceKing") then
+					_G.iceKingBoss = nil
+					_G.iceCrystalCount = 0
 					return
 				end
 
@@ -20665,7 +20833,7 @@ local function run(B, T, P, DfT, ...)
 	spawn(function()
 		while task.wait(0.01) do
 			pcall(function()
-				if not GetSetting("autoThirdSea") then
+				if not isFeatureEnabledInCurrentSea("autoThirdSea") then
 					return
 				end
 
@@ -22517,7 +22685,7 @@ local function run(B, T, P, DfT, ...)
 	spawn(function()
 		while task.wait(1) do
 			pcall(function()
-				if not GetSetting("autoSKHD") then
+				if not isFeatureEnabledInCurrentSea("autoSKHD") then
 					if _G.lootState.SeaKing.active or _G.lootState.Hydra.active then
 						removeChestLootFix()
 						_G.isLootingChests = false
