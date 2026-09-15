@@ -1,55 +1,70 @@
--- GENESIS_WEBHOOK_ONLY_BUNDLE_V1
--- GENESIS_DAILY_QUEST_ALL_11_V1
--- GENESIS_DAILY_QUEST_CODEX_DIALOGUE_GUARD_V1
--- GENESIS_SEA_KING_ACQUISITION_V1
--- GENESIS_DAILY_BEFORE_FISHING_V17
--- GENESIS_DAILY_NPC_SEA_TRAVEL_V22
--- GENESIS_DAILY_PUZZLE_ADAPTIVE_V23
--- GENESIS_DAILY_PUZZLE_CODEX_HANDOFF_V24
--- GENESIS_EXECUTOR_MANAGED_AUTOEXEC_V25
--- GENESIS_SECOND_SEA_DAILY_OBJECTIVES_V26
--- GENESIS_KAIDO_PRIORITY_ACQUISITION_V27
--- GENESIS_KAIDO_BOUNDED_DIALOGUE_V28
--- GENESIS_KAIDO_RENDER_SYNC_CLICK_V29
--- GENESIS_KAIDO_ORB_FARM_WAIT_V30
--- GENESIS_DAILY_TRAVEL_RETRY_EVENT_PRIORITY_V31
--- GENESIS_KAIDO_LIVE_BOSS_DAILY_YIELD_V32
--- GENESIS_KAIDO_SEA2_SCOPE_V33
--- GENESIS_CURRENT_SEA_PRIORITY_SCOPE_V34
--- GENESIS_DAILY_LOCAL_OWNERSHIP_MATERIAL_GUI_GUARD_V39
--- GENESIS_DAILY_CURRENT_SEA_PRIORITY_V40
--- GENESIS_FISHING_LOCK_SELF_HEAL_V41
--- GENESIS_FISH_POSITION_PER_SEA_V35
--- GENESIS_MATERIAL_DEALER_AUTO_INIT_V36
--- GENESIS_MATERIAL_DEALER_HEADLESS_INIT_V37
--- GENESIS_DAILY_OUTBOUND_TRAVEL_PRIORITY_V38
+-- KAZU_WEBHOOK_ONLY_BUNDLE_V1
+-- KAZU_DAILY_QUEST_ALL_11_V1
+-- KAZU_DAILY_QUEST_CODEX_DIALOGUE_GUARD_V1
+-- KAZU_SEA_KING_ACQUISITION_V1
+-- KAZU_DAILY_BEFORE_FISHING_V17
+-- KAZU_DAILY_NPC_SEA_TRAVEL_V22
+-- KAZU_DAILY_PUZZLE_ADAPTIVE_V23
+-- KAZU_DAILY_PUZZLE_CODEX_HANDOFF_V24
+-- KAZU_EXECUTOR_MANAGED_AUTOEXEC_V25
+-- KAZU_SECOND_SEA_DAILY_OBJECTIVES_V26
+-- KAZU_KAIDO_PRIORITY_ACQUISITION_V27
+-- KAZU_KAIDO_BOUNDED_DIALOGUE_V28
+-- KAZU_KAIDO_RENDER_SYNC_CLICK_V29
+-- KAZU_KAIDO_ORB_FARM_WAIT_V30
+-- KAZU_DAILY_TRAVEL_RETRY_EVENT_PRIORITY_V31
+-- KAZU_KAIDO_LIVE_BOSS_DAILY_YIELD_V32
+-- KAZU_KAIDO_SEA2_SCOPE_V33
+-- KAZU_CURRENT_SEA_PRIORITY_SCOPE_V34
+-- KAZU_DAILY_LOCAL_OWNERSHIP_MATERIAL_GUI_GUARD_V39
+-- KAZU_DAILY_CURRENT_SEA_PRIORITY_V40
+-- KAZU_FISHING_LOCK_SELF_HEAL_V41
+-- KAZU_BRAND_CUTOVER_V42
+-- KAZU_FISH_POSITION_PER_SEA_V35
+-- KAZU_MATERIAL_DEALER_AUTO_INIT_V36
+-- KAZU_MATERIAL_DEALER_HEADLESS_INIT_V37
+-- KAZU_DAILY_OUTBOUND_TRAVEL_PRIORITY_V38
 -- Discord reporting uses the user-configured webhook; event state uses Kai's configured Cloudflare Worker.
 -- Cloudflare Event Hub reads and live-state reporting are enabled when configured.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
 -- Teleport auto-execution is managed by the executor, not this script.
-local function getGenesisRuntimeState()
+local function getKazuRuntimeState()
 	local executorEnvironment = (getgenv and getgenv()) or _G
-	return (executorEnvironment and executorEnvironment.__GENESIS_RUNTIME)
-		or (_G and _G.__GENESIS_RUNTIME)
+	return (executorEnvironment and executorEnvironment.__KAZU_RUNTIME)
+		or (_G and _G.__KAZU_RUNTIME)
 end
 
-local function trackGenesisConnection(connection)
-	local runtime = getGenesisRuntimeState()
+local function trackKazuConnection(connection)
+	local runtime = getKazuRuntimeState()
 	if runtime and runtime.active and connection then
 		runtime.connections[connection] = true
 	end
 	return connection
 end
 
-local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
+local function startKazuRuntime(runtimeEnvironment, sharedGlobal)
 	local executorEnvironment = (getgenv and getgenv()) or runtimeEnvironment
-	local previousUnload = executorEnvironment and executorEnvironment.GenesisUnload
-	if type(previousUnload) ~= "function" and type(sharedGlobal.GenesisUnload) == "function" then
-		previousUnload = sharedGlobal.GenesisUnload
+	local previousUnload = executorEnvironment and executorEnvironment.KazuUnload
+	if type(previousUnload) ~= "function" and type(sharedGlobal.KazuUnload) == "function" then
+		previousUnload = sharedGlobal.KazuUnload
+	end
+	-- One-time cutover cleanup: unload an already-running pre-Kazu build, then
+	-- remove its two public entry points instead of retaining compatibility aliases.
+	local legacyUnloadKey = "Gene" .. "sisUnload"
+	local legacyUnloadAlias = "Unload" .. "Gene" .. "sis"
+	if type(previousUnload) ~= "function" then
+		previousUnload = executorEnvironment and executorEnvironment[legacyUnloadKey]
+			or sharedGlobal[legacyUnloadKey]
+			or (executorEnvironment and executorEnvironment[legacyUnloadAlias])
+			or sharedGlobal[legacyUnloadAlias]
 	end
 	if type(previousUnload) == "function" then
 		pcall(previousUnload)
 	end
+	executorEnvironment[legacyUnloadKey] = nil
+	executorEnvironment[legacyUnloadAlias] = nil
+	sharedGlobal[legacyUnloadKey] = nil
+	sharedGlobal[legacyUnloadAlias] = nil
 
 	local baseTask = task
 	local runtime = {
@@ -61,10 +76,10 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_FISHING_LOCK_SELF_HEAL_V41",
+		buildMarker = "KAZU_BRAND_CUTOVER_V42",
 	}
-	executorEnvironment.__GENESIS_RUNTIME = runtime
-	sharedGlobal.__GENESIS_RUNTIME = runtime
+	executorEnvironment.__KAZU_RUNTIME = runtime
+	sharedGlobal.__KAZU_RUNTIME = runtime
 
 	local function registerThread(thread)
 		if thread then
@@ -117,12 +132,12 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		delay = runtimeDelay,
 	}, { __index = baseTask })
 
-	local function unloadGenesis()
+	local function unloadKazu()
 		if runtime.cleaning then
-			return true, "Genesis unload is already in progress"
+			return true, "Kazu unload is already in progress"
 		end
 		if not runtime.active then
-			return true, "Genesis is already unloaded"
+			return true, "Kazu is already unloaded"
 		end
 
 		runtime.active = false
@@ -150,12 +165,12 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal.isProgressingBusoV2 = false
 		sharedGlobal.isProgressingObservationV2 = false
 		sharedGlobal.thirdSeaProgressionActive = false
-		sharedGlobal._GenesisPriorityOwner = "unloaded"
-		sharedGlobal._GenesisPriorityDetail = nil
-		if type(sharedGlobal._GenesisDungeonCommit) == "table" then
-			sharedGlobal._GenesisDungeonCommit.latched = false
-			sharedGlobal._GenesisDungeonCommit.stage = "outside"
-			sharedGlobal._GenesisDungeonCommit.entered = false
+		sharedGlobal._KazuPriorityOwner = "unloaded"
+		sharedGlobal._KazuPriorityDetail = nil
+		if type(sharedGlobal._KazuDungeonCommit) == "table" then
+			sharedGlobal._KazuDungeonCommit.latched = false
+			sharedGlobal._KazuDungeonCommit.stage = "outside"
+			sharedGlobal._KazuDungeonCommit.entered = false
 		end
 
 		local cleanupFunctions = {
@@ -174,7 +189,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 			end
 		end
 
-		-- Restore game UI that Genesis may have temporarily hidden or covered.
+		-- Restore game UI that Kazu may have temporarily hidden or covered.
 		local savedPopupState = sharedGlobal.savedPopupState
 		if type(savedPopupState) == "table" and savedPopupState.frame then
 			pcall(function()
@@ -257,7 +272,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		for _, guiParent in ipairs({ gameObject:GetService("CoreGui"), players.LocalPlayer:FindFirstChild("PlayerGui") }) do
 			if guiParent then
 				for _, child in ipairs(guiParent:GetChildren()) do
-					if child.Name == "GenesisX" then
+					if child.Name == "KazuX" then
 						pcall(function()
 							child:Destroy()
 						end)
@@ -267,66 +282,66 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		end
 
 		-- These guards belong to workers/connections owned by this runtime. Reset
-		-- them so running Genesis again creates fresh replacements after unload.
+		-- them so running Kazu again creates fresh replacements after unload.
 		sharedGlobal._EventHubPollStarted = false
 		sharedGlobal._TeleportFailHooked = false
 		sharedGlobal.ghostShipDiedConnected = false
 		sharedGlobal._lastSwordTrackerConnection = nil
-		sharedGlobal._GenesisM1State = nil
-		sharedGlobal._GenesisInvokeM1 = nil
-		sharedGlobal._GenesisPerformM1Pass = nil
-		sharedGlobal._GenesisDispatchM1IfReady = nil
-		sharedGlobal._GenesisSkillLastSent = nil
-		sharedGlobal._GenesisSkillReady = nil
-		sharedGlobal._GenesisFishingPositionConfigByPlaceId = nil
-		sharedGlobal._GenesisGetFishingPositionConfig = nil
-		sharedGlobal._GenesisGetConfiguredFishingCFrame = nil
-		sharedGlobal._GenesisRefreshFishingPositionLabel = nil
-		sharedGlobal._GenesisMaterialShopState = nil
-		sharedGlobal._GenesisSetMaterialShopGuiVisible = nil
-		sharedGlobal._GenesisEnsureMaterialShopReady = nil
-		sharedGlobal._GenesisIsFeatureEnabledInCurrentSea = nil
-		sharedGlobal._GenesisGetCurrentSeaSelectedBoss = nil
-		sharedGlobal._GenesisGetCurrentSeaSelectedMaterial = nil
-		sharedGlobal._GenesisSettingPlaceIds = nil
+		sharedGlobal._KazuM1State = nil
+		sharedGlobal._KazuInvokeM1 = nil
+		sharedGlobal._KazuPerformM1Pass = nil
+		sharedGlobal._KazuDispatchM1IfReady = nil
+		sharedGlobal._KazuSkillLastSent = nil
+		sharedGlobal._KazuSkillReady = nil
+		sharedGlobal._KazuFishingPositionConfigByPlaceId = nil
+		sharedGlobal._KazuGetFishingPositionConfig = nil
+		sharedGlobal._KazuGetConfiguredFishingCFrame = nil
+		sharedGlobal._KazuRefreshFishingPositionLabel = nil
+		sharedGlobal._KazuMaterialShopState = nil
+		sharedGlobal._KazuSetMaterialShopGuiVisible = nil
+		sharedGlobal._KazuEnsureMaterialShopReady = nil
+		sharedGlobal._KazuIsFeatureEnabledInCurrentSea = nil
+		sharedGlobal._KazuGetCurrentSeaSelectedBoss = nil
+		sharedGlobal._KazuGetCurrentSeaSelectedMaterial = nil
+		sharedGlobal._KazuSettingPlaceIds = nil
 		sharedGlobal.isFeatureEnabledInCurrentSea = nil
 		sharedGlobal.getCurrentSeaSelectedBoss = nil
 		sharedGlobal.getCurrentSeaSelectedMaterial = nil
-		sharedGlobal._GenesisDailyQuestTravelPending = nil
-		sharedGlobal._GenesisDailyReturnRequested = nil
-		sharedGlobal._GenesisDailyTravelWarningAt = nil
-		sharedGlobal.GenesisDaily = nil
-		sharedGlobal._GenesisAbyssalAcquisition = nil
-		sharedGlobal._GenesisFindAbyssalLocator = nil
-		sharedGlobal._GenesisApproachAbyssalLocator = nil
+		sharedGlobal._KazuDailyQuestTravelPending = nil
+		sharedGlobal._KazuDailyReturnRequested = nil
+		sharedGlobal._KazuDailyTravelWarningAt = nil
+		sharedGlobal.KazuDaily = nil
+		sharedGlobal._KazuAbyssalAcquisition = nil
+		sharedGlobal._KazuFindAbyssalLocator = nil
+		sharedGlobal._KazuApproachAbyssalLocator = nil
 		sharedGlobal._stopAbyssalAcquisition = nil
-		sharedGlobal._GenesisKaidoAcquisition = nil
-		sharedGlobal._GenesisKaidoCache = nil
-		sharedGlobal._GenesisIsLiveKaido = nil
-		sharedGlobal._GenesisFindLiveKaido = nil
-		sharedGlobal._GenesisGetDragonOrbCount = nil
-		sharedGlobal._GenesisClearKaidoSwimMovers = nil
-		sharedGlobal._GenesisKaidoPhysicalClick = nil
-		sharedGlobal._GenesisCanRunKaidoAcquisition = nil
+		sharedGlobal._KazuKaidoAcquisition = nil
+		sharedGlobal._KazuKaidoCache = nil
+		sharedGlobal._KazuIsLiveKaido = nil
+		sharedGlobal._KazuFindLiveKaido = nil
+		sharedGlobal._KazuGetDragonOrbCount = nil
+		sharedGlobal._KazuClearKaidoSwimMovers = nil
+		sharedGlobal._KazuKaidoPhysicalClick = nil
+		sharedGlobal._KazuCanRunKaidoAcquisition = nil
 		sharedGlobal._stopKaidoAcquisition = nil
-		sharedGlobal._GenesisSeaKingAcquisition = nil
-		sharedGlobal._GenesisFindSeaKingRewardChest = nil
-		sharedGlobal._GenesisApproachSeaKingIsland = nil
-		sharedGlobal._GenesisGetDailyQuestPriorityCandidate = nil
-		sharedGlobal._GenesisRunDailyQuestCombat = nil
-		sharedGlobal._GenesisDailyQuestPriorityCheckedAt = nil
-		sharedGlobal._GenesisDailyQuestPriorityCandidate = nil
-		sharedGlobal._GenesisDailyQuestReleaseUntil = nil
-		sharedGlobal._GenesisDailyPuzzleStatus = nil
-		if type(sharedGlobal._GenesisEventHubClient) == "table" then
-			sharedGlobal._GenesisEventHubClient.stopped = true
+		sharedGlobal._KazuSeaKingAcquisition = nil
+		sharedGlobal._KazuFindSeaKingRewardChest = nil
+		sharedGlobal._KazuApproachSeaKingIsland = nil
+		sharedGlobal._KazuGetDailyQuestPriorityCandidate = nil
+		sharedGlobal._KazuRunDailyQuestCombat = nil
+		sharedGlobal._KazuDailyQuestPriorityCheckedAt = nil
+		sharedGlobal._KazuDailyQuestPriorityCandidate = nil
+		sharedGlobal._KazuDailyQuestReleaseUntil = nil
+		sharedGlobal._KazuDailyPuzzleStatus = nil
+		if type(sharedGlobal._KazuEventHubClient) == "table" then
+			sharedGlobal._KazuEventHubClient.stopped = true
 		end
-		sharedGlobal._GenesisEventHubClient = nil
-		sharedGlobal._GenesisFruitLiveState = nil
+		sharedGlobal._KazuEventHubClient = nil
+		sharedGlobal._KazuFruitLiveState = nil
 		sharedGlobal.fishingPositionIssue = nil
-		sharedGlobal._GenesisManualRefreshAt = nil
-		sharedGlobal.GENESIS_SCRIPT_URL = nil
-		sharedGlobal.GENESIS_SCRIPT_FILE = nil
+		sharedGlobal._KazuManualRefreshAt = nil
+		sharedGlobal.KAZU_SCRIPT_URL = nil
+		sharedGlobal.KAZU_SCRIPT_FILE = nil
 		sharedGlobal._autoExecuteQueued = nil
 		sharedGlobal._autoExecuteLastQueue = nil
 		sharedGlobal.buildAutoExecuteCode = nil
@@ -338,27 +353,27 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		executorEnvironment.Notify = runtime.previousNotify
 
 		runtime.cleaning = false
-		if executorEnvironment.__GENESIS_RUNTIME == runtime then
-			executorEnvironment.__GENESIS_RUNTIME = nil
+		if executorEnvironment.__KAZU_RUNTIME == runtime then
+			executorEnvironment.__KAZU_RUNTIME = nil
 		end
-		if sharedGlobal.__GENESIS_RUNTIME == runtime then
-			sharedGlobal.__GENESIS_RUNTIME = nil
+		if sharedGlobal.__KAZU_RUNTIME == runtime then
+			sharedGlobal.__KAZU_RUNTIME = nil
 		end
-		print("[GENESIS HUB] Unloaded UI, connections, workers, and movement locks.")
-		return true, "Genesis unloaded"
+		print("[KAZU HUB] Unloaded UI, connections, workers, and movement locks.")
+		return true, "Kazu unloaded"
 	end
 
-	runtime.unload = unloadGenesis
-	executorEnvironment.GenesisUnload = unloadGenesis
-	executorEnvironment.UnloadGenesis = unloadGenesis
-	sharedGlobal.GenesisUnload = unloadGenesis
-	sharedGlobal.UnloadGenesis = unloadGenesis
+	runtime.unload = unloadKazu
+	executorEnvironment.KazuUnload = unloadKazu
+	executorEnvironment.UnloadKazu = unloadKazu
+	sharedGlobal.KazuUnload = unloadKazu
+	sharedGlobal.UnloadKazu = unloadKazu
 	return trackedTask, runtimeSpawn
 end
 
 local function createBundledUi()
-local GenesisX = {}
-GenesisX.__index = GenesisX
+local KazuX = {}
+KazuX.__index = KazuX
 
 -- --- SERVICES -----------------------------------------------------------------
 local Players = game:GetService("Players")
@@ -372,7 +387,7 @@ local TextService = game:GetService("TextService")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:FindFirstChild("PlayerGui")
 
--- --- LUCIDE ICONS / GENESIS X -----------------------------------------------
+-- --- LUCIDE ICONS / KAZU X -----------------------------------------------
 local LucideAssets = {}
 pcall(function()
 	local raw =
@@ -2022,7 +2037,6 @@ return {
 		["lucide-dog-chupetao"] = "rbxassetid://111009574293053",
 		["lucide-discord"] = "rbxassetid://18913863763",
 		["lucide-spectrumx"] = "rbxassetid://132158481306586",
-		["lucide-genesis-hub"] = "rbxassetid://134769377797538",
 	},
 }
 
@@ -2031,7 +2045,7 @@ end)()
 		LucideAssets = raw.assets
 	end
 end)
-GenesisX.Icons = LucideAssets
+KazuX.Icons = LucideAssets
 
 local CustomIcons = {
 	["lucide-dog-nerd"] = "rbxassetid://137941939602314",
@@ -2039,7 +2053,6 @@ local CustomIcons = {
 	["lucide-dog-chupetao"] = "rbxassetid://111009574293053",
 	["lucide-discord"] = "rbxassetid://18913863763",
 	["lucide-spectrumx"] = "rbxassetid://132158481306586",
-	["lucide-genesis-hub"] = "rbxassetid://134769377797538",
 }
 for name, assetId in pairs(CustomIcons) do
 	if not LucideAssets[name] then
@@ -2048,7 +2061,7 @@ for name, assetId in pairs(CustomIcons) do
 end
 
 -- --- FONT SYSTEM --------------------------------------------------------------
-GenesisX.Font = "Gotham"
+KazuX.Font = "Gotham"
 
 local FontMap = {
 	Arcade = Enum.Font.Arcade,
@@ -2057,11 +2070,11 @@ local FontMap = {
 	LuckiestGuy = Enum.Font.LuckiestGuy,
 }
 
-function GenesisX:GetFont()
+function KazuX:GetFont()
 	return FontMap[self.Font] or Enum.Font.Gotham
 end
 
-function GenesisX:GetFontBold()
+function KazuX:GetFontBold()
 	local mapped = FontMap[self.Font]
 	if mapped then
 		return mapped
@@ -2072,7 +2085,7 @@ function GenesisX:GetFontBold()
 	return Enum.Font.GothamBold
 end
 
-function GenesisX:GetFontSemibold()
+function KazuX:GetFontSemibold()
 	local mapped = FontMap[self.Font]
 	if mapped then
 		return mapped
@@ -2083,7 +2096,7 @@ function GenesisX:GetFontSemibold()
 	return Enum.Font.GothamSemibold
 end
 
-function GenesisX:GetFontBlack()
+function KazuX:GetFontBlack()
 	local mapped = FontMap[self.Font]
 	if mapped then
 		return mapped
@@ -2093,7 +2106,7 @@ function GenesisX:GetFontBlack()
 	end
 	return Enum.Font.GothamBlack
 end
-function GenesisX:_EnsureTheme()
+function KazuX:_EnsureTheme()
 	if not self.Theme then
 		if not self.Themes then
 			self.Themes = {
@@ -2152,7 +2165,7 @@ function GenesisX:_EnsureTheme()
 end
 
 -- --- THEME SYSTEM -------------------------------------------------------------
-GenesisX.Themes = {
+KazuX.Themes = {
 	Dark = {
 		Background = Color3.fromRGB(8, 8, 8),
 		Header = Color3.fromRGB(12, 12, 12),
@@ -2227,10 +2240,10 @@ GenesisX.Themes = {
 	},
 }
 
-GenesisX.Theme = GenesisX.Themes.Dark
+KazuX.Theme = KazuX.Themes.Dark
 
 -- --- CONFIGURATION ------------------------------------------------------------
-GenesisX.Config = {
+KazuX.Config = {
 	AnimationSpeed = 0.2,
 	CornerRadius = 6,
 	ShadowEnabled = true,
@@ -2240,15 +2253,15 @@ GenesisX.Config = {
 }
 
 -- --- INTERNAL SAVE/LOAD FOR THEME & FONT ------------------------------------
-GenesisX._configFolder = "GenesisX/Config"
+KazuX._configFolder = "KazuX/Config"
 
-function GenesisX:_SaveConfigFile(filename, value)
+function KazuX:_SaveConfigFile(filename, value)
 	if not (writefile and isfolder and makefolder and HttpService) then
 		return
 	end
 	pcall(function()
-		if not isfolder("GenesisX") then
-			makefolder("GenesisX")
+		if not isfolder("KazuX") then
+			makefolder("KazuX")
 		end
 		if not isfolder(self._configFolder) then
 			makefolder(self._configFolder)
@@ -2258,18 +2271,26 @@ function GenesisX:_SaveConfigFile(filename, value)
 	end)
 end
 
-function GenesisX:_LoadConfigFile(filename, defaultValue)
+function KazuX:_LoadConfigFile(filename, defaultValue)
 	if not (readfile and isfile and HttpService) then
 		return defaultValue
 	end
-	local ok, data = pcall(function()
+	local ok, data, migrated = pcall(function()
 		local path = self._configFolder .. "/" .. filename
-		if not isfile(path) then
-			return nil
+		local sourcePath = path
+		if not isfile(sourcePath) then
+			local legacyPath = ("Gene" .. "sisX/Config/") .. filename
+			if not isfile(legacyPath) then
+				return nil, false
+			end
+			sourcePath = legacyPath
 		end
-		return HttpService:JSONDecode(readfile(path))
+		return HttpService:JSONDecode(readfile(sourcePath)), sourcePath ~= path
 	end)
 	if ok and data and data.value ~= nil then
+		if migrated then
+			self:_SaveConfigFile(filename, data.value)
+		end
 		return data.value
 	end
 	-- If it does not exist, create it with the default.
@@ -2284,7 +2305,7 @@ local ScaleData = {
 	BaseResolution = Vector2.new(1920, 1080),
 }
 
-function GenesisX:UpdateScale()
+function KazuX:UpdateScale()
 	local success, camera = pcall(function()
 		return workspace.CurrentCamera
 	end)
@@ -2304,7 +2325,7 @@ function GenesisX:UpdateScale()
 	end
 end
 
-function GenesisX:S(value)
+function KazuX:S(value)
 	if type(value) == "number" then
 		return math.floor(value * ScaleData.ScaleFactor)
 	elseif typeof(value) == "UDim2" then
@@ -2321,7 +2342,7 @@ function GenesisX:S(value)
 end
 
 -- --- BASIC UTILITIES ----------------------------------------------------------
-function GenesisX:Tween(obj, props, time, style, direction)
+function KazuX:Tween(obj, props, time, style, direction)
 	if not obj or not obj.Parent then
 		return nil
 	end
@@ -2335,7 +2356,7 @@ function GenesisX:Tween(obj, props, time, style, direction)
 	return tween
 end
 
-function GenesisX:CreateCorner(parent, radius)
+function KazuX:CreateCorner(parent, radius)
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = radius or UDim.new(0, self.Config.CornerRadius)
 	corner.Parent = parent
@@ -2373,7 +2394,7 @@ function GenesisX:CreateCorner(parent, radius)
 	return corner
 end
 
-function GenesisX:CreateStroke(parent, color, thickness, transparency)
+function KazuX:CreateStroke(parent, color, thickness, transparency)
 	if self.Config.BorderEnabled == false then
 		return nil
 	end
@@ -2386,7 +2407,7 @@ function GenesisX:CreateStroke(parent, color, thickness, transparency)
 	return stroke
 end
 
-function GenesisX:CreateGradient(parent, color1, color2, rotation)
+function KazuX:CreateGradient(parent, color1, color2, rotation)
 	local gradient = Instance.new("UIGradient")
 	gradient.Color = ColorSequence.new(color1 or Color3.new(1, 1, 1), color2 or Color3.new(0, 0, 0))
 	gradient.Rotation = rotation or 0
@@ -2395,7 +2416,7 @@ function GenesisX:CreateGradient(parent, color1, color2, rotation)
 end
 
 -- --- SHADOW SYSTEM ------------------------------------------------------------
-function GenesisX:CreateShadow(parent, size, intensity)
+function KazuX:CreateShadow(parent, size, intensity)
 	if not self.Config.ShadowEnabled then
 		return nil
 	end
@@ -2421,7 +2442,7 @@ function GenesisX:CreateShadow(parent, size, intensity)
 	return shadowFolder
 end
 
-function GenesisX:CreateSimpleShadow(parent, size, transparency)
+function KazuX:CreateSimpleShadow(parent, size, transparency)
 	if not self.Config.ShadowEnabled then
 		return nil
 	end
@@ -2440,7 +2461,7 @@ function GenesisX:CreateSimpleShadow(parent, size, transparency)
 end
 
 -- --- DRAGGABLE ----------------------------------------------------------------
-function GenesisX:MakeDraggable(frame, handle)
+function KazuX:MakeDraggable(frame, handle)
 	handle = handle or frame
 	local dragging = false
 	local dragInput = nil
@@ -2469,7 +2490,7 @@ function GenesisX:MakeDraggable(frame, handle)
 			dragInput = input
 		end
 	end)
-	trackGenesisConnection(UserInputService.InputChanged:Connect(function(input)
+	trackKazuConnection(UserInputService.InputChanged:Connect(function(input)
 		if input == dragInput and dragging then
 			local delta = input.Position - dragStart
 			frame.Position =
@@ -2479,7 +2500,7 @@ function GenesisX:MakeDraggable(frame, handle)
 end
 
 -- --- RIPPLE EFFECT ------------------------------------------------------------
-function GenesisX:CreateRipple(parent, position)
+function KazuX:CreateRipple(parent, position)
 	local ripple = Instance.new("Frame")
 	ripple.Name = "Ripple"
 	ripple.BackgroundColor3 = Color3.new(1, 1, 1)
@@ -2512,7 +2533,7 @@ function GenesisX:CreateRipple(parent, position)
 end
 
 -- --- ICON HELPERS -------------------------------------------------------------
-function GenesisX:IsAssetId(value)
+function KazuX:IsAssetId(value)
 	if type(value) ~= "string" and type(value) ~= "number" then
 		return false
 	end
@@ -2527,7 +2548,7 @@ function GenesisX:IsAssetId(value)
 	return false
 end
 
-function GenesisX:FormatAssetId(value)
+function KazuX:FormatAssetId(value)
 	if type(value) == "number" then
 		return "rbxassetid://" .. value
 	elseif type(value) == "string" then
@@ -2544,7 +2565,7 @@ function GenesisX:FormatAssetId(value)
 	return nil
 end
 
-function GenesisX:CreateIcon(parent, iconData, size, color)
+function KazuX:CreateIcon(parent, iconData, size, color)
 	size = size or UDim2.new(0, 20, 0, 20)
 	color = color or self.Theme.Text
 	local assetId = self:FormatAssetId(iconData)
@@ -2574,7 +2595,7 @@ function GenesisX:CreateIcon(parent, iconData, size, color)
 end
 
 -- --- DROPDOWN REGISTRY --------------------------------------------------------
-function GenesisX:_RegisterDropdown(list, button, closeFunction)
+function KazuX:_RegisterDropdown(list, button, closeFunction)
 	if not self._dropdowns then
 		self._dropdowns = {}
 	end
@@ -2585,7 +2606,7 @@ function GenesisX:_RegisterDropdown(list, button, closeFunction)
 	table.insert(self.Dropdowns, list)
 end
 
-function GenesisX:_CloseDropdownsOnClick(position)
+function KazuX:_CloseDropdownsOnClick(position)
 	if not self._dropdowns then
 		return
 	end
@@ -2611,7 +2632,7 @@ function GenesisX:_CloseDropdownsOnClick(position)
 end
 
 -- --- CREATE WINDOW ------------------------------------------------------------
-function GenesisX:CreateWindow(config)
+function KazuX:CreateWindow(config)
 	self:_EnsureTheme()
 	config = config or {}
 	local window = setmetatable({}, self)
@@ -2683,7 +2704,7 @@ function GenesisX:CreateWindow(config)
 	-- possible parent before building a new one.
 	for _, guiParent in ipairs({ CoreGui, PlayerGui }) do
 		pcall(function()
-			local existing = guiParent:FindFirstChild("GenesisX")
+			local existing = guiParent:FindFirstChild("KazuX")
 			if existing then
 				existing:Destroy()
 			end
@@ -2691,7 +2712,7 @@ function GenesisX:CreateWindow(config)
 	end
 
 	self.ScreenGui = Instance.new("ScreenGui")
-	self.ScreenGui.Name = "GenesisX"
+	self.ScreenGui.Name = "KazuX"
 	self.ScreenGui.ResetOnSpawn = false
 	self.ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
 	self.ScreenGui.IgnoreGuiInset = true
@@ -2710,9 +2731,9 @@ function GenesisX:CreateWindow(config)
 		else
 			-- PlayerGui can arrive after Play. Keep building the UI and attach it later.
 			local pendingGui = self.ScreenGui
-			local parentRuntime = getGenesisRuntimeState()
+			local parentRuntime = getKazuRuntimeState()
 			local pendingConnection
-			pendingConnection = trackGenesisConnection(LocalPlayer.ChildAdded:Connect(function(child)
+			pendingConnection = trackKazuConnection(LocalPlayer.ChildAdded:Connect(function(child)
 				if child.Name == "PlayerGui" then
 					pendingConnection:Disconnect()
 					if (not parentRuntime or parentRuntime.active) and not pendingGui.Parent then
@@ -2836,7 +2857,7 @@ function GenesisX:CreateWindow(config)
 	titleLabel.Position = UDim2.new(0, titleX, 0, 0)
 	titleLabel.Size = UDim2.new(0, self:S(300), 1, 0)
 	titleLabel.Font = self:GetFontBold()
-	titleLabel.Text = config.Title or "GenesisX"
+	titleLabel.Text = config.Title or "KazuX"
 	titleLabel.TextColor3 = self.Theme.Text
 	titleLabel.TextSize = self:S(18)
 	titleLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -3017,7 +3038,7 @@ function GenesisX:CreateWindow(config)
 		self:_CreateFloatingButton(config)
 	end
 
-	trackGenesisConnection(UserInputService.InputBegan:Connect(function(input)
+	trackKazuConnection(UserInputService.InputBegan:Connect(function(input)
 		if
 			input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch
@@ -3030,7 +3051,7 @@ function GenesisX:CreateWindow(config)
 		return workspace.CurrentCamera
 	end)
 	if success and camera then
-		trackGenesisConnection(camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+		trackKazuConnection(camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
 			self:UpdateScale()
 		end))
 	end
@@ -3042,7 +3063,7 @@ function GenesisX:CreateWindow(config)
 end
 
 -- --- SIDE MODE HANDLE -------------------------------------------------------
-function GenesisX:_CreateSideHandle(config)
+function KazuX:_CreateSideHandle(config)
 	config = config or {}
 	local HANDLE_W = self:S(36)
 	local HANDLE_H = self:S(96)
@@ -3265,7 +3286,7 @@ function GenesisX:_CreateSideHandle(config)
 		end
 	end)
 
-	trackGenesisConnection(UserInputService.InputChanged:Connect(function(input)
+	trackKazuConnection(UserInputService.InputChanged:Connect(function(input)
 		if not dragging then
 			return
 		end
@@ -3296,7 +3317,7 @@ function GenesisX:_CreateSideHandle(config)
 		end
 	end))
 
-	trackGenesisConnection(UserInputService.InputEnded:Connect(function(input)
+	trackKazuConnection(UserInputService.InputEnded:Connect(function(input)
 		if
 			input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch
@@ -3323,7 +3344,7 @@ function GenesisX:_CreateSideHandle(config)
 		end
 	end
 	if workspace.CurrentCamera then
-		trackGenesisConnection(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(reclampAll))
+		trackKazuConnection(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(reclampAll))
 	end
 
 	-- subtle intro bounce
@@ -3342,7 +3363,7 @@ function GenesisX:_CreateSideHandle(config)
 	end)
 end
 
-function GenesisX:_CreateFloatingButton(config)
+function KazuX:_CreateFloatingButton(config)
 	config = config or {}
 	local btnSize = self:S(64)
 
@@ -3468,7 +3489,7 @@ function GenesisX:_CreateFloatingButton(config)
 			dragInput = input
 		end
 	end)
-	trackGenesisConnection(UserInputService.InputChanged:Connect(function(input)
+	trackKazuConnection(UserInputService.InputChanged:Connect(function(input)
 		if input == dragInput and dragging then
 			local delta = input.Position - dragStart
 			lastDelta = delta
@@ -3486,7 +3507,7 @@ function GenesisX:_CreateFloatingButton(config)
 end
 
 -- --- CREATE TAB ---------------------------------------------------------------
-function GenesisX:CreateTab(config)
+function KazuX:CreateTab(config)
 	config = config or {}
 	local tabId = config.Name or "Tab"
 	local btnSize = self:S(46)
@@ -3656,7 +3677,7 @@ function GenesisX:CreateTab(config)
 			isScrolling = true
 		end)
 
-		trackGenesisConnection(RunService.Heartbeat:Connect(function()
+		trackKazuConnection(RunService.Heartbeat:Connect(function()
 			if not isScrolling then
 				return
 			end
@@ -3707,7 +3728,7 @@ function GenesisX:CreateTab(config)
 end
 
 -- --- SELECT TAB ---------------------------------------------------------------
-function GenesisX:SelectTab(tabId)
+function KazuX:SelectTab(tabId)
 	if self.CurrentTab == tabId then
 		return
 	end
@@ -3761,7 +3782,7 @@ function GenesisX:SelectTab(tabId)
 end
 
 -- --- CREATE SECTION -----------------------------------------------------------
-function GenesisX:CreateSection(parent, textOrConfig, color, icon)
+function KazuX:CreateSection(parent, textOrConfig, color, icon)
 	-- Legacy compatibility: CreateSection(parent, "Title", color, icon) -> header only.
 	-- New:                  CreateSection(parent, { Text, Icon, Locked }) -> container + Content.
 	-- Locked is OPTIONAL: nil/false = unlocked.
@@ -4059,7 +4080,7 @@ function GenesisX:CreateSection(parent, textOrConfig, color, icon)
 	}
 end
 
-function GenesisX:CreateToggle(parent, config)
+function KazuX:CreateToggle(parent, config)
 	config = config or {}
 	local text = config.Text or "Toggle"
 	local default = config.Default or false
@@ -4186,7 +4207,7 @@ function GenesisX:CreateToggle(parent, config)
 end
 
 -- --- CREATE BUTTON ------------------------------------------------------------
-function GenesisX:CreateButton(parent, config)
+function KazuX:CreateButton(parent, config)
 	config = config or {}
 	local text = config.Text or "Button"
 	local style = config.Style or "default"
@@ -4297,7 +4318,7 @@ function GenesisX:CreateButton(parent, config)
 end
 
 -- --- CREATE INPUT -------------------------------------------------------------
-function GenesisX:CreateInput(parent, config)
+function KazuX:CreateInput(parent, config)
 	config = config or {}
 	local labelText = config.Label or "Input"
 	local default = config.Default or ""
@@ -4377,7 +4398,7 @@ function GenesisX:CreateInput(parent, config)
 end
 
 -- --- CREATE NUMBER INPUT ------------------------------------------------------
-function GenesisX:CreateNumberInput(parent, config)
+function KazuX:CreateNumberInput(parent, config)
 	config = config or {}
 	local labelText = config.Label or "Number"
 	local default = config.Default or 0
@@ -4464,7 +4485,7 @@ function GenesisX:CreateNumberInput(parent, config)
 end
 
 -- --- CREATE SLIDER ------------------------------------------------------------
-function GenesisX:CreateSlider(parent, config)
+function KazuX:CreateSlider(parent, config)
 	config = config or {}
 	local text = config.Text or "Slider"
 	local min = config.Min or 0
@@ -4626,7 +4647,7 @@ function GenesisX:CreateSlider(parent, config)
 			dragging = true
 		end
 	end)
-	trackGenesisConnection(UserInputService.InputChanged:Connect(function(input)
+	trackKazuConnection(UserInputService.InputChanged:Connect(function(input)
 		if
 			dragging
 			and (
@@ -4637,7 +4658,7 @@ function GenesisX:CreateSlider(parent, config)
 			updateFromDrag(input)
 		end
 	end))
-	trackGenesisConnection(UserInputService.InputEnded:Connect(function(input)
+	trackKazuConnection(UserInputService.InputEnded:Connect(function(input)
 		if
 			input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch
@@ -4701,7 +4722,7 @@ local function getDropdownPosition(button, layout, maxHeight)
 end
 
 -- --- CREATE DROPDOWN ----------------------------------------------------------
-function GenesisX:CreateDropdown(parent, config)
+function KazuX:CreateDropdown(parent, config)
 	config = config or {}
 	local labelText = config.Label or "Dropdown"
 	local options = config.Options or {}
@@ -4975,7 +4996,7 @@ function GenesisX:CreateDropdown(parent, config)
 	}
 end
 
-function GenesisX:CreateMultiDropdown(parent, config)
+function KazuX:CreateMultiDropdown(parent, config)
 	config = config or {}
 	local labelText = config.Label or "Multi Select"
 	local options = config.Options or {}
@@ -5315,7 +5336,7 @@ function GenesisX:CreateMultiDropdown(parent, config)
 end
 
 -- --- CREATE CHECKBOX ----------------------------------------------------------
-function GenesisX:CreateCheckbox(parent, config)
+function KazuX:CreateCheckbox(parent, config)
 	config = config or {}
 	local text = config.Text or "Checkbox"
 	local default = config.Default or false
@@ -5397,7 +5418,7 @@ function GenesisX:CreateCheckbox(parent, config)
 end
 
 -- --- CREATE LABEL -------------------------------------------------------------
-function GenesisX:CreateLabel(parent, config)
+function KazuX:CreateLabel(parent, config)
 	config = config or {}
 	local text = config.Text or "Label"
 	local color = config.Color or self.Theme.TextSecondary
@@ -5513,7 +5534,7 @@ function GenesisX:CreateLabel(parent, config)
 end
 
 -- --- CREATE LABEL TOGGLE SUBTITLE ---------------------------------------------
-function GenesisX:CreateLabelToggleSubTitle(parent, config)
+function KazuX:CreateLabelToggleSubTitle(parent, config)
 	config = config or {}
 	local titleText = config.Title or "Title"
 	local subtitles = config.Subtitles or {}
@@ -5752,7 +5773,7 @@ function GenesisX:CreateLabelToggleSubTitle(parent, config)
 end
 
 -- --- CREATE SEPARATOR ---------------------------------------------------------
-function GenesisX:CreateSeparator(parent)
+function KazuX:CreateSeparator(parent)
 	local wrap = Instance.new("Frame")
 	wrap.Name = "Separator"
 	wrap.BackgroundTransparency = 1
@@ -5774,7 +5795,7 @@ function GenesisX:CreateSeparator(parent)
 end
 
 -- --- CREATE STATUS CARD -------------------------------------------------------
-function GenesisX:CreateStatusCard(parent, config)
+function KazuX:CreateStatusCard(parent, config)
 	config = config or {}
 	local title = config.Title or "Status"
 	local height = self:S(110)
@@ -5929,9 +5950,9 @@ function GenesisX:CreateStatusCard(parent, config)
 end
 
 -- ===============================================================================
--- --- NOTIFICATIONS - REDESIGN GENESISX ---------------------------------------
+-- --- NOTIFICATIONS - REDESIGN KAZUX ---------------------------------------
 -- ===============================================================================
-function GenesisX:Notify(config)
+function KazuX:Notify(config)
 	config = config or {}
 	local message = config.Text or "Notificacao"
 	local title = config.Title or nil
@@ -5954,14 +5975,14 @@ function GenesisX:Notify(config)
 		warning = self.Theme.Warning,
 		error = self.Theme.Error,
 		info = self.Theme.Info,
-		genesis = self.Theme.Accent,
+		kazu = self.Theme.Accent,
 	}
 	local typeIcons = {
 		success = "lucide-check-circle",
 		warning = "lucide-alert-triangle",
 		error = "lucide-x-circle",
 		info = "lucide-info",
-		genesis = "lucide-genesis-hub",
+		kazu = "lucide-crown",
 	}
 	local accentColor = typeColors[ntype] or self.Theme.Info
 	local iconName = typeIcons[ntype] or "lucide-info"
@@ -6280,7 +6301,7 @@ function GenesisX:Notify(config)
 end
 
 -- --- TRANSPARENCY -----------------------------------------------------------
-function GenesisX:SetTransparency(value)
+function KazuX:SetTransparency(value)
 	value = math.clamp(value, 0, 1)
 	self.Config.Transparency = value
 	self:_SaveConfigFile("transparency.json", value)
@@ -6335,41 +6356,41 @@ function GenesisX:SetTransparency(value)
 end
 
 -- --- DESTROY ------------------------------------------------------------------
-function GenesisX:Destroy()
+function KazuX:Destroy()
 	if self.ScreenGui then
 		self.ScreenGui:Destroy()
 	end
 end
 
-function GenesisX:GetWindow()
+function KazuX:GetWindow()
 	return self.MainFrame
 end
 
-function GenesisX:SetVisible(visible)
+function KazuX:SetVisible(visible)
 	if self.MainFrame then
 		self.MainFrame.Visible = visible
 	end
 end
 
-function GenesisX:Toggle()
+function KazuX:Toggle()
 	if self.MainFrame then
 		self:SetVisible(not self.MainFrame.Visible)
 	end
 end
 
-function GenesisX:SetPosition(position)
+function KazuX:SetPosition(position)
 	if self.MainFrame then
 		self.MainFrame.Position = position
 	end
 end
 
-function GenesisX:SetSize(size)
+function KazuX:SetSize(size)
 	if self.MainFrame then
 		self.MainFrame.Size = size
 	end
 end
 
-function GenesisX:SetTheme(newTheme)
+function KazuX:SetTheme(newTheme)
 	local oldTheme = self.Theme
 	local targetTheme
 	local themeString = "Dark"
@@ -6465,7 +6486,7 @@ function GenesisX:SetTheme(newTheme)
 	end
 end
 
-function GenesisX:SetFont(fontName)
+function KazuX:SetFont(fontName)
 	self.Font = fontName or "Gotham"
 	self:_SaveConfigFile("font.json", self.Font)
 	local newFont = self:GetFont()
@@ -6504,9 +6525,9 @@ local env = (getgenv and getgenv()) or _G or {}
 env.G = env.G or {}
 env.G.reset = function()
 	local filesToDelete = {
-		"GenesisX/Config/theme.json",
-		"GenesisX/Config/font.json",
-		"GenesisX/Config/transparency.json",
+		"KazuX/Config/theme.json",
+		"KazuX/Config/font.json",
+		"KazuX/Config/transparency.json",
 	}
 	for _, path in ipairs(filesToDelete) do
 		pcall(function()
@@ -6518,8 +6539,8 @@ env.G.reset = function()
 		end)
 	end
 	-- Notify user
-	if GenesisX.ScreenGui then
-		GenesisX:Notify({
+	if KazuX.ScreenGui then
+		KazuX:Notify({
 			Title = "Config Reset",
 			Text = "Settings reset successfully!",
 			Subtitle = "Theme, Font, and Transparency have been restored.",
@@ -6530,12 +6551,12 @@ env.G.reset = function()
 	return true
 end
 
-env.SpectrumX = GenesisX
+env.SpectrumX = KazuX
 env.Notify = function(...)
-	return GenesisX:Notify(...)
+	return KazuX:Notify(...)
 end
 
-return GenesisX
+return KazuX
 
 end
 
@@ -6557,7 +6578,7 @@ local function run(B, T, P, DfT, ...)
 	-- These two locals intentionally replace only task scheduling and legacy
 	-- spawn calls inside run; the lifecycle implementation stays outside this
 	-- register-heavy function to remain below Luau's 200-local limit.
-	local task, spawn = startGenesisRuntime(runtimeEnvironment, _G)
+	local task, spawn = startKazuRuntime(runtimeEnvironment, _G)
 
 	local function getExecutorName()
 		if identifyexecutor then
@@ -6620,7 +6641,7 @@ local function run(B, T, P, DfT, ...)
 	if isUnsupportedExecutor(EXECUTOR_NAME) then
 		pcall(function()
 			game:GetService("StarterGui"):SetCore("SendNotification", {
-				Title = "GENESIS HUB",
+				Title = "KAZU HUB",
 				Text = EXECUTOR_NAME .. " is not supported!",
 				Duration = 6,
 			})
@@ -6628,7 +6649,7 @@ local function run(B, T, P, DfT, ...)
 		task.wait(3)
 		pcall(function()
 			game.Players.LocalPlayer:Kick(
-				"GENESIS HUB: "
+				"KAZU HUB: "
 					.. EXECUTOR_NAME
 					.. " is not supported; use another executor (preferably a high-tier one)!"
 			)
@@ -6641,7 +6662,7 @@ local function run(B, T, P, DfT, ...)
 	-- pin the deployed Worker URL and READ key in the distributed client build.
 	local Hub
 	do
-	local hubConfig = ((getgenv and getgenv()) or _G).GenesisEventHubConfig or _G.GenesisEventHubConfig or {}
+	local hubConfig = ((getgenv and getgenv()) or _G).KazuEventHubConfig or _G.KazuEventHubConfig or {}
 	local EVENT_HUB_API = tostring(hubConfig.BaseUrl or ""):gsub("/+$", "")
 	local EVENT_HUB_READ_KEY = tostring(hubConfig.ReadKey or "")
 	local EVENT_HUB_POLL_SECONDS = 5
@@ -6793,7 +6814,7 @@ local function run(B, T, P, DfT, ...)
 		return false
 	end
 
-	_G._GenesisEventHubClient = Hub
+	_G._KazuEventHubClient = Hub
 	end
 
 	function GetEvents(channel)
@@ -6841,8 +6862,8 @@ local function run(B, T, P, DfT, ...)
 
 	-- Retire globals from earlier builds without changing the executor's own
 	-- auto-execute or teleport queue configuration.
-	_G.GENESIS_SCRIPT_URL = nil
-	_G.GENESIS_SCRIPT_FILE = nil
+	_G.KAZU_SCRIPT_URL = nil
+	_G.KAZU_SCRIPT_FILE = nil
 	_G._autoExecuteQueued = nil
 	_G._autoExecuteLastQueue = nil
 	_G.buildAutoExecuteCode = nil
@@ -6985,7 +7006,7 @@ local function run(B, T, P, DfT, ...)
 
 	local function setupProximityPrompt(prompt)
 		if prompt:IsA("ProximityPrompt") then
-			local runtime = getGenesisRuntimeState()
+			local runtime = getKazuRuntimeState()
 			if runtime and runtime.active and runtime.promptStates and not runtime.promptStates[prompt] then
 				runtime.promptStates[prompt] = {
 					HoldDuration = prompt.HoldDuration,
@@ -7001,7 +7022,7 @@ local function run(B, T, P, DfT, ...)
 		setupProximityPrompt(obj)
 	end
 
-	trackGenesisConnection(workspace.DescendantAdded:Connect(setupProximityPrompt))
+	trackKazuConnection(workspace.DescendantAdded:Connect(setupProximityPrompt))
 
 	_G.name_game = "King_Legacy"
 	_G.Setting = {
@@ -7167,16 +7188,25 @@ local function run(B, T, P, DfT, ...)
 
 	function LoadSettings()
 		if readfile and writefile and isfile and isfolder then
-			if not isfolder("GenesisX") then
-				makefolder("GenesisX")
+			if not isfolder("KazuX") then
+				makefolder("KazuX")
 			end
-			if not isfolder("GenesisX/Saves") then
-				makefolder("GenesisX/Saves")
+			if not isfolder("KazuX/Saves") then
+				makefolder("KazuX/Saves")
 			end
-			local filePath = "GenesisX/Saves/" .. _G.name_game .. ".json"
-			if isfile(filePath) then
+			local filePath = "KazuX/Saves/" .. _G.name_game .. ".json"
+			local sourcePath = filePath
+			local migrated = false
+			if not isfile(sourcePath) then
+				local legacyPath = ("Gene" .. "sisX/Saves/") .. _G.name_game .. ".json"
+				if isfile(legacyPath) then
+					sourcePath = legacyPath
+					migrated = true
+				end
+			end
+			if isfile(sourcePath) then
 				local success, data = pcall(function()
-					return HttpService:JSONDecode(readfile(filePath))
+					return HttpService:JSONDecode(readfile(sourcePath))
 				end)
 				if success and data then
 					for key, value in pairs(data) do
@@ -7190,6 +7220,9 @@ local function run(B, T, P, DfT, ...)
 						_G.Setting.autoDailyQuestsMaster[1] = data.autoDailyQuest == true
 							or data.autoSecondSeaDailyQuest == true
 					end
+					if migrated then
+						SaveSettings()
+					end
 					print("YOKOSO, WATASHI NO SOUL SOCIETY.")
 				end
 			end
@@ -7198,7 +7231,7 @@ local function run(B, T, P, DfT, ...)
 
 	function SaveSettings()
 		if readfile and writefile and isfile and isfolder then
-			local filePath = "GenesisX/Saves/" .. _G.name_game .. ".json"
+			local filePath = "KazuX/Saves/" .. _G.name_game .. ".json"
 			local dataToSave = {}
 			for key, value in pairs(_G.Setting) do
 				dataToSave[key] = value[1]
@@ -7209,18 +7242,18 @@ local function run(B, T, P, DfT, ...)
 
 	LoadSettings()
 
-	_G._GenesisFishingPositionConfigByPlaceId = {
+	_G._KazuFishingPositionConfigByPlaceId = {
 		[4520749081] = { slot = "Sea1", sea = 1 },
 		[6381829480] = { slot = "Sea2", sea = 2 },
 		[15759515082] = { slot = "Sea3", sea = 3 },
 	}
 
-	_G._GenesisGetFishingPositionConfig = function(placeId)
-		return _G._GenesisFishingPositionConfigByPlaceId[tonumber(placeId) or game.PlaceId]
+	_G._KazuGetFishingPositionConfig = function(placeId)
+		return _G._KazuFishingPositionConfigByPlaceId[tonumber(placeId) or game.PlaceId]
 	end
 
-	_G._GenesisGetConfiguredFishingCFrame = function(placeId)
-		local config = _G._GenesisGetFishingPositionConfig(placeId)
+	_G._KazuGetConfiguredFishingCFrame = function(placeId)
+		local config = _G._KazuGetFishingPositionConfig(placeId)
 		if not config then
 			return nil, "Fishing position is unsupported in this sea", nil
 		end
@@ -7266,7 +7299,7 @@ local function run(B, T, P, DfT, ...)
 
 	_G.notifiedEvents = {}
 	_G.lastFruitStock = ""
-	_G._GenesisFruitLiveState = nil
+	_G._KazuFruitLiveState = nil
 	_G.playerCount = 0
 	_G.jobIdEncoded = ""
 	_G.pos_skill = CFrame.new(0, 0, 0)
@@ -7325,10 +7358,10 @@ local function run(B, T, P, DfT, ...)
 	_G.ghostChestAttemptState = setmetatable({}, { __mode = "k" })
 	_G.ghostChestExhaustedNotified = setmetatable({}, { __mode = "k" })
 	_G.lastWhirlpoolNotified = false
-	_G._GenesisPriorityOwner = "resolving"
-	_G._GenesisPriorityDetail = "startup"
-	_G._GenesisPriorityUpdatedAt = os.clock()
-	_G._GenesisPriorityRank = {
+	_G._KazuPriorityOwner = "resolving"
+	_G._KazuPriorityDetail = "startup"
+	_G._KazuPriorityUpdatedAt = os.clock()
+	_G._KazuPriorityRank = {
 		dungeon_committed = 0,
 		major_sea_event = 1,
 		world_raid_boss = 2,
@@ -7339,8 +7372,8 @@ local function run(B, T, P, DfT, ...)
 		daily_quest = 7,
 		fishing = 8,
 	}
-	_G._GenesisDailyReturnRequested = false
-	_G._GenesisDungeonCommit = {
+	_G._KazuDailyReturnRequested = false
+	_G._KazuDungeonCommit = {
 		latched = false,
 		stage = "outside",
 		latchedAt = 0,
@@ -7373,7 +7406,7 @@ local function run(B, T, P, DfT, ...)
 		GhostShip = false,
 	}
 
-	_G._GenesisGetVisibleDungeonPicker = function()
+	_G._KazuGetVisibleDungeonPicker = function()
 		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
 		local chooseMap = playerGui and playerGui:FindFirstChild("ChooseMap")
 		local frame = chooseMap and chooseMap:FindFirstChild("ChooseMapFrame")
@@ -7389,7 +7422,7 @@ local function run(B, T, P, DfT, ...)
 		return chooseMap, frame
 	end
 
-	_G._GenesisGetSeaEventCountdown = function()
+	_G._KazuGetSeaEventCountdown = function()
 		if game.PlaceId ~= 15759515082 then
 			return nil, nil
 		end
@@ -7423,18 +7456,18 @@ local function run(B, T, P, DfT, ...)
 		return nil, timerText
 	end
 
-	_G._GenesisIsSeaEventNear = function()
+	_G._KazuIsSeaEventNear = function()
 		if GetSetting("stopDungeonNearSeaEvent") == false then
 			return false, nil, nil
 		end
-		local seconds, timerText = _G._GenesisGetSeaEventCountdown()
+		local seconds, timerText = _G._KazuGetSeaEventCountdown()
 		return seconds ~= nil and seconds <= 15 * 60, seconds, timerText
 	end
 
-	_G._GenesisUpdateDungeonCommit = function()
-		local state = _G._GenesisDungeonCommit
+	_G._KazuUpdateDungeonCommit = function()
+		local state = _G._KazuDungeonCommit
 		local now = os.clock()
-		local picker = _G._GenesisGetVisibleDungeonPicker()
+		local picker = _G._KazuGetVisibleDungeonPicker()
 		if picker then
 			if not state.latched or state.stage ~= "picker" then
 				state.latchedAt = now
@@ -7488,8 +7521,8 @@ local function run(B, T, P, DfT, ...)
 		return false, state.stage
 	end
 
-	_G._GenesisCancelDungeonEntry = function(reason)
-		local committed = _G._GenesisUpdateDungeonCommit()
+	_G._KazuCancelDungeonEntry = function(reason)
+		local committed = _G._KazuUpdateDungeonCommit()
 		if committed then
 			return false
 		end
@@ -7515,13 +7548,13 @@ local function run(B, T, P, DfT, ...)
 		return true
 	end
 
-	_G._GenesisSetPriorityOwner = function(owner, detail)
+	_G._KazuSetPriorityOwner = function(owner, detail)
 		owner = owner or "idle"
 		-- The picker can appear between the resolver's first state check and a leaf
 		-- activity returning. Revalidate at the ownership boundary so that narrow
 		-- race cannot publish (or retain) an outside owner after entry is committed.
-		if owner ~= "dungeon_committed" and _G._GenesisPriorityOwner == "dungeon_entry" then
-			local committed, stage = _G._GenesisUpdateDungeonCommit()
+		if owner ~= "dungeon_committed" and _G._KazuPriorityOwner == "dungeon_entry" then
+			local committed, stage = _G._KazuUpdateDungeonCommit()
 			if committed then
 				owner = "dungeon_committed"
 				detail = stage
@@ -7540,9 +7573,9 @@ local function run(B, T, P, DfT, ...)
 				end
 			end
 		end
-		local previous = _G._GenesisPriorityOwner
+		local previous = _G._KazuPriorityOwner
 		if previous == "dungeon_entry" and owner ~= "dungeon_entry" and owner ~= "dungeon_committed" then
-			_G._GenesisCancelDungeonEntry("preempted_by_" .. owner)
+			_G._KazuCancelDungeonEntry("preempted_by_" .. owner)
 		end
 
 		local previousWasEvent = previous == "major_sea_event" or previous == "serpent" or previous == "galleon"
@@ -7557,17 +7590,17 @@ local function run(B, T, P, DfT, ...)
 			_G.currentEventMaxHealth = 0
 		end
 
-		_G._GenesisPriorityOwner = owner
-		_G._GenesisPriorityDetail = detail
-		_G._GenesisPriorityUpdatedAt = os.clock()
+		_G._KazuPriorityOwner = owner
+		_G._KazuPriorityDetail = detail
+		_G._KazuPriorityUpdatedAt = os.clock()
 	end
 
-	_G._GenesisDungeonOwnsAutomation = function()
-		local committed, stage = _G._GenesisUpdateDungeonCommit()
+	_G._KazuDungeonOwnsAutomation = function()
+		local committed, stage = _G._KazuUpdateDungeonCommit()
 		if committed then
 			return true, stage
 		end
-		local owner = _G._GenesisPriorityOwner
+		local owner = _G._KazuPriorityOwner
 		if owner == "dungeon_entry" then
 			return true, "entry"
 		end
@@ -7577,20 +7610,20 @@ local function run(B, T, P, DfT, ...)
 		return false, "outside"
 	end
 
-	_G._GenesisCanStartDungeon = function()
+	_G._KazuCanStartDungeon = function()
 		if not GetSetting("auto_dungeon_v2") then
 			return false, "disabled"
 		end
-		local committed, stage = _G._GenesisUpdateDungeonCommit()
+		local committed, stage = _G._KazuUpdateDungeonCommit()
 		if committed then
 			return true, stage
 		end
-		local nearEvent, _, timerText = _G._GenesisIsSeaEventNear()
+		local nearEvent, _, timerText = _G._KazuIsSeaEventNear()
 		if nearEvent then
 			return false, "sea_event_near:" .. tostring(timerText)
 		end
-		if _G._GenesisPriorityOwner ~= "dungeon_entry" then
-			return false, "owned_by:" .. tostring(_G._GenesisPriorityOwner)
+		if _G._KazuPriorityOwner ~= "dungeon_entry" then
+			return false, "owned_by:" .. tostring(_G._KazuPriorityOwner)
 		end
 		return true, "entry"
 	end
@@ -7612,8 +7645,8 @@ local function run(B, T, P, DfT, ...)
 	_G.recentlyLeftTimeout = 120
 	_G.lastEventState = false
 
-	COMPLETED_FILE = "GenesisX/Config/done.json"
-	IGNORE_FILE = "GenesisX/Config/ignore.json"
+	COMPLETED_FILE = "KazuX/Config/done.json"
+	IGNORE_FILE = "KazuX/Config/ignore.json"
 
 	function loadCompletedServers()
 		if not readfile then
@@ -7640,11 +7673,11 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 		pcall(function()
-			if not isfolder("GenesisX") then
-				makefolder("GenesisX")
+			if not isfolder("KazuX") then
+				makefolder("KazuX")
 			end
-			if not isfolder("GenesisX/Config") then
-				makefolder("GenesisX/Config")
+			if not isfolder("KazuX/Config") then
+				makefolder("KazuX/Config")
 			end
 			local dataToSave = { dn = completedList }
 			writefile(COMPLETED_FILE, HttpService:JSONEncode(dataToSave))
@@ -7679,9 +7712,9 @@ local function run(B, T, P, DfT, ...)
 		table.insert(completed, { jobId = currentJobId, timestamp = tick() })
 		saveCompletedServers(completed)
 		SpectrumX:Notify({
-			Title = "GENESIS HUB",
+			Title = "KAZU HUB",
 			Text = "Thinking ...",
-			Type = "genesis",
+			Type = "kazu",
 			Duration = 2,
 		})
 	end
@@ -7732,11 +7765,11 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 		pcall(function()
-			if not isfolder("GenesisX") then
-				makefolder("GenesisX")
+			if not isfolder("KazuX") then
+				makefolder("KazuX")
 			end
-			if not isfolder("GenesisX/Config") then
-				makefolder("GenesisX/Config")
+			if not isfolder("KazuX/Config") then
+				makefolder("KazuX/Config")
 			end
 			local dataToSave = { ig = ignoredList }
 			writefile(IGNORE_FILE, HttpService:JSONEncode(dataToSave))
@@ -7967,8 +8000,8 @@ local function run(B, T, P, DfT, ...)
 				if humanoid then
 					humanoid:EquipTool(tool)
 					if toolTip == "Sword" then
-						if _G._GenesisRememberSword then
-							_G._GenesisRememberSword(tool)
+						if _G._KazuRememberSword then
+							_G._KazuRememberSword(tool)
 						elseif tool.Name ~= "Basic Rod"
 							and string.match(string.lower(tool.Name), "%srod$") == nil
 						then
@@ -7999,7 +8032,7 @@ local function run(B, T, P, DfT, ...)
 	-- Keep M1 responsive without returning to the old unbounded Stepped overlap.
 	-- Combat branches renew a short attack lease through click(); this worker then
 	-- continues M1 independently while slower skill keypresses are still yielding.
-	_G._GenesisM1State = {
+	_G._KazuM1State = {
 		-- About eleven swings per second keeps combat responsive without making
 		-- every accepted M1 render/effect compete for the same mobile frame.
 		interval = 0.09,
@@ -8010,7 +8043,7 @@ local function run(B, T, P, DfT, ...)
 		inFlight = 0,
 	}
 
-	_G._GenesisInvokeM1 = function(tool)
+	_G._KazuInvokeM1 = function(tool)
 		if not tool or not tool:IsA("Tool") then
 			return false
 		end
@@ -8030,7 +8063,7 @@ local function run(B, T, P, DfT, ...)
 		return true
 	end
 
-	_G._GenesisPerformM1Pass = function()
+	_G._KazuPerformM1Pass = function()
 		local character = LocalPlayer.Character
 		if not character then
 			return
@@ -8052,7 +8085,7 @@ local function run(B, T, P, DfT, ...)
 			for _, container in ipairs({ character, LocalPlayer.Backpack }) do
 				for _, tool in pairs(container:GetChildren()) do
 					if tool:IsA("Tool") and wantedToolTips[tool.ToolTip] then
-						_G._GenesisInvokeM1(tool)
+						_G._KazuInvokeM1(tool)
 					end
 				end
 			end
@@ -8063,14 +8096,14 @@ local function run(B, T, P, DfT, ...)
 		-- baseline sent all three prefixes sequentially; two were guaranteed no-ops
 		-- and made every swing wait for three RemoteFunction round trips.
 		for _, tool in pairs(character:GetChildren()) do
-			if _G._GenesisInvokeM1(tool) then
+			if _G._KazuInvokeM1(tool) then
 				return
 			end
 		end
 	end
 
-	_G._GenesisDispatchM1IfReady = function()
-		local state = _G._GenesisM1State
+	_G._KazuDispatchM1IfReady = function()
+		local state = _G._KazuM1State
 		if not state then
 			return
 		end
@@ -8086,8 +8119,8 @@ local function run(B, T, P, DfT, ...)
 		state.lastDispatch = os.clock()
 		state.inFlight = state.inFlight + 1
 		task.spawn(function()
-			pcall(_G._GenesisPerformM1Pass)
-			if _G._GenesisM1State == state then
+			pcall(_G._KazuPerformM1Pass)
+			if _G._KazuM1State == state then
 				state.inFlight = math.max(0, state.inFlight - 1)
 			end
 		end)
@@ -8097,16 +8130,16 @@ local function run(B, T, P, DfT, ...)
 		if fishingOwnsWeaponSlot() then
 			return
 		end
-		local state = _G._GenesisM1State
+		local state = _G._KazuM1State
 		if state then
 			state.requestedUntil = os.clock() + state.lease
-			_G._GenesisDispatchM1IfReady()
+			_G._KazuDispatchM1IfReady()
 		end
 	end
 
 	spawn(function()
 		while task.wait(0.03) do
-			local dispatch = _G._GenesisDispatchM1IfReady
+			local dispatch = _G._KazuDispatchM1IfReady
 			if type(dispatch) ~= "function" then
 				break
 			end
@@ -8114,13 +8147,13 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
-	_G._GenesisSkillLastSent = {}
-	_G._GenesisSkillReady = function(key)
+	_G._KazuSkillLastSent = {}
+	_G._KazuSkillReady = function(key)
 		local now = os.clock()
-		if now - (_G._GenesisSkillLastSent[key] or 0) < 0.35 then
+		if now - (_G._KazuSkillLastSent[key] or 0) < 0.35 then
 			return false
 		end
-		_G._GenesisSkillLastSent[key] = now
+		_G._KazuSkillLastSent[key] = now
 		return true
 	end
 
@@ -8223,7 +8256,7 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	local function tp(cframe, dailyReturnHop)
-		if _G._GenesisDailyReturnRequested and not dailyReturnHop then
+		if _G._KazuDailyReturnRequested and not dailyReturnHop then
 			return false
 		end
 		return pcall(function()
@@ -8232,7 +8265,7 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	local function getDownwardCFrame(targetCFrame)
-		if fishingOwnsWeaponSlot() or _G._GenesisDailyReturnRequested then
+		if fishingOwnsWeaponSlot() or _G._KazuDailyReturnRequested then
 			return targetCFrame
 		end
 		local height = GetSetting("distance") or 8
@@ -8275,7 +8308,7 @@ local function run(B, T, P, DfT, ...)
 	_G.farmFixOwnershipReleased = false
 
 	local function applyFarmFix(targetCFrame, targetPart)
-		if fishingOwnsWeaponSlot() or _G._GenesisDailyReturnRequested then
+		if fishingOwnsWeaponSlot() or _G._KazuDailyReturnRequested then
 			return false
 		end
 		_G.farmFixTargetCF = targetCFrame
@@ -8335,7 +8368,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		_G.farmFixThread = task.spawn(function()
-			while _G.farmFixTargetCF and not fishingOwnsWeaponSlot() and not _G._GenesisDailyReturnRequested do
+			while _G.farmFixTargetCF and not fishingOwnsWeaponSlot() and not _G._KazuDailyReturnRequested do
 				if root and root.Parent then
 					-- Combat actions are serialized to prevent overlapping M1/skill work,
 					-- but movement must not wait for that yielding dispatcher. Follow the
@@ -8369,7 +8402,7 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	local function updateFarmFix(targetCFrame, targetPart)
-		if fishingOwnsWeaponSlot() or _G._GenesisDailyReturnRequested then
+		if fishingOwnsWeaponSlot() or _G._KazuDailyReturnRequested then
 			return false
 		end
 		_G.farmFixTargetCF = targetCFrame
@@ -8425,7 +8458,7 @@ local function run(B, T, P, DfT, ...)
 	-- Saved settings are preferences, not proof that their target exists in this
 	-- sea. This is the single eligibility boundary used by priority resolution and
 	-- by workers that can otherwise move independently of the resolver.
-	_G._GenesisSettingPlaceIds = {
+	_G._KazuSettingPlaceIds = {
 		autoFarmKaido = 6381829480,
 		autoDarkBeard = 6381829480,
 		autoCrimsonDemon = 6381829480,
@@ -8485,7 +8518,7 @@ local function run(B, T, P, DfT, ...)
 		if not GetSetting(settingKey) then
 			return false
 		end
-		local requiredPlaceId = _G._GenesisSettingPlaceIds[settingKey]
+		local requiredPlaceId = _G._KazuSettingPlaceIds[settingKey]
 		if requiredPlaceId and game.PlaceId ~= requiredPlaceId then
 			return false
 		end
@@ -8505,9 +8538,9 @@ local function run(B, T, P, DfT, ...)
 		end
 		return true
 	end
-	_G._GenesisIsFeatureEnabledInCurrentSea = isFeatureEnabledInCurrentSea
-	_G._GenesisGetCurrentSeaSelectedBoss = getCurrentSeaSelectedBoss
-	_G._GenesisGetCurrentSeaSelectedMaterial = getCurrentSeaSelectedMaterial
+	_G._KazuIsFeatureEnabledInCurrentSea = isFeatureEnabledInCurrentSea
+	_G._KazuGetCurrentSeaSelectedBoss = getCurrentSeaSelectedBoss
+	_G._KazuGetCurrentSeaSelectedMaterial = getCurrentSeaSelectedMaterial
 
 	_G.isAnyCombatActive = function()
 		if _G.isLootingChests or _G.storingFruit or _G.seaEventActive then
@@ -8516,7 +8549,7 @@ local function run(B, T, P, DfT, ...)
 		if _G.isProgressingBusoV2 or _G.isProgressingObservationV2 then
 			return true
 		end
-		if _G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation() then
+		if _G._KazuDungeonOwnsAutomation and _G._KazuDungeonOwnsAutomation() then
 			return true
 		end
 		-- Only continuous current-sea work belongs here. Live sea events, raid
@@ -8550,7 +8583,7 @@ local function run(B, T, P, DfT, ...)
 	local _chestLootTargetCF = nil
 
 	local function applyChestLootFix(targetCFrame)
-		if _G._GenesisDailyReturnRequested then return end
+		if _G._KazuDailyReturnRequested then return end
 		_chestLootTargetCF = targetCFrame
 		if _chestLootThread then
 			return
@@ -8591,7 +8624,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		_chestLootThread = task.spawn(function()
-			while _chestLootTargetCF and not _G._GenesisDailyReturnRequested do
+			while _chestLootTargetCF and not _G._KazuDailyReturnRequested do
 				if root and root.Parent then
 					if _chestLootBP then
 						_chestLootBP.Position = _chestLootTargetCF.Position
@@ -8647,7 +8680,7 @@ local function run(B, T, P, DfT, ...)
 		local function disconnectSeaKingChest()
 			if seaKingChestConnection then
 				seaKingChestConnection:Disconnect()
-				local runtime = getGenesisRuntimeState()
+				local runtime = getKazuRuntimeState()
 				if runtime then
 					runtime.connections[seaKingChestConnection] = nil
 				end
@@ -8669,7 +8702,7 @@ local function run(B, T, P, DfT, ...)
 			if sound and sound ~= seaKingChestSound then
 				disconnectSeaKingChest()
 				seaKingChestSound = sound
-				seaKingChestConnection = trackGenesisConnection(sound.Played:Connect(function()
+				seaKingChestConnection = trackKazuConnection(sound.Played:Connect(function()
 					seaKingChestOpenedAt = tick()
 				end))
 				if sound.IsPlaying then
@@ -8689,7 +8722,7 @@ local function run(B, T, P, DfT, ...)
 				if seaKingChestOpenedAt and tick() - seaKingChestOpenedAt >= 1.5 then
 					break
 				end
-				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+				if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 					break
 				end
 
@@ -8760,7 +8793,7 @@ local function run(B, T, P, DfT, ...)
 			_G.lootState[eventType] = { active = false }
 			_G.lootThreads[eventType] = nil
 
-			if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+			if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 				return
 			end
 			if not isFeatureEnabledInCurrentSea("autoSKHD") then
@@ -8980,8 +9013,8 @@ local function run(B, T, P, DfT, ...)
 			-- equips an already-instantiated Tool. Reuse the validated inventory path
 			-- below to restore the exact remembered sword; never fall back to fists,
 			-- fruit, or an arbitrary sword while that bounded restore is pending.
-			if type(_G._GenesisEnsureCombatSword) == "function" then
-				_G._GenesisEnsureCombatSword("outside_combat")
+			if type(_G._KazuEnsureCombatSword) == "function" then
+				_G._KazuEnsureCombatSword("outside_combat")
 			else
 				tooltip("Sword")
 			end
@@ -9013,16 +9046,16 @@ local function run(B, T, P, DfT, ...)
 
 			local pos = _G.pos_skill
 			local keys = {}
-			if GetSetting("z") and _G._GenesisSkillReady("Z") then
+			if GetSetting("z") and _G._KazuSkillReady("Z") then
 				table.insert(keys, "Z")
 			end
-			if GetSetting("x") and _G._GenesisSkillReady("X") then
+			if GetSetting("x") and _G._KazuSkillReady("X") then
 				table.insert(keys, "X")
 			end
-			if GetSetting("c") and _G._GenesisSkillReady("C") then
+			if GetSetting("c") and _G._KazuSkillReady("C") then
 				table.insert(keys, "C")
 			end
-			if GetSetting("v") and _G._GenesisSkillReady("V") then
+			if GetSetting("v") and _G._KazuSkillReady("V") then
 				if GetSetting("opeMethod") then
 					if not isTransformed() then
 						table.insert(keys, "V")
@@ -9031,13 +9064,13 @@ local function run(B, T, P, DfT, ...)
 					table.insert(keys, "V")
 				end
 			end
-			if GetSetting("f") and _G._GenesisSkillReady("F") then
+			if GetSetting("f") and _G._KazuSkillReady("F") then
 				table.insert(keys, "F")
 			end
-			if GetSetting("b") and _G._GenesisSkillReady("B") then
+			if GetSetting("b") and _G._KazuSkillReady("B") then
 				table.insert(keys, "B")
 			end
-			if GetSetting("e") and _G._GenesisSkillReady("E") then
+			if GetSetting("e") and _G._KazuSkillReady("E") then
 				table.insert(keys, "E")
 			end
 
@@ -9089,16 +9122,16 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		-- Default (Smart): keyboard.
-		if GetSetting("z") and _G._GenesisSkillReady("Z") then
+		if GetSetting("z") and _G._KazuSkillReady("Z") then
 			keyboard("Z")
 		end
-		if GetSetting("x") and _G._GenesisSkillReady("X") then
+		if GetSetting("x") and _G._KazuSkillReady("X") then
 			keyboard("X")
 		end
-		if GetSetting("c") and _G._GenesisSkillReady("C") then
+		if GetSetting("c") and _G._KazuSkillReady("C") then
 			keyboard("C")
 		end
-		if GetSetting("v") and _G._GenesisSkillReady("V") then
+		if GetSetting("v") and _G._KazuSkillReady("V") then
 			if GetSetting("opeMethod") then
 				if not isTransformed() then
 					keyboard("V")
@@ -9107,13 +9140,13 @@ local function run(B, T, P, DfT, ...)
 				keyboard("V")
 			end
 		end
-		if GetSetting("f") and _G._GenesisSkillReady("F") then
+		if GetSetting("f") and _G._KazuSkillReady("F") then
 			keyboard("F")
 		end
-		if GetSetting("b") and _G._GenesisSkillReady("B") then
+		if GetSetting("b") and _G._KazuSkillReady("B") then
 			keyboard("B")
 		end
-		if GetSetting("e") and _G._GenesisSkillReady("E") then
+		if GetSetting("e") and _G._KazuSkillReady("E") then
 			keyboard("E")
 		end
 	end
@@ -9235,7 +9268,7 @@ local function run(B, T, P, DfT, ...)
 	_G._removeConquestPosition = removeConquestPosition
 
 	local function isConquestBlocked()
-		return _G._GenesisDailyReturnRequested
+		return _G._KazuDailyReturnRequested
 			or _G.seaEventActive
 			or _G.raidBossTarget
 			or _G.isLootingChests
@@ -9245,10 +9278,10 @@ local function run(B, T, P, DfT, ...)
 			or _G.isProgressingObservationV2
 			-- An enabled dungeon that is currently preempted (for example by the
 			-- near-event gate) does not own this movement controller.
-			or (_G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation())
+			or (_G._KazuDungeonOwnsAutomation and _G._KazuDungeonOwnsAutomation())
 	end
 
-	trackGenesisConnection(RunService.Heartbeat:Connect(function()
+	trackKazuConnection(RunService.Heartbeat:Connect(function()
 		pcall(function()
 			if GetSetting("autoConquest") then
 				local character = LocalPlayer.Character
@@ -10123,12 +10156,22 @@ local function run(B, T, P, DfT, ...)
 		[2] = { label = "Second Sea", teleport = "SecondSea", place = _G.SEA2_ID },
 		[3] = { label = "Third Sea", teleport = "ThirdSea", place = _G.SEA3_ID },
 	}
-	local dailyJournalPath = "GenesisX/Saves/daily_quests_" .. tostring(LocalPlayer.UserId) .. ".json"
+	local dailyJournalPath = "KazuX/Saves/daily_quests_" .. tostring(LocalPlayer.UserId) .. ".json"
+	local dailyJournalSourcePath = dailyJournalPath
+	local migrateDailyJournal = false
 	local dailyJournal = { version = 1, highestUnlocked = 1, quests = {} }
 	if readfile and isfile then
 		pcall(function()
-			if isfile(dailyJournalPath) then
-				local loaded = HttpService:JSONDecode(readfile(dailyJournalPath))
+			if not isfile(dailyJournalSourcePath) then
+				local legacyPath = ("Gene" .. "sisX/Saves/daily_quests_")
+					.. tostring(LocalPlayer.UserId) .. ".json"
+				if isfile(legacyPath) then
+					dailyJournalSourcePath = legacyPath
+					migrateDailyJournal = true
+				end
+			end
+			if isfile(dailyJournalSourcePath) then
+				local loaded = HttpService:JSONDecode(readfile(dailyJournalSourcePath))
 				if type(loaded) == "table" and loaded.version == 1 then
 					dailyJournal = loaded
 				end
@@ -10137,18 +10180,21 @@ local function run(B, T, P, DfT, ...)
 	end
 	dailyJournal.quests = type(dailyJournal.quests) == "table" and dailyJournal.quests or {}
 	dailyCoordinator = { journal = dailyJournal, sea = dailySea }
-	_G.GenesisDaily = dailyCoordinator
+	_G.KazuDaily = dailyCoordinator
 
 	function dailyCoordinator.save()
 		if not (writefile and isfolder and makefolder) then
 			return false
 		end
 		local ok = pcall(function()
-			if not isfolder("GenesisX") then makefolder("GenesisX") end
-			if not isfolder("GenesisX/Saves") then makefolder("GenesisX/Saves") end
+			if not isfolder("KazuX") then makefolder("KazuX") end
+			if not isfolder("KazuX/Saves") then makefolder("KazuX/Saves") end
 			writefile(dailyJournalPath, HttpService:JSONEncode(dailyJournal))
 		end)
 		return ok
+	end
+	if migrateDailyJournal and dailyCoordinator.save() then
+		migrateDailyJournal = false
 	end
 
 	function dailyCoordinator.currentRank()
@@ -10204,8 +10250,8 @@ local function run(B, T, P, DfT, ...)
 		if dailyJournal.mainSea ~= rank then
 			dailyJournal.mainSea = rank
 			dailyJournal.route = nil
-			_G._GenesisDailyQuestTravelPending = false
-			_G._GenesisDailyReturnRequested = false
+			_G._KazuDailyQuestTravelPending = false
+			_G._KazuDailyReturnRequested = false
 			dailyCoordinator.save()
 		end
 		return true
@@ -10475,7 +10521,7 @@ local function run(B, T, P, DfT, ...)
 	local _seaEventTarget = nil
 	local _seaEventThread = nil
 	local _seaEventLockPosition = nil
-	_G._GenesisAbyssalAcquisition = {
+	_G._KazuAbyssalAcquisition = {
 		approachHeight = 18,
 		retrySeconds = 4,
 		maxAttempts = 3,
@@ -10489,7 +10535,7 @@ local function run(B, T, P, DfT, ...)
 		lastDestination = nil,
 	}
 	_G._stopAbyssalAcquisition = function()
-		local state = _G._GenesisAbyssalAcquisition
+		local state = _G._KazuAbyssalAcquisition
 		if type(state) ~= "table" then
 			return
 		end
@@ -10596,10 +10642,10 @@ local function run(B, T, P, DfT, ...)
 	_G._stopSeaEventBypass = stopSeaEventBypass
 
 	local function startSeaEventBypass(mob)
-		if _G._GenesisDailyReturnRequested or not mob or not mob.Parent then
+		if _G._KazuDailyReturnRequested or not mob or not mob.Parent then
 			return false
 		end
-		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+		if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 			return false
 		end
 		local mobHRP = getMobHRP(mob)
@@ -10627,7 +10673,7 @@ local function run(B, T, P, DfT, ...)
 
 		_seaEventThread = task.spawn(function()
 			while _seaEventTarget == mob and isValidMob(mob) and isPlayerAlive()
-				and not _G._GenesisDailyReturnRequested do
+				and not _G._KazuDailyReturnRequested do
 				local character = LocalPlayer.Character
 				local root = character and character:FindFirstChild("HumanoidRootPart")
 				if not root then
@@ -10673,13 +10719,13 @@ local function run(B, T, P, DfT, ...)
 		-- Finish that handoff before this function moves the character or starts the
 		-- 0.01-second sea lock. Returning "handoff" keeps the event reserved without
 		-- allowing another frame to attack with the rod.
-		if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("sea_event") then
+		if _G._KazuPrepareCombatFromFishing and not _G._KazuPrepareCombatFromFishing("sea_event") then
 			stopSeaEventBypass()
 			return "handoff"
 		end
 		-- Restoring the Primary weapon can yield while the entrance timer finishes.
 		-- Recheck the irreversible picker boundary before any outside movement.
-		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+		if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 			stopSeaEventBypass()
 			return "dungeon"
 		end
@@ -10703,7 +10749,7 @@ local function run(B, T, P, DfT, ...)
 		return "erro"
 	end
 
-	_G._GenesisFindAbyssalLocator = function()
+	_G._KazuFindAbyssalLocator = function()
 		local monster = Workspace:FindFirstChild("Monster")
 		local island = Workspace:FindFirstChild("Island")
 		local areas = Workspace:FindFirstChild("Areas")
@@ -10743,8 +10789,8 @@ local function run(B, T, P, DfT, ...)
 		return nil, nil
 	end
 
-	_G._GenesisApproachAbyssalLocator = function(locator, locatorCFrame)
-		local state = _G._GenesisAbyssalAcquisition
+	_G._KazuApproachAbyssalLocator = function(locator, locatorCFrame)
+		local state = _G._KazuAbyssalAcquisition
 		if type(state) ~= "table" then
 			return false
 		end
@@ -10754,7 +10800,7 @@ local function run(B, T, P, DfT, ...)
 			end
 			return false
 		end
-		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+		if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 			if type(_G._stopAbyssalAcquisition) == "function" then
 				_G._stopAbyssalAcquisition()
 			end
@@ -10790,11 +10836,11 @@ local function run(B, T, P, DfT, ...)
 			_G.seaEventActive = true
 		end
 
-		if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("abyssal_locator") then
+		if _G._KazuPrepareCombatFromFishing and not _G._KazuPrepareCombatFromFishing("abyssal_locator") then
 			_G.currentEventName = "Abyssal Tyrant (Switching Loadout)"
 			return true
 		end
-		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+		if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 			if type(_G._stopAbyssalAcquisition) == "function" then
 				_G._stopAbyssalAcquisition()
 			end
@@ -11096,10 +11142,10 @@ local function run(B, T, P, DfT, ...)
 				end
 				return true
 			elseif getSerpentLocation() then
-				if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("serpent_submerged") then
+				if _G._KazuPrepareCombatFromFishing and not _G._KazuPrepareCombatFromFishing("serpent_submerged") then
 					return true
 				end
-				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+				if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 					return true
 				end
 				removeFarmFix()
@@ -11126,14 +11172,14 @@ local function run(B, T, P, DfT, ...)
 		return hasEvent
 	end
 
-	_G._GenesisSeaKingAcquisition = {
+	_G._KazuSeaKingAcquisition = {
 		island = nil,
 		attempts = 0,
 		lastApproachAt = -math.huge,
 		sawBoss = false,
 	}
 
-	_G._GenesisFindSeaKingRewardChest = function(island)
+	_G._KazuFindSeaKingRewardChest = function(island)
 		local spawner = island and island:FindFirstChild("ChestSpawner")
 		if not spawner then
 			return nil
@@ -11146,14 +11192,14 @@ local function run(B, T, P, DfT, ...)
 		return nil
 	end
 
-	_G._GenesisApproachSeaKingIsland = function(island)
+	_G._KazuApproachSeaKingIsland = function(island)
 		if not isFeatureEnabledInCurrentSea("autoSKHD") then
 			removeChestLootFix()
 			_G.isLootingChests = false
 			_G.seaEventActive = false
 			return false
 		end
-		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+		if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 			return true
 		end
 		local main = island:FindFirstChild("Main") or island.PrimaryPart
@@ -11171,15 +11217,15 @@ local function run(B, T, P, DfT, ...)
 		_G.currentEventMaxHealth = 0
 		removeFarmFix()
 		stopSeaEventBypass()
-		if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("sea_king_island") then
+		if _G._KazuPrepareCombatFromFishing and not _G._KazuPrepareCombatFromFishing("sea_king_island") then
 			_G.currentEventName = "Sea King (Switching Loadout)"
 			return true
 		end
-		if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+		if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 			return true
 		end
 		local now = os.clock()
-		if _G._GenesisSeaKingAcquisition.attempts >= 3 or now - _G._GenesisSeaKingAcquisition.lastApproachAt < 4 then
+		if _G._KazuSeaKingAcquisition.attempts >= 3 or now - _G._KazuSeaKingAcquisition.lastApproachAt < 4 then
 			_G.currentEventName = "Sea King (Waiting for Spawn)"
 			return true
 		end
@@ -11190,9 +11236,9 @@ local function run(B, T, P, DfT, ...)
 			_G.currentEventName = "Sea King (Waiting for Respawn)"
 			return true
 		end
-		_G._GenesisSeaKingAcquisition.attempts = _G._GenesisSeaKingAcquisition.attempts + 1
-		_G._GenesisSeaKingAcquisition.lastApproachAt = now
-		_G.currentEventName = "Sea King (Locating " .. _G._GenesisSeaKingAcquisition.attempts .. "/3)"
+		_G._KazuSeaKingAcquisition.attempts = _G._KazuSeaKingAcquisition.attempts + 1
+		_G._KazuSeaKingAcquisition.lastApproachAt = now
+		_G.currentEventName = "Sea King (Locating " .. _G._KazuSeaKingAcquisition.attempts .. "/3)"
 		root.CFrame = CFrame.new(main.Position + Vector3.new(0, 85, 0))
 		root.AssemblyLinearVelocity = Vector3.zero
 		root.AssemblyAngularVelocity = Vector3.zero
@@ -11273,10 +11319,10 @@ local function run(B, T, P, DfT, ...)
 				end
 				return true
 			elseif getSerpentLocation() then
-				if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("serpent_submerged") then
+				if _G._KazuPrepareCombatFromFishing and not _G._KazuPrepareCombatFromFishing("serpent_submerged") then
 					return true
 				end
-				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+				if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 					return true
 				end
 				removeFarmFix()
@@ -11323,7 +11369,7 @@ local function run(B, T, P, DfT, ...)
 						if not isFeatureEnabledInCurrentSea("autoSKHD") then
 							return
 						end
-						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+						if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 							return
 						end
 
@@ -11332,9 +11378,9 @@ local function run(B, T, P, DfT, ...)
 						_G.isLootingChests = true
 						local handoffDeadline = os.clock() + 12
 						while
-							(not _G._GenesisUpdateDungeonCommit or not _G._GenesisUpdateDungeonCommit())
-							and _G._GenesisPrepareCombatFromFishing
-							and not _G._GenesisPrepareCombatFromFishing("hydra_loot")
+							(not _G._KazuUpdateDungeonCommit or not _G._KazuUpdateDungeonCommit())
+							and _G._KazuPrepareCombatFromFishing
+							and not _G._KazuPrepareCombatFromFishing("hydra_loot")
 							and isFeatureEnabledInCurrentSea("autoSKHD")
 							and os.clock() < handoffDeadline
 						do
@@ -11344,11 +11390,11 @@ local function run(B, T, P, DfT, ...)
 							_G.isLootingChests = false
 							return
 						end
-						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+						if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 							_G.isLootingChests = false
 							return
 						end
-						if _G._GenesisPrepareCombatFromFishing and fishingOwnsWeaponSlot() then
+						if _G._KazuPrepareCombatFromFishing and fishingOwnsWeaponSlot() then
 							_G.isLootingChests = false
 							return
 						end
@@ -11400,10 +11446,10 @@ local function run(B, T, P, DfT, ...)
 					local chestPos = findHydraChestPosition()
 					if chestPos then
 						_G.isLootingChests = true
-						if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("hydra_loot") then
+						if _G._KazuPrepareCombatFromFishing and not _G._KazuPrepareCombatFromFishing("hydra_loot") then
 							return true
 						end
-						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+						if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 							_G.isLootingChests = false
 							return true
 						end
@@ -11425,20 +11471,20 @@ local function run(B, T, P, DfT, ...)
 			-- === SEA KING ===
 			local seaKingMob = findSeaKingMob()
 			local seaKingIsland = findSeaKingIsland()
-			if _G._GenesisSeaKingAcquisition.island ~= seaKingIsland then
-				_G._GenesisSeaKingAcquisition.island = seaKingIsland
-				_G._GenesisSeaKingAcquisition.attempts = 0
-				_G._GenesisSeaKingAcquisition.lastApproachAt = -math.huge
-				_G._GenesisSeaKingAcquisition.sawBoss = false
+			if _G._KazuSeaKingAcquisition.island ~= seaKingIsland then
+				_G._KazuSeaKingAcquisition.island = seaKingIsland
+				_G._KazuSeaKingAcquisition.attempts = 0
+				_G._KazuSeaKingAcquisition.lastApproachAt = -math.huge
+				_G._KazuSeaKingAcquisition.sawBoss = false
 				_G.seaKingLootUnconfirmed = false
 			end
 			local rawSeaKing = Workspace.SeaMonster:FindFirstChild("SeaKing")
 			if rawSeaKing and rawSeaKing:FindFirstChild("Humanoid") then
-				_G._GenesisSeaKingAcquisition.sawBoss = true
+				_G._KazuSeaKingAcquisition.sawBoss = true
 			end
 
 			if seaKingMob and seaKingMob:FindFirstChild("Humanoid") and seaKingMob.Humanoid.Health > 0 then
-				_G._GenesisSeaKingAcquisition.sawBoss = true
+				_G._KazuSeaKingAcquisition.sawBoss = true
 				_G.seaKingIslandEmpty = false
 				_G.seaKingLootUnconfirmed = false
 				_G.seaKingJoinLootStarted = false
@@ -11464,16 +11510,16 @@ local function run(B, T, P, DfT, ...)
 						if not isFeatureEnabledInCurrentSea("autoSKHD") then
 							return
 						end
-						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+						if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 							return
 						end
 
 						_G.isLootingChests = true
 						local handoffDeadline = os.clock() + 12
 						while
-							(not _G._GenesisUpdateDungeonCommit or not _G._GenesisUpdateDungeonCommit())
-							and _G._GenesisPrepareCombatFromFishing
-							and not _G._GenesisPrepareCombatFromFishing("sea_king_loot")
+							(not _G._KazuUpdateDungeonCommit or not _G._KazuUpdateDungeonCommit())
+							and _G._KazuPrepareCombatFromFishing
+							and not _G._KazuPrepareCombatFromFishing("sea_king_loot")
 							and isFeatureEnabledInCurrentSea("autoSKHD")
 							and os.clock() < handoffDeadline
 						do
@@ -11483,11 +11529,11 @@ local function run(B, T, P, DfT, ...)
 							_G.isLootingChests = false
 							return
 						end
-						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+						if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 							_G.isLootingChests = false
 							return
 						end
-						if _G._GenesisPrepareCombatFromFishing and fishingOwnsWeaponSlot() then
+						if _G._KazuPrepareCombatFromFishing and fishingOwnsWeaponSlot() then
 							_G.isLootingChests = false
 							return
 						end
@@ -11528,12 +11574,12 @@ local function run(B, T, P, DfT, ...)
 				-- Unlike post-kill loot, an UNLEASHED island without a reward chest
 				-- is a pre-spawn locator. The Sea King model appears only after a player
 				-- approaches the island; the island alone is not proof of a kill.
-				if not _G._GenesisSeaKingAcquisition.sawBoss
-					and not _G._GenesisFindSeaKingRewardChest(seaKingIsland)
+				if not _G._KazuSeaKingAcquisition.sawBoss
+					and not _G._KazuFindSeaKingRewardChest(seaKingIsland)
 					and ReplicatedStorage:GetAttribute("SeaMonsterSpawnText") == "UNLEASHED"
 					and ReplicatedStorage:GetAttribute("Hydra") ~= true
 				then
-					return _G._GenesisApproachSeaKingIsland(seaKingIsland)
+					return _G._KazuApproachSeaKingIsland(seaKingIsland)
 				end
 				removeFarmFix()
 				if _G.seaKingIslandEmpty then
@@ -11553,10 +11599,10 @@ local function run(B, T, P, DfT, ...)
 					local chestPos = findSeaKingChestPosition()
 					if chestPos then
 						_G.isLootingChests = true
-						if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("sea_king_loot") then
+						if _G._KazuPrepareCombatFromFishing and not _G._KazuPrepareCombatFromFishing("sea_king_loot") then
 							return true
 						end
-						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+						if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 							_G.isLootingChests = false
 							return true
 						end
@@ -11573,7 +11619,7 @@ local function run(B, T, P, DfT, ...)
 				return true
 			else
 				_G.seaKingJoinLootStarted = false
-				_G._GenesisSeaKingAcquisition.sawBoss = false
+				_G._KazuSeaKingAcquisition.sawBoss = false
 			end
 		end -- autoSKHD hydra/sk
 
@@ -11584,10 +11630,10 @@ local function run(B, T, P, DfT, ...)
 				-- Once Ghost Ship chest collection starts, it is a short atomic
 				-- transaction. Outside bosses and sea events wait for it to finish;
 				-- only an irreversible dungeon transition may preempt automation.
-				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+				if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 					return "dungeon"
 				end
-				if _G._GenesisDailyReturnRequested then
+				if _G._KazuDailyReturnRequested then
 					return "daily_return"
 				end
 				-- Turning the feature off remains an immediate manual kill switch.
@@ -11646,8 +11692,8 @@ local function run(B, T, P, DfT, ...)
 				local handoffDeadline = os.clock() + 12
 				while
 					not getGhostLootAbortReason()
-					and _G._GenesisPrepareCombatFromFishing
-					and not _G._GenesisPrepareCombatFromFishing("ghost_ship_loot")
+					and _G._KazuPrepareCombatFromFishing
+					and not _G._KazuPrepareCombatFromFishing("ghost_ship_loot")
 					and os.clock() < handoffDeadline
 				do
 					task.wait(0.1)
@@ -11657,7 +11703,7 @@ local function run(B, T, P, DfT, ...)
 					_G.isLootingChests = false
 					return true
 				end
-				if _G._GenesisPrepareCombatFromFishing and fishingOwnsWeaponSlot() then
+				if _G._KazuPrepareCombatFromFishing and fishingOwnsWeaponSlot() then
 					-- Collection has not started yet. Release the provisional flag and
 					-- retry cleanly instead of stranding the looting guard forever.
 					_G.isLootingChests = false
@@ -11733,7 +11779,7 @@ local function run(B, T, P, DfT, ...)
 					-- disable likewise ends the transaction without resetting attempt counts.
 					return true
 				end
-				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+				if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 					return true
 				end
 				if not isFeatureEnabledInCurrentSea("autoGhostShip") then
@@ -11796,9 +11842,9 @@ local function run(B, T, P, DfT, ...)
 				_G.ghostShipKilled = false
 				if not _G.ghostShipDiedConnected then
 					_G.ghostShipDiedConnected = true
-					trackGenesisConnection(ghostShip.Humanoid.Died:Connect(function()
+					trackKazuConnection(ghostShip.Humanoid.Died:Connect(function()
 						_G.ghostShipDiedConnected = false
-						if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+						if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 							return
 						end
 						_G.postEventTimers.GhostShip.active = true
@@ -11866,8 +11912,8 @@ local function run(B, T, P, DfT, ...)
 				return false
 			end
 			if
-				_G._GenesisAbyssalAcquisition
-				and _G._GenesisAbyssalAcquisition.locator
+				_G._KazuAbyssalAcquisition
+				and _G._KazuAbyssalAcquisition.locator
 				and type(_G._stopAbyssalAcquisition) == "function"
 			then
 				_G._stopAbyssalAcquisition()
@@ -11981,7 +12027,7 @@ local function run(B, T, P, DfT, ...)
 				-- The boss model is deliberately absent until a player approaches the
 				-- globally replicated compass marker. The marker itself is authoritative;
 				-- Legacy Pose only toggles the compass UI that renders it.
-				local acquisition = _G._GenesisAbyssalAcquisition
+				local acquisition = _G._KazuAbyssalAcquisition
 				local locator, locatorCFrame = nil, nil
 				local now = os.clock()
 				if type(acquisition) == "table" then
@@ -11990,11 +12036,11 @@ local function run(B, T, P, DfT, ...)
 						locatorCFrame = acquisition.locatorCFrame
 					elseif now >= acquisition.nextLocatorCheckAt then
 						acquisition.nextLocatorCheckAt = now + acquisition.locatorPollInterval
-						locator, locatorCFrame = _G._GenesisFindAbyssalLocator()
+						locator, locatorCFrame = _G._KazuFindAbyssalLocator()
 					end
 				end
 				if locator then
-					return _G._GenesisApproachAbyssalLocator(locator, locatorCFrame)
+					return _G._KazuApproachAbyssalLocator(locator, locatorCFrame)
 				end
 				if acquisition and acquisition.locator and type(_G._stopAbyssalAcquisition) == "function" then
 					_G._stopAbyssalAcquisition()
@@ -12023,7 +12069,7 @@ local function run(B, T, P, DfT, ...)
 		return false
 	end
 
-	_G._GenesisFindRaceIsland = function()
+	_G._KazuFindRaceIsland = function()
 		local islandFolder = Workspace:FindFirstChild("Island")
 		if not islandFolder then
 			return nil, nil, nil
@@ -12081,15 +12127,15 @@ local function run(B, T, P, DfT, ...)
 		return nil, nil, nil
 	end
 
-	_G._GenesisTeleportToRaceIsland = function()
+	_G._KazuTeleportToRaceIsland = function()
 		if game.PlaceId ~= 15759515082 then
 			return false, "Race Islands are only available in the Third Sea."
 		end
-		local committed = _G._GenesisUpdateDungeonCommit()
+		local committed = _G._KazuUpdateDungeonCommit()
 		if committed then
 			return false, "A dungeon currently owns movement."
 		end
-		local island, destination, displayName = _G._GenesisFindRaceIsland()
+		local island, destination, displayName = _G._KazuFindRaceIsland()
 		if not island or typeof(destination) ~= "CFrame" then
 			return false, "No Race Island is currently available."
 		end
@@ -12136,7 +12182,7 @@ local function run(B, T, P, DfT, ...)
 
 		return foundEvent
 	end
-	_G._GenesisCheckSeaEvents = checkSeaEvents
+	_G._KazuCheckSeaEvents = checkSeaEvents
 
 	local _originalKeyboard = keyboard
 	keyboard = function(key)
@@ -12171,7 +12217,7 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	do
-	_G._GenesisMaterialShopState = {
+	_G._KazuMaterialShopState = {
 		initialized = false,
 		initializing = false,
 		initAttempts = 0,
@@ -12214,7 +12260,7 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	local function watchMaterialShopGui(shopGui)
-		local state = _G._GenesisMaterialShopState
+		local state = _G._KazuMaterialShopState
 		if not shopGui or shopGui.Name ~= "Material Dealer" or type(state) ~= "table" then
 			return false
 		end
@@ -12229,8 +12275,8 @@ local function run(B, T, P, DfT, ...)
 			else
 				return false
 			end
-			state.watchedGuis[shopGui] = trackGenesisConnection(signal:Connect(function()
-				if _G._GenesisMaterialShopState == state and materialShopGuiShouldBeSuppressed(state) then
+			state.watchedGuis[shopGui] = trackKazuConnection(signal:Connect(function()
+				if _G._KazuMaterialShopState == state and materialShopGuiShouldBeSuppressed(state) then
 					setMaterialShopGuiObjectVisible(shopGui, false)
 				end
 			end))
@@ -12260,7 +12306,7 @@ local function run(B, T, P, DfT, ...)
 		return nil
 	end
 
-	_G._GenesisSetMaterialShopGuiVisible = function(visible)
+	_G._KazuSetMaterialShopGuiVisible = function(visible)
 		local shopGui = findMaterialShopGui()
 		if not shopGui then
 			return false
@@ -12276,7 +12322,7 @@ local function run(B, T, P, DfT, ...)
 			if existingShopGui then
 				watchMaterialShopGui(existingShopGui)
 			end
-			trackGenesisConnection(playerGui.DescendantAdded:Connect(function(descendant)
+			trackKazuConnection(playerGui.DescendantAdded:Connect(function(descendant)
 				if descendant.Name == "Material Dealer" then
 					task.defer(watchMaterialShopGui, descendant)
 				end
@@ -12284,8 +12330,8 @@ local function run(B, T, P, DfT, ...)
 		end
 	end
 
-	_G._GenesisEnsureMaterialShopReady = function(force, keepGuiOpen)
-		local state = _G._GenesisMaterialShopState
+	_G._KazuEnsureMaterialShopReady = function(force, keepGuiOpen)
+		local state = _G._KazuMaterialShopState
 		if type(state) ~= "table" then
 			return false, "Material Dealer state is unavailable"
 		end
@@ -12310,7 +12356,7 @@ local function run(B, T, P, DfT, ...)
 		local initGeneration = state.initGeneration
 		state.lastInitAttemptAt = now
 		if not state.keepGuiOpen then
-			_G._GenesisSetMaterialShopGuiVisible(false)
+			_G._KazuSetMaterialShopGuiVisible(false)
 		end
 		local ok, response = pcall(function()
 			return ReplicatedStorage.Chest.Remotes.Functions.EtcFunction:InvokeServer("SpecialShopGui", {
@@ -12324,7 +12370,7 @@ local function run(B, T, P, DfT, ...)
 			state.initFailures = (state.initFailures or 0) + 1
 			state.lastError = not ok and tostring(response) or "Material Dealer initialization was rejected"
 			state.nextInitAttemptAt = tick() + 10
-			warn("[GENESIS HUB] Material Dealer initialization failed: " .. state.lastError)
+			warn("[KAZU HUB] Material Dealer initialization failed: " .. state.lastError)
 			return false, state.lastError
 		end
 
@@ -12337,25 +12383,25 @@ local function run(B, T, P, DfT, ...)
 		state.lastInitResponse = response == nil and "<nil>" or tostring(response)
 		state.lastError = nil
 		if state.keepGuiOpen then
-			_G._GenesisSetMaterialShopGuiVisible(true)
+			_G._KazuSetMaterialShopGuiVisible(true)
 		else
 			state.suppressGuiUntil = math.max(state.suppressGuiUntil or 0, tick() + 15)
 			task.spawn(function()
 				while tick() < (state.suppressGuiUntil or 0) do
-					if _G._GenesisMaterialShopState ~= state
+					if _G._KazuMaterialShopState ~= state
 						or state.initGeneration ~= initGeneration
 						or state.keepGuiOpen
 					then
 						return
 					end
-					if _G._GenesisSetMaterialShopGuiVisible(false) then
+					if _G._KazuSetMaterialShopGuiVisible(false) then
 						state.autoHiddenGui = true
 					end
 					task.wait(0.1)
 				end
 			end)
 		end
-		print("[GENESIS HUB] Material Dealer initialized; automatic purchases are ready.")
+		print("[KAZU HUB] Material Dealer initialized; automatic purchases are ready.")
 		return true, response
 	end
 
@@ -12376,8 +12422,8 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
-				local ready = _G._GenesisEnsureMaterialShopReady(false, false)
-				local dealerState = _G._GenesisMaterialShopState
+				local ready = _G._KazuEnsureMaterialShopReady(false, false)
+				local dealerState = _G._KazuMaterialShopState
 				if not ready or tick() < (dealerState.purchaseAllowedAt or 0) then
 					return
 				end
@@ -12399,7 +12445,7 @@ local function run(B, T, P, DfT, ...)
 						dealerState.lastError = tostring(response)
 						dealerState.initialized = false
 						dealerState.nextInitAttemptAt = tick() + 10
-						warn("[GENESIS HUB] Material Dealer purchase invoke failed: " .. dealerState.lastError)
+						warn("[KAZU HUB] Material Dealer purchase invoke failed: " .. dealerState.lastError)
 						break
 					end
 					task.wait(0.1)
@@ -13258,7 +13304,7 @@ local function run(B, T, P, DfT, ...)
 	-- When teleport fails (full/private server, etc.), mark it ignored and try ANOTHER one (without spam).
 	if not _G._TeleportFailHooked then
 		_G._TeleportFailHooked = true
-		trackGenesisConnection(TeleportService.TeleportInitFailed:Connect(function(player, teleportResult, errorMessage, placeId, jobId)
+		trackKazuConnection(TeleportService.TeleportInitFailed:Connect(function(player, teleportResult, errorMessage, placeId, jobId)
 			pcall(function()
 				if player ~= LocalPlayer then
 					return
@@ -13625,7 +13671,7 @@ local function run(B, T, P, DfT, ...)
 				if not smartHopOn then
 					return
 				end
-				if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+				if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 					return
 				end
 				if _G.isLootingChests then
@@ -13983,7 +14029,7 @@ local function run(B, T, P, DfT, ...)
 					_G._lastSmartHopCheck = tick()
 					if not hasSmartHopAccess() then
 						SpectrumX:Notify({
-							Title = "GENESIS HUB",
+							Title = "KAZU HUB",
 							Text = "PREMIUM ACCESS REQUIRED FOR SMART HOP!",
 							Type = "error",
 							Duration = 5,
@@ -14071,7 +14117,7 @@ local function run(B, T, P, DfT, ...)
 	_G.reportSpawnedFruits = function()
 		local names = _G.collectWorkspaceFruits()
 		if not names or #names == 0 then
-			_G._GenesisFruitLiveState = nil
+			_G._KazuFruitLiveState = nil
 			_G.lastFruitStock = ""
 			return
 		end
@@ -14082,7 +14128,7 @@ local function run(B, T, P, DfT, ...)
 			title = names[1] .. " +" .. tostring(#names - 1)
 		end
 		title = title .. " [Sea " .. tostring(seaNum) .. "]"
-		_G._GenesisFruitLiveState = { channel = "fruits", title = title, event_type = "Fruit" }
+		_G._KazuFruitLiveState = { channel = "fruits", title = title, event_type = "Fruit" }
 		if _G.lastFruitStock == sig and (tick() - (_G.lastFruitReport or 0)) < 25 then
 			return
 		end
@@ -14113,8 +14159,8 @@ local function run(B, T, P, DfT, ...)
 		if _G.isAnyCombatActive and _G.isAnyCombatActive() then
 			return
 		end
-		if _G._GenesisDailyQuestTravelPending or _G._GenesisDailyReturnRequested
-			or (_G._GenesisGetDailyQuestPriorityCandidate and _G._GenesisGetDailyQuestPriorityCandidate()) then
+		if _G._KazuDailyQuestTravelPending or _G._KazuDailyReturnRequested
+			or (_G._KazuGetDailyQuestPriorityCandidate and _G._KazuGetDailyQuestPriorityCandidate()) then
 			return
 		end
 
@@ -14145,9 +14191,9 @@ local function run(B, T, P, DfT, ...)
 			for _, clam in ipairs(clams) do
 				if not isFeatureEnabledInCurrentSea("autoCollectPearl")
 					or _G.seaEventActive or _G.isLootingChests or _G.storingFruit
-					or _G._GenesisDailyQuestTravelPending or _G._GenesisDailyReturnRequested
-					or (_G._GenesisGetDailyQuestPriorityCandidate
-						and _G._GenesisGetDailyQuestPriorityCandidate()) then
+					or _G._KazuDailyQuestTravelPending or _G._KazuDailyReturnRequested
+					or (_G._KazuGetDailyQuestPriorityCandidate
+						and _G._KazuGetDailyQuestPriorityCandidate()) then
 					break
 				end
 				local clamPos = nil
@@ -14176,9 +14222,9 @@ local function run(B, T, P, DfT, ...)
 				while tick() - startTime < 1.5 do
 					if not isFeatureEnabledInCurrentSea("autoCollectPearl")
 						or _G.seaEventActive or _G.isLootingChests or _G.storingFruit
-						or _G._GenesisDailyQuestTravelPending or _G._GenesisDailyReturnRequested
-						or (_G._GenesisGetDailyQuestPriorityCandidate
-							and _G._GenesisGetDailyQuestPriorityCandidate()) then
+						or _G._KazuDailyQuestTravelPending or _G._KazuDailyReturnRequested
+						or (_G._KazuGetDailyQuestPriorityCandidate
+							and _G._KazuGetDailyQuestPriorityCandidate()) then
 							break
 						end
 						VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
@@ -14292,20 +14338,20 @@ local function run(B, T, P, DfT, ...)
 		return mobName
 	end
 
-	local GenesisX = createBundledUi()
-	local SpectrumX = GenesisX
+	local KazuX = createBundledUi()
+	local SpectrumX = KazuX
 
-	local Window = GenesisX:CreateWindow({
-		Title = "GENESIS HUB",
+	local Window = KazuX:CreateWindow({
+		Title = "KAZU HUB",
 		Subtitle = "King Legacy  |  Exec: " .. EXECUTOR_NAME,
-		Icon = "rbxassetid://134769377797538",
+		Icon = "lucide-crown",
 		Theme = "Dark",
 		Font = "GothamBlack",
 		ThemeBtn = false,
 		MinimizeBtn = false,
 		DiscordBtn = true,
 		SideMode = true,
-		DiscordLink = "https://discord.gg/2uUUMKSQyq",
+		DiscordLink = "https://discord.gg/VNAsFzrDe",
 		Transparency = 0,
 		BorderEnabled = false,
 		FloatIcon = "lucide-dog-chupetao",
@@ -14403,7 +14449,7 @@ local function run(B, T, P, DfT, ...)
 	uiSections.settingsDisplay = createUiSection(uiSections.SettingsTab.Left, "Display & Performance", "lucide-gauge")
 	uiSections.settingsScript = createUiSection(uiSections.SettingsTab.Right, "Script Control", "lucide-power")
 	Window:CreateLabel(uiSections.settingsScript, {
-		Text = "Stops Genesis workers, disconnects tracked events, releases movement locks, and removes the UI. Saved settings are kept.",
+		Text = "Stops Kazu workers, disconnects tracked events, releases movement locks, and removes the UI. Saved settings are kept.",
 		Color = SpectrumX.Theme.TextSecondary,
 		Wrapped = true,
 	})
@@ -14411,11 +14457,11 @@ local function run(B, T, P, DfT, ...)
 		Text = "Unload Script",
 		Style = "danger",
 		Callback = function()
-			local runtime = getGenesisRuntimeState()
+			local runtime = getKazuRuntimeState()
 			if runtime and type(runtime.unload) == "function" then
 				runtime.unload()
 			else
-				warn("[GENESIS HUB] No active runtime was found to unload.")
+				warn("[KAZU HUB] No active runtime was found to unload.")
 			end
 		end,
 	})
@@ -14614,8 +14660,8 @@ local function run(B, T, P, DfT, ...)
 		Size = UDim2.new(1, 0, 0, 25),
 	})
 
-	_G._GenesisRefreshFishingPositionLabel = function()
-		local cf, issue, config = _G._GenesisGetConfiguredFishingCFrame(game.PlaceId)
+	_G._KazuRefreshFishingPositionLabel = function()
+		local cf, issue, config = _G._KazuGetConfiguredFishingCFrame(game.PlaceId)
 		if typeof(cf) == "CFrame" and config then
 			fishPositionLabel.SetText(
 				"Fishing Position: "
@@ -14634,13 +14680,13 @@ local function run(B, T, P, DfT, ...)
 			fishPositionLabel.Label.TextColor3 = SpectrumX.Theme.Warning
 		end
 	end
-	_G._GenesisRefreshFishingPositionLabel()
+	_G._KazuRefreshFishingPositionLabel()
 
 	Window:CreateButton(uiSections.farmFishing, {
 		Text = "Save Fishing Position",
 		Callback = function()
 			local root = GetRoot(LocalPlayer.Character)
-			local config = _G._GenesisGetFishingPositionConfig(game.PlaceId)
+			local config = _G._KazuGetFishingPositionConfig(game.PlaceId)
 			if root and config then
 				local positions = GetSetting("fishPositionsBySea")
 				if type(positions) ~= "table" then
@@ -14648,7 +14694,7 @@ local function run(B, T, P, DfT, ...)
 				end
 				positions[config.slot] = { root.CFrame:GetComponents() }
 				saveAndApply("fishPositionsBySea", positions)
-				_G._GenesisRefreshFishingPositionLabel()
+				_G._KazuRefreshFishingPositionLabel()
 				SpectrumX:Notify({
 					Text = "Sea " .. tostring(config.sea) .. " fishing position saved!",
 					Type = "success",
@@ -15169,8 +15215,8 @@ local function run(B, T, P, DfT, ...)
 	Window:CreateButton(uiSections.itemMaterials, {
 		Text = "Open Material Shop",
 		Callback = function()
-			if type(_G._GenesisEnsureMaterialShopReady) == "function" then
-				_G._GenesisEnsureMaterialShopReady(true, true)
+			if type(_G._KazuEnsureMaterialShopReady) == "function" then
+				_G._KazuEnsureMaterialShopReady(true, true)
 			end
 		end,
 	})
@@ -15269,7 +15315,7 @@ local function run(B, T, P, DfT, ...)
 				materialDropdown:SetValues(allMaterials)
 			end
 			saveAndApply("selectedMaterials", allMaterials)
-			GenesisX:Notify({
+			KazuX:Notify({
 				Text = "All materials selected!",
 				Type = "info",
 				Duration = 2,
@@ -15284,7 +15330,7 @@ local function run(B, T, P, DfT, ...)
 				materialDropdown:SetValues({})
 			end
 			saveAndApply("selectedMaterials", {})
-			GenesisX:Notify({
+			KazuX:Notify({
 				Text = "Selection cleared!",
 				Type = "info",
 				Duration = 2,
@@ -15331,8 +15377,8 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	local buyingStyle = nil
-	_G._GenesisBuyingStyleStartedAt = 0
-	_G._GenesisStylePurchaseGeneration = 0
+	_G._KazuBuyingStyleStartedAt = 0
+	_G._KazuStylePurchaseGeneration = 0
 	local prevPosition = nil
 
 	for _, style in pairs(styles) do
@@ -15354,8 +15400,8 @@ local function run(B, T, P, DfT, ...)
 				end
 				tp(CFrame.new(npc.CFrame.X, npc.CFrame.Y + 3, npc.CFrame.Z))
 				buyingStyle = style.tool
-				_G._GenesisBuyingStyleStartedAt = tick()
-				_G._GenesisStylePurchaseGeneration = (_G._GenesisStylePurchaseGeneration or 0) + 1
+				_G._KazuBuyingStyleStartedAt = tick()
+				_G._KazuStylePurchaseGeneration = (_G._KazuStylePurchaseGeneration or 0) + 1
 				SpectrumX:Notify({ Text = "Buying " .. style.name .. "...", Type = "info", Duration = 3 })
 			end,
 		})
@@ -15511,8 +15557,8 @@ local function run(B, T, P, DfT, ...)
 	if uiSections.progressDaily then
 		local function resetDailyRoute()
 			dailyCoordinator.journal.route = nil
-			_G._GenesisDailyQuestTravelPending = false
-			_G._GenesisDailyReturnRequested = false
+			_G._KazuDailyQuestTravelPending = false
+			_G._KazuDailyReturnRequested = false
 			dailyCoordinator.save()
 			_G.dailyQuestState = "idle"
 			_G.dailyQuestKills = 0
@@ -15659,12 +15705,12 @@ local function run(B, T, P, DfT, ...)
 		Callback = function()
 			local selected = islandDropdown.GetValue()
 			if not selected or selected == "" then
-				GenesisX:Notify({ Text = "Select an island first!", Type = "error", Duration = 2 })
+				KazuX:Notify({ Text = "Select an island first!", Type = "error", Duration = 2 })
 				return
 			end
 			local cf = islandsCFrame[selected]
 			if not cf then
-				GenesisX:Notify({ Text = "Island coordinate not found!", Type = "error", Duration = 2 })
+				KazuX:Notify({ Text = "Island coordinate not found!", Type = "error", Duration = 2 })
 				return
 			end
 			local root = GetRoot(LocalPlayer.Character)
@@ -15674,7 +15720,7 @@ local function run(B, T, P, DfT, ...)
 				_GBackPosition = nil
 			end
 			tp(cf)
-			GenesisX:Notify({ Text = "Teleported to " .. selected, Type = "success", Duration = 2 })
+			KazuX:Notify({ Text = "Teleported to " .. selected, Type = "success", Duration = 2 })
 		end,
 	})
 
@@ -15683,11 +15729,11 @@ local function run(B, T, P, DfT, ...)
 		Style = "default",
 		Callback = function()
 			if not _GBackPosition then
-				GenesisX:Notify({ Text = "No saved position to return to!", Type = "error", Duration = 2 })
+				KazuX:Notify({ Text = "No saved position to return to!", Type = "error", Duration = 2 })
 				return
 			end
 			tp(_GBackPosition)
-			GenesisX:Notify({ Text = "Returned to previous position!", Type = "success", Duration = 2 })
+			KazuX:Notify({ Text = "Returned to previous position!", Type = "success", Duration = 2 })
 			_GBackPosition = nil
 		end,
 	})
@@ -15699,7 +15745,7 @@ local function run(B, T, P, DfT, ...)
 			Callback = function()
 				local root = GetRoot(LocalPlayer.Character)
 				local returnPosition = root and root.CFrame or nil
-				local ok, result = _G._GenesisTeleportToRaceIsland()
+				local ok, result = _G._KazuTeleportToRaceIsland()
 				if ok then
 					_GBackPosition = returnPosition
 				end
@@ -15749,23 +15795,23 @@ local function run(B, T, P, DfT, ...)
 				local selected = locationDropdown.GetValue()
 				local destination = selected and locationTeleports[selected]
 				if not destination then
-					GenesisX:Notify({ Text = "Select a location first!", Type = "error", Duration = 2 })
+					KazuX:Notify({ Text = "Select a location first!", Type = "error", Duration = 2 })
 					return
 				end
 				if destination.placeId ~= game.PlaceId then
-					GenesisX:Notify({ Text = selected .. " is in Third Sea!", Type = "error", Duration = 3 })
+					KazuX:Notify({ Text = selected .. " is in Third Sea!", Type = "error", Duration = 3 })
 					return
 				end
 
 				local root = GetRoot(LocalPlayer.Character)
 				if not root then
-					GenesisX:Notify({ Text = "Character position is unavailable!", Type = "error", Duration = 2 })
+					KazuX:Notify({ Text = "Character position is unavailable!", Type = "error", Duration = 2 })
 					return
 				end
 
 				_GBackPosition = root.CFrame
 				tp(destination.cframe)
-				GenesisX:Notify({ Text = "Teleported to " .. selected, Type = "success", Duration = 2 })
+				KazuX:Notify({ Text = "Teleported to " .. selected, Type = "success", Duration = 2 })
 			end,
 		})
 	end
@@ -16052,7 +16098,7 @@ local function run(B, T, P, DfT, ...)
 					btn._connection = nil
 				end
 
-				btn._connection = trackGenesisConnection(btn.Button.MouseButton1Click:Connect(function()
+				btn._connection = trackKazuConnection(btn.Button.MouseButton1Click:Connect(function()
 					local targetId = server.jobId
 					if #targetId > 36 then
 						local decoded = decodeBase64(targetId)
@@ -16117,10 +16163,10 @@ local function run(B, T, P, DfT, ...)
 			return false
 		end
 		if forceNetworkRefresh then
-			if tick() - (_G._GenesisManualRefreshAt or 0) < 5 then
+			if tick() - (_G._KazuManualRefreshAt or 0) < 5 then
 				return false
 			end
-			_G._GenesisManualRefreshAt = tick()
+			_G._KazuManualRefreshAt = tick()
 		end
 		-- Rebuild the UI list roughly with its 30-second refresh loop.  The
 		-- Event Hub poller maintains the shared cache every five seconds, so
@@ -16291,13 +16337,13 @@ local function run(B, T, P, DfT, ...)
 
 	Window:CreateLabel(serverJobContent, {
 		Text = "Current Job ID:",
-		Color = GenesisX.Theme.TextSecondary,
+		Color = KazuX.Theme.TextSecondary,
 		Size = UDim2.new(1, 0, 0, 20),
 	})
 
 	local currentJobIdLabel = Window:CreateLabel(serverJobContent, {
 		Text = "Loading...",
-		Color = GenesisX.Theme.Info,
+		Color = KazuX.Theme.Info,
 		Size = UDim2.new(1, 0, 0, 40),
 	})
 
@@ -16314,7 +16360,7 @@ local function run(B, T, P, DfT, ...)
 		Callback = function()
 			pcall(function()
 				setclipboard(_G.jobIdEncoded)
-				GenesisX:Notify({ Text = "Job ID copied!", Type = "success", Duration = 2 })
+				KazuX:Notify({ Text = "Job ID copied!", Type = "success", Duration = 2 })
 			end)
 		end,
 	})
@@ -16337,7 +16383,7 @@ local function run(B, T, P, DfT, ...)
 			if targetJobId and targetJobId ~= "" then
 				local decoded = decodeBase64(targetJobId)
 				if decoded and #decoded > 10 then
-					GenesisX:Notify({
+					KazuX:Notify({
 						Text = "Joining server...",
 						Type = "info",
 						Duration = 3,
@@ -16345,14 +16391,14 @@ local function run(B, T, P, DfT, ...)
 					task.wait(1)
 					TeleportService:TeleportToPlaceInstance(game.PlaceId, decoded, LocalPlayer)
 				else
-					GenesisX:Notify({
+					KazuX:Notify({
 						Text = "Invalid Job ID!",
 						Type = "error",
 						Duration = 3,
 					})
 				end
 			else
-				GenesisX:Notify({
+				KazuX:Notify({
 					Text = "Enter a Job ID first!",
 					Type = "warning",
 					Duration = 2,
@@ -16381,7 +16427,7 @@ local function run(B, T, P, DfT, ...)
 
 	statusLabel = Window:CreateLabel(serverBrowserContent, {
 		Text = "Click Refresh to load",
-		Color = GenesisX.Theme.TextSecondary,
+		Color = KazuX.Theme.TextSecondary,
 		Size = UDim2.new(1, 0, 0, 25),
 	})
 
@@ -16389,9 +16435,9 @@ local function run(B, T, P, DfT, ...)
 		Text = "Refresh List",
 		Callback = function()
 			if fetchServersFromBot(true) then
-				GenesisX:Notify({ Text = "Fetching servers...", Type = "info", Duration = 2 })
+				KazuX:Notify({ Text = "Fetching servers...", Type = "info", Duration = 2 })
 			else
-				GenesisX:Notify({ Text = "Refresh is cooling down (5 seconds)", Type = "warning", Duration = 2 })
+				KazuX:Notify({ Text = "Refresh is cooling down (5 seconds)", Type = "warning", Duration = 2 })
 			end
 		end,
 	})
@@ -16445,7 +16491,7 @@ local function run(B, T, P, DfT, ...)
 
 		local card = Window:CreateLabelToggleSubTitle(serverListContent, {
 			Title = "Slot " .. i .. " - Empty",
-			TitleColor = GenesisX.Theme.TextMuted,
+			TitleColor = KazuX.Theme.TextMuted,
 			Subtitles = {
 				"Waiting for server data...",
 				"Players: --/12",
@@ -16457,7 +16503,7 @@ local function run(B, T, P, DfT, ...)
 					Callback = function()
 						local server = _G.serverSlotData[i]
 						if not server then
-							GenesisX:Notify({ Text = "No server available!", Type = "warning", Duration = 2 })
+							KazuX:Notify({ Text = "No server available!", Type = "warning", Duration = 2 })
 							return
 						end
 
@@ -16469,7 +16515,7 @@ local function run(B, T, P, DfT, ...)
 							end
 						end
 
-						GenesisX:Notify({
+						KazuX:Notify({
 							Text = "Joining " .. server.eventName .. "...",
 							Type = "info",
 							Duration = 3,
@@ -16508,10 +16554,10 @@ local function run(B, T, P, DfT, ...)
 			if #filtered > 0 then
 				local shown = math.min(#filtered, SERVER_LIST_MAX)
 				statusLabel.SetText("\226\156\133 " .. #filtered .. " server(s) found | showing " .. shown)
-				statusLabel.Label.TextColor3 = GenesisX.Theme.Success
+				statusLabel.Label.TextColor3 = KazuX.Theme.Success
 			else
 				statusLabel.SetText("\226\143\179 No servers found")
-				statusLabel.Label.TextColor3 = GenesisX.Theme.TextSecondary
+				statusLabel.Label.TextColor3 = KazuX.Theme.TextSecondary
 			end
 		end
 
@@ -16526,7 +16572,7 @@ local function run(B, T, P, DfT, ...)
 					local icon = getEventIcon(server.eventType)
 					local short = _G.formatServerEventLabel(server.eventType, server.eventName)
 					card.SetTitle(icon .. " \194\183 " .. short)
-					card.SetTitleColor(GenesisX.Theme.Success)
+					card.SetTitleColor(KazuX.Theme.Success)
 					card.SetSubtitles({
 						"Players: " .. tostring(server.playerCount) .. "/12",
 						"Job: " .. string.sub(tostring(server.jobId), 1, 12) .. "...",
@@ -16692,7 +16738,7 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
-	trackGenesisConnection(LocalPlayer.CharacterAdded:Connect(function()
+	trackKazuConnection(LocalPlayer.CharacterAdded:Connect(function()
 		_G.hasLegacyPose = false
 		-- A farm-fix worker captures the prior character's root part. Clear it here
 		-- so the next farm tick can attach cleanly to the respawned character.
@@ -16711,7 +16757,7 @@ local function run(B, T, P, DfT, ...)
 
 	spawn(function()
 		while task.wait(0.5) do
-			pcall(_G._GenesisRefreshFishingPositionLabel)
+			pcall(_G._KazuRefreshFishingPositionLabel)
 		end
 	end)
 
@@ -16749,12 +16795,12 @@ local function run(B, T, P, DfT, ...)
 
 		if not _fishBP then
 			_fishBP = Instance.new("BodyPosition")
-			_fishBP.Name = "GenesisFishingPosition"
+			_fishBP.Name = "KazuFishingPosition"
 			_fishBP.Parent = root
 		end
 		if not _fishBG then
 			_fishBG = Instance.new("BodyGyro")
-			_fishBG.Name = "GenesisFishingGyro"
+			_fishBG.Name = "KazuFishingGyro"
 			_fishBG.Parent = root
 		end
 
@@ -16797,7 +16843,7 @@ local function run(B, T, P, DfT, ...)
 		return nil
 	end
 
-	_G._GenesisIsFishingRodName = function(name)
+	_G._KazuIsFishingRodName = function(name)
 		if type(name) ~= "string" then
 			return false
 		end
@@ -16805,14 +16851,14 @@ local function run(B, T, P, DfT, ...)
 		return lowerName == "basic rod" or string.match(lowerName, "%srod$") ~= nil
 	end
 
-	_G._GenesisIsUsableSwordName = function(name)
+	_G._KazuIsUsableSwordName = function(name)
 		return type(name) == "string"
 			and name ~= ""
 			and string.lower(name) ~= "none"
-			and not _G._GenesisIsFishingRodName(name)
+			and not _G._KazuIsFishingRodName(name)
 	end
 
-	_G._GenesisGetReplicatedPrimaryName = function()
+	_G._KazuGetReplicatedPrimaryName = function()
 		local stats = LocalPlayer:FindFirstChild("PlayerStats")
 		local etcData = stats and stats:FindFirstChild("EtcData")
 		if not etcData or type(etcData.Value) ~= "string" then
@@ -16825,8 +16871,8 @@ local function run(B, T, P, DfT, ...)
 		return type(primaryName) == "string" and primaryName or nil
 	end
 
-	_G._GenesisRememberSwordName = function(name)
-		if not _G._GenesisIsUsableSwordName(name) then
+	_G._KazuRememberSwordName = function(name)
+		if not _G._KazuIsUsableSwordName(name) then
 			return nil
 		end
 		_G.lastEquippedSwordName = name
@@ -16838,37 +16884,37 @@ local function run(B, T, P, DfT, ...)
 		return name
 	end
 
-	_G._GenesisIsSwordTool = function(tool)
+	_G._KazuIsSwordTool = function(tool)
 		return tool
 			and tool:IsA("Tool")
 			and tool.ToolTip == "Sword"
-			and not _G._GenesisIsFishingRodName(tool.Name)
+			and not _G._KazuIsFishingRodName(tool.Name)
 	end
 
-	_G._GenesisRememberSword = function(tool)
-		if _G._GenesisIsSwordTool(tool) then
+	_G._KazuRememberSword = function(tool)
+		if _G._KazuIsSwordTool(tool) then
 			_G.lastEquippedSword = tool
-			_G._GenesisRememberSwordName(tool.Name)
+			_G._KazuRememberSwordName(tool.Name)
 			return tool
 		end
 		return nil
 	end
 
-	_G._GenesisFindSwordToolByName = function(name)
-		if not _G._GenesisIsUsableSwordName(name) then
+	_G._KazuFindSwordToolByName = function(name)
+		if not _G._KazuIsUsableSwordName(name) then
 			return nil
 		end
 		for _, container in ipairs({ LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack") }) do
 			local tool = container and container:FindFirstChild(name)
-			if _G._GenesisIsSwordTool(tool) then
+			if _G._KazuIsSwordTool(tool) then
 				return tool
 			end
 		end
 		return nil
 	end
 
-	_G._GenesisInventoryShowsSword = function(name)
-		if not _G._GenesisIsUsableSwordName(name) then
+	_G._KazuInventoryShowsSword = function(name)
+		if not _G._KazuIsUsableSwordName(name) then
 			return false
 		end
 		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
@@ -16880,11 +16926,11 @@ local function run(B, T, P, DfT, ...)
 		return itemButton ~= nil and itemButton:IsA("GuiButton")
 	end
 
-	_G._GenesisIsAvailableSwordName = function(name)
-		if not _G._GenesisIsUsableSwordName(name) then
+	_G._KazuIsAvailableSwordName = function(name)
+		if not _G._KazuIsUsableSwordName(name) then
 			return false
 		end
-		if _G._GenesisFindSwordToolByName(name) then
+		if _G._KazuFindSwordToolByName(name) then
 			return true
 		end
 
@@ -16893,18 +16939,18 @@ local function run(B, T, P, DfT, ...)
 		if swordNameValue and swordNameValue.Value == name then
 			return true
 		end
-		if _G._GenesisGetReplicatedPrimaryName() == name then
+		if _G._KazuGetReplicatedPrimaryName() == name then
 			return true
 		end
-		return _G._GenesisInventoryShowsSword(name)
+		return _G._KazuInventoryShowsSword(name)
 	end
 
-	_G._GenesisGetLastEquippedSwordName = function()
+	_G._KazuGetLastEquippedSwordName = function()
 		local character = LocalPlayer.Character
 		if character then
 			for _, tool in pairs(character:GetChildren()) do
-				if _G._GenesisIsSwordTool(tool) then
-					_G._GenesisRememberSword(tool)
+				if _G._KazuIsSwordTool(tool) then
+					_G._KazuRememberSword(tool)
 					return tool.Name
 				end
 			end
@@ -16913,32 +16959,32 @@ local function run(B, T, P, DfT, ...)
 		local stats = LocalPlayer:FindFirstChild("PlayerStats")
 		local swordNameValue = stats and stats:FindFirstChild("SwordName")
 		local selectedName = swordNameValue and swordNameValue.Value
-		if _G._GenesisIsUsableSwordName(selectedName) then
-			return _G._GenesisRememberSwordName(selectedName)
+		if _G._KazuIsUsableSwordName(selectedName) then
+			return _G._KazuRememberSwordName(selectedName)
 		end
 
 		-- On a fresh join SwordName and the Tool can lag behind EtcData. PrimaryWeapon
 		-- is replicated server state and closes that bootstrap gap without equipping a
 		-- generic selected tool (which could be Combat or Fruit Power).
-		local replicatedPrimaryName = _G._GenesisGetReplicatedPrimaryName()
-		if _G._GenesisIsUsableSwordName(replicatedPrimaryName) then
-			return _G._GenesisRememberSwordName(replicatedPrimaryName)
+		local replicatedPrimaryName = _G._KazuGetReplicatedPrimaryName()
+		if _G._KazuIsUsableSwordName(replicatedPrimaryName) then
+			return _G._KazuRememberSwordName(replicatedPrimaryName)
 		end
 
-		if _G._GenesisIsAvailableSwordName(_G.lastEquippedSwordName) then
-			return _G._GenesisRememberSwordName(_G.lastEquippedSwordName)
+		if _G._KazuIsAvailableSwordName(_G.lastEquippedSwordName) then
+			return _G._KazuRememberSwordName(_G.lastEquippedSwordName)
 		end
 
 		local savedName = GetSetting("lastEquippedSwordName")
-		if _G._GenesisIsAvailableSwordName(savedName) then
-			return _G._GenesisRememberSwordName(savedName)
+		if _G._KazuIsAvailableSwordName(savedName) then
+			return _G._KazuRememberSwordName(savedName)
 		end
 
 		local backpack = LocalPlayer:FindFirstChild("Backpack")
 		if backpack then
 			for _, tool in pairs(backpack:GetChildren()) do
-				if _G._GenesisIsSwordTool(tool) then
-					_G._GenesisRememberSword(tool)
+				if _G._KazuIsSwordTool(tool) then
+					_G._KazuRememberSword(tool)
 					return tool.Name
 				end
 			end
@@ -16948,19 +16994,19 @@ local function run(B, T, P, DfT, ...)
 		return nil
 	end
 
-	_G._GenesisWaitForLastEquippedSwordName = function(timeoutSeconds, shouldContinue)
+	_G._KazuWaitForLastEquippedSwordName = function(timeoutSeconds, shouldContinue)
 		local deadline = os.clock() + math.max(tonumber(timeoutSeconds) or 4, 0)
 		repeat
 			if shouldContinue and not shouldContinue() then
 				return nil
 			end
-			local name = _G._GenesisGetLastEquippedSwordName()
+			local name = _G._KazuGetLastEquippedSwordName()
 			if name then
 				return name
 			end
 			task.wait(0.1)
 		until os.clock() >= deadline
-		return _G._GenesisGetLastEquippedSwordName()
+		return _G._KazuGetLastEquippedSwordName()
 	end
 
 	local function selectPrimaryWeapon(weaponName, timeoutSeconds, shouldContinue)
@@ -16987,7 +17033,7 @@ local function run(B, T, P, DfT, ...)
 				tool
 				and swordNameValue
 				and swordNameValue.Value == weaponName
-				and _G._GenesisGetReplicatedPrimaryName() == weaponName
+				and _G._KazuGetReplicatedPrimaryName() == weaponName
 			then
 				return tool
 			end
@@ -17067,14 +17113,14 @@ local function run(B, T, P, DfT, ...)
 	-- Restore the exact remembered sword when real outside combat owns the hand.
 	-- This is intentionally asynchronous: callers such as the central combat step
 	-- run every frame and must never yield while the game's inventory UI replicates.
-	_G._GenesisCombatSwordRestore = {
+	_G._KazuCombatSwordRestore = {
 		busy = false,
 		generation = 0,
 		nextAttemptAt = 0,
 		lastResult = "idle",
 	}
 
-	_G._GenesisEnsureCombatSword = function(_reason)
+	_G._KazuEnsureCombatSword = function(_reason)
 		local character = LocalPlayer.Character
 		local humanoid = GetHumanoid(character)
 		if not character or not humanoid or humanoid.Health <= 0 then
@@ -17085,32 +17131,32 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		for _, tool in ipairs(character:GetChildren()) do
-			if _G._GenesisIsSwordTool(tool) then
-				_G._GenesisRememberSword(tool)
+			if _G._KazuIsSwordTool(tool) then
+				_G._KazuRememberSword(tool)
 				return true
 			end
 		end
 
-		local preferredName = _G._GenesisGetLastEquippedSwordName()
-		if not _G._GenesisIsUsableSwordName(preferredName) then
+		local preferredName = _G._KazuGetLastEquippedSwordName()
+		if not _G._KazuIsUsableSwordName(preferredName) then
 			preferredName = _G.lastEquippedSwordName or GetSetting("lastEquippedSwordName")
 		end
-		if not _G._GenesisIsUsableSwordName(preferredName) then
+		if not _G._KazuIsUsableSwordName(preferredName) then
 			return false
 		end
 
-		local existing = _G._GenesisFindSwordToolByName(preferredName)
+		local existing = _G._KazuFindSwordToolByName(preferredName)
 		if existing then
 			if existing.Parent ~= character then
 				humanoid:EquipTool(existing)
 			end
 			if existing.Parent == character then
-				_G._GenesisRememberSword(existing)
+				_G._KazuRememberSword(existing)
 				return true
 			end
 		end
 
-		local state = _G._GenesisCombatSwordRestore
+		local state = _G._KazuCombatSwordRestore
 		if state.busy or os.clock() < (state.nextAttemptAt or 0) then
 			return false
 		end
@@ -17131,7 +17177,7 @@ local function run(B, T, P, DfT, ...)
 					then
 						return false
 					end
-					local owner = _G._GenesisPriorityOwner
+					local owner = _G._KazuPriorityOwner
 					return owner == "major_sea_event"
 						or owner == "world_raid_boss"
 						or owner == "serpent"
@@ -17154,8 +17200,8 @@ local function run(B, T, P, DfT, ...)
 				end
 			end
 
-			if ok and _G._GenesisIsSwordTool(selected) and selected.Parent == startingCharacter then
-				_G._GenesisRememberSword(selected)
+			if ok and _G._KazuIsSwordTool(selected) and selected.Parent == startingCharacter then
+				_G._KazuRememberSword(selected)
 				state.lastResult = "equipped"
 				state.nextAttemptAt = 0
 			else
@@ -17168,7 +17214,7 @@ local function run(B, T, P, DfT, ...)
 		return false
 	end
 
-	_G._GenesisBindSwordTracker = function(character)
+	_G._KazuBindSwordTracker = function(character)
 		if _G._lastSwordTrackerConnection then
 			pcall(function()
 				_G._lastSwordTrackerConnection:Disconnect()
@@ -17180,10 +17226,10 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		for _, child in pairs(character:GetChildren()) do
-			_G._GenesisRememberSword(child)
+			_G._KazuRememberSword(child)
 		end
-		_G._lastSwordTrackerConnection = trackGenesisConnection(character.ChildAdded:Connect(function(child)
-			_G._GenesisRememberSword(child)
+		_G._lastSwordTrackerConnection = trackKazuConnection(character.ChildAdded:Connect(function(child)
+			_G._KazuRememberSword(child)
 		end))
 	end
 
@@ -17203,19 +17249,19 @@ local function run(B, T, P, DfT, ...)
 	local restoreFishingWeapon
 	local isFishingBlocked
 
-	_G._GenesisCaptureFishingPreviousWeapon = function()
-		if _G.fishingToolCaptured and _G._GenesisIsUsableSwordName(_G.fishingPreviousWeaponName) then
+	_G._KazuCaptureFishingPreviousWeapon = function()
+		if _G.fishingToolCaptured and _G._KazuIsUsableSwordName(_G.fishingPreviousWeaponName) then
 			return true
 		end
 
 		_G.fishingToolCaptured = false
 		_G.fishingPreviousWeaponName = nil
 		local equipped = getEquippedTool()
-		_G._GenesisRememberSword(equipped)
-		local previousName = _G._GenesisWaitForLastEquippedSwordName(4, function()
+		_G._KazuRememberSword(equipped)
+		local previousName = _G._KazuWaitForLastEquippedSwordName(4, function()
 			return GetSetting("autoFish") and _G.isFishing and not isFishingBlocked()
 		end)
-		if not _G._GenesisIsUsableSwordName(previousName) then
+		if not _G._KazuIsUsableSwordName(previousName) then
 			return false
 		end
 
@@ -17234,7 +17280,7 @@ local function run(B, T, P, DfT, ...)
 		if not character or not humanoid then
 			return nil
 		end
-		if not _G.fishingToolCaptured or not _G._GenesisIsUsableSwordName(_G.fishingPreviousWeaponName) then
+		if not _G.fishingToolCaptured or not _G._KazuIsUsableSwordName(_G.fishingPreviousWeaponName) then
 			return nil
 		end
 
@@ -17308,7 +17354,7 @@ local function run(B, T, P, DfT, ...)
 
 		_G.fishingState = "restoring"
 		_G.fishingLoadoutBusy = true
-		local previousName = _G.fishingPreviousWeaponName or _G._GenesisGetLastEquippedSwordName()
+		local previousName = _G.fishingPreviousWeaponName or _G._KazuGetLastEquippedSwordName()
 		local restoredTool = nil
 		pcall(function()
 			restoredTool = previousName and selectPrimaryWeapon(previousName, 4) or nil
@@ -17319,7 +17365,7 @@ local function run(B, T, P, DfT, ...)
 					humanoid:EquipTool(restoredTool)
 				end
 			end)
-			_G._GenesisRememberSword(restoredTool)
+			_G._KazuRememberSword(restoredTool)
 			_G.fishingPreviousTool = nil
 			_G.fishingPreviousWeaponName = nil
 			_G.fishingToolCaptured = false
@@ -17368,7 +17414,7 @@ local function run(B, T, P, DfT, ...)
 	end
 	_G._stopFishing = stopFishing
 
-	_G._GenesisPrepareCombatFromFishing = function(_reason)
+	_G._KazuPrepareCombatFromFishing = function(_reason)
 		if not fishingOwnsWeaponSlot() then
 			return true
 		end
@@ -17386,26 +17432,26 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	local function getSavedFishCFrame()
-		local cf, issue = _G._GenesisGetConfiguredFishingCFrame(game.PlaceId)
+		local cf, issue = _G._KazuGetConfiguredFishingCFrame(game.PlaceId)
 		_G.fishingPositionIssue = issue
 		return cf
 	end
 
-	_G._GenesisKaidoCache = {
+	_G._KazuKaidoCache = {
 		liveCheckedAt = 0,
 		live = nil,
 		orbCheckedAt = 0,
 		orbCount = 0,
 	}
-	_G._GenesisIsLiveKaido = function(model)
+	_G._KazuIsLiveKaido = function(model)
 		local humanoid = model and model.Parent and model:FindFirstChildOfClass("Humanoid")
 		return humanoid ~= nil
 			and humanoid.Health > 0
 			and model:FindFirstChild("HumanoidRootPart") ~= nil
 	end
 
-	_G._GenesisFindLiveKaido = function()
-		local cache = _G._GenesisKaidoCache
+	_G._KazuFindLiveKaido = function()
+		local cache = _G._KazuKaidoCache
 		-- Kaido's Dragon, its summon altar, and Dragon's Orb farm are Second Sea
 		-- content. Never let a similarly named Sea 3 monster enter this subsystem.
 		if game.PlaceId ~= 6381829480 then
@@ -17414,7 +17460,7 @@ local function run(B, T, P, DfT, ...)
 		end
 		local now = os.clock()
 		if now - cache.liveCheckedAt < 0.1 then
-			return _G._GenesisIsLiveKaido(cache.live) and cache.live or nil
+			return _G._KazuIsLiveKaido(cache.live) and cache.live or nil
 		end
 		cache.liveCheckedAt = now
 		local monsterRoot = Workspace:FindFirstChild("Monster")
@@ -17425,7 +17471,7 @@ local function run(B, T, P, DfT, ...)
 		for _, folder in ipairs(monsterRoot:GetChildren()) do
 			if folder:IsA("Folder") then
 				for _, mob in ipairs(folder:GetChildren()) do
-					if string.find(mob.Name, "Dragon", 1, true) and _G._GenesisIsLiveKaido(mob) then
+					if string.find(mob.Name, "Dragon", 1, true) and _G._KazuIsLiveKaido(mob) then
 						cache.live = mob
 						return mob
 					end
@@ -17436,8 +17482,8 @@ local function run(B, T, P, DfT, ...)
 		return nil
 	end
 
-	_G._GenesisGetDragonOrbCount = function()
-		local cache = _G._GenesisKaidoCache
+	_G._KazuGetDragonOrbCount = function()
+		local cache = _G._KazuKaidoCache
 		if game.PlaceId ~= 6381829480 then
 			cache.orbCount = 0
 			return 0
@@ -17497,7 +17543,7 @@ local function run(B, T, P, DfT, ...)
 		-- downtime-only "Fish Between Boss Spawns" option is enabled. The summon
 		-- NPC itself is deliberately not considered a boss target here.
 		if isFeatureEnabledInCurrentSea("autoFarmKaido") then
-			_G.kaidoDragon = _G._GenesisFindLiveKaido()
+			_G.kaidoDragon = _G._KazuFindLiveKaido()
 			if _G.kaidoDragon then
 				bossFishingBlockCached = true
 				return true
@@ -17588,20 +17634,20 @@ local function run(B, T, P, DfT, ...)
 		return false
 	end
 
-	_G._GenesisDailyQuestPriorityCheckedAt = 0
-	_G._GenesisDailyQuestPriorityCandidate = nil
-	_G._GenesisDailyQuestReleaseUntil = 0
-	_G._GenesisGetDailyQuestPriorityCandidate = function()
-		if GetSetting("autoDailyQuestsMaster") and _G._GenesisDailyQuestTravelPending then
+	_G._KazuDailyQuestPriorityCheckedAt = 0
+	_G._KazuDailyQuestPriorityCandidate = nil
+	_G._KazuDailyQuestReleaseUntil = 0
+	_G._KazuGetDailyQuestPriorityCandidate = function()
+		if GetSetting("autoDailyQuestsMaster") and _G._KazuDailyQuestTravelPending then
 			return true -- reserve movement and finish the fishing handoff before a sea transfer
 		end
 		local enabled = GetSetting("autoDailyQuestsMaster") and
 			((game.PlaceId == 15759515082 and GetSetting("autoDailyQuest"))
 				or (game.PlaceId == 6381829480 and GetSetting("autoSecondSeaDailyQuest")))
 		if not enabled then
-			_G._GenesisDailyQuestPriorityCheckedAt = 0
-			_G._GenesisDailyQuestPriorityCandidate = nil
-			_G._GenesisDailyQuestReleaseUntil = 0
+			_G._KazuDailyQuestPriorityCheckedAt = 0
+			_G._KazuDailyQuestPriorityCandidate = nil
+			_G._KazuDailyQuestReleaseUntil = 0
 			return nil
 		end
 		-- The selector is initialized later in this bundle. Reserve the slot while
@@ -17610,15 +17656,15 @@ local function run(B, T, P, DfT, ...)
 			return true
 		end
 		local now = tick()
-		if _G._GenesisDailyQuestPriorityCheckedAt > 0
-			and now - _G._GenesisDailyQuestPriorityCheckedAt < 0.2 then
-			return _G._GenesisDailyQuestPriorityCandidate
+		if _G._KazuDailyQuestPriorityCheckedAt > 0
+			and now - _G._KazuDailyQuestPriorityCheckedAt < 0.2 then
+			return _G._KazuDailyQuestPriorityCandidate
 		end
-		_G._GenesisDailyQuestPriorityCheckedAt = now
+		_G._KazuDailyQuestPriorityCheckedAt = now
 		local ok, pending, pendingState, pendingDetail = pcall(getDailyQuestPending)
 		if ok and pending then
-			_G._GenesisDailyQuestPriorityCandidate = pending
-			_G._GenesisDailyQuestReleaseUntil = now + 1.5
+			_G._KazuDailyQuestPriorityCandidate = pending
+			_G._KazuDailyQuestReleaseUntil = now + 1.5
 		elseif ok then
 			-- The coordinator worker intentionally moves only while it owns the
 			-- daily slot. Publish terminal/waiting state here before that ownership
@@ -17632,17 +17678,17 @@ local function run(B, T, P, DfT, ...)
 			else
 				_G.dailyQuestIssue = nil
 			end
-			if now < _G._GenesisDailyQuestReleaseUntil then
+			if now < _G._KazuDailyQuestReleaseUntil then
 			-- Do not send the player fishing during a brief quest-completion
 			-- replication gap. This sentinel owns no movement or combat.
-				_G._GenesisDailyQuestPriorityCandidate = true
+				_G._KazuDailyQuestPriorityCandidate = true
 			else
-				_G._GenesisDailyQuestPriorityCandidate = nil
+				_G._KazuDailyQuestPriorityCandidate = nil
 			end
 		else
-			_G._GenesisDailyQuestPriorityCandidate = nil
+			_G._KazuDailyQuestPriorityCandidate = nil
 		end
-		return _G._GenesisDailyQuestPriorityCandidate
+		return _G._KazuDailyQuestPriorityCandidate
 	end
 
 	isFishingBlocked = function()
@@ -17655,14 +17701,14 @@ local function run(B, T, P, DfT, ...)
 			or _G.isProgressingBusoV2
 			or _G.isProgressingObservationV2
 			or _G.thirdSeaProgressionActive
-			or _G._GenesisGetDailyQuestPriorityCandidate()
+			or _G._KazuGetDailyQuestPriorityCandidate()
 		then
 			return true
 		end
 		-- Reserve the fishing position and Primary slot only while dungeon entry is
 		-- actually selected or already committed. A merely enabled, preempted toggle
 		-- must allow the lower-priority fishing fallback to run.
-		if _G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation() then
+		if _G._KazuDungeonOwnsAutomation and _G._KazuDungeonOwnsAutomation() then
 			return true
 		end
 		if hasEnabledBossTarget() then
@@ -17671,14 +17717,14 @@ local function run(B, T, P, DfT, ...)
 		return false
 	end
 
-	_G._GenesisBindSwordTracker(LocalPlayer.Character)
+	_G._KazuBindSwordTracker(LocalPlayer.Character)
 	-- Prime the persistent fallback as soon as replicated loadout data becomes
 	-- available. This only observes state; it never equips or changes a slot.
 	spawn(function()
-		_G._GenesisWaitForLastEquippedSwordName(8)
+		_G._KazuWaitForLastEquippedSwordName(8)
 	end)
 
-	trackGenesisConnection(LocalPlayer.CharacterAdded:Connect(function(character)
+	trackKazuConnection(LocalPlayer.CharacterAdded:Connect(function(character)
 		removeFishPosition()
 		_G.fishingGeneration = (_G.fishingGeneration or 0) + 1
 		_G.isFishing = false
@@ -17691,9 +17737,9 @@ local function run(B, T, P, DfT, ...)
 		_G.fishingState = _G.fishingToolCaptured and "restoring" or "idle"
 		_G.fishingRestoreAttempts = 0
 		_G.fishingNextRestoreAttempt = 0
-		_G._GenesisBindSwordTracker(character)
+		_G._KazuBindSwordTracker(character)
 		spawn(function()
-			_G._GenesisWaitForLastEquippedSwordName(8)
+			_G._KazuWaitForLastEquippedSwordName(8)
 		end)
 	end))
 
@@ -17731,7 +17777,7 @@ local function run(B, T, P, DfT, ...)
 				-- EtcData, or the owned-sword inventory entry to replicate.
 				_G.isFishing = true
 				_G.fishingPosition = cf
-				if not _G._GenesisCaptureFishingPreviousWeapon() then
+				if not _G._KazuCaptureFishingPreviousWeapon() then
 					_G.isFishing = false
 					_G.fishingPosition = nil
 					removeFishPosition()
@@ -17791,7 +17837,7 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
-	trackGenesisConnection(RunService.Heartbeat:Connect(function()
+	trackKazuConnection(RunService.Heartbeat:Connect(function()
 		pcall(function()
 			if not GetSetting("autoFish") then
 				if _G.isFishing or _G.fishingToolCaptured then
@@ -17848,7 +17894,7 @@ local function run(B, T, P, DfT, ...)
 	end))
 
 	-- Dispatches only to a button that belongs to a currently visible GUI tree.
-	_G._GenesisIsVisibleGuiButton = function(button)
+	_G._KazuIsVisibleGuiButton = function(button)
 		if not button or not button:IsA("GuiButton") or not button.Parent then
 			return false
 		end
@@ -17865,8 +17911,8 @@ local function run(B, T, P, DfT, ...)
 		return button.AbsoluteSize.X > 0 and button.AbsoluteSize.Y > 0
 	end
 
-	_G._GenesisDispatchGuiButton = function(button)
-		if not _G._GenesisIsVisibleGuiButton(button) then
+	_G._KazuDispatchGuiButton = function(button)
+		if not _G._KazuIsVisibleGuiButton(button) then
 			return false, "not_visible"
 		end
 
@@ -17999,7 +18045,7 @@ local function run(B, T, P, DfT, ...)
 			root.AssemblyLinearVelocity = Vector3.zero
 			root.AssemblyAngularVelocity = Vector3.zero
 			if not hoverConnection then
-				hoverConnection = trackGenesisConnection(RunService.Heartbeat:Connect(function()
+				hoverConnection = trackKazuConnection(RunService.Heartbeat:Connect(function()
 					if not hoverRoot or not hoverRoot.Parent or not hoverPosition then
 						stopDailyQuestHover()
 						return
@@ -18088,7 +18134,7 @@ local function run(B, T, P, DfT, ...)
 					puzzleRecovering = false
 					puzzleAwaitingResultAt = 0
 					puzzleExhausted = false
-					_G._GenesisDailyPuzzleStatus = nil
+					_G._KazuDailyPuzzleStatus = nil
 					_G.dailyQuestIssue = nil
 				end
 
@@ -18175,7 +18221,7 @@ local function run(B, T, P, DfT, ...)
 						local label = accept and accept:FindFirstChild("Text")
 						local deliveryText = label and (label.Text == "I'm here to deliver this Package!"
 							or label.Text == "ผมมาส่งของครับ!")
-						if not deliveryText or not _G._GenesisIsVisibleGuiButton(accept) then
+						if not deliveryText or not _G._KazuIsVisibleGuiButton(accept) then
 							if tick() - boxPortRequestAt > 6 then
 								_G.dailyQuestIssue = "Waiting for the correct Civilian Port delivery dialogue"
 							end
@@ -18196,7 +18242,7 @@ local function run(B, T, P, DfT, ...)
 							accept.Size = UDim2.new(10, 0, 10, 0)
 							accept.Position = UDim2.new(-1.9, 0, -5.5, 0)
 							RunService.RenderStepped:Wait()
-							if not dailyQuestCanAct() or not _G._GenesisIsVisibleGuiButton(accept)
+							if not dailyQuestCanAct() or not _G._KazuIsVisibleGuiButton(accept)
 								or LocalPlayer.CurrentQuest.Value ~= "Box Box!"
 								or progressValue.Value ~= progress
 								or not character:FindFirstChild("onQuest")
@@ -18447,7 +18493,7 @@ local function run(B, T, P, DfT, ...)
 						if not pickup.Enabled then pickedCount = pickedCount + 1 end
 						if not place.Enabled then placedCount = placedCount + 1 end
 					end
-					_G._GenesisDailyPuzzleStatus = {
+					_G._KazuDailyPuzzleStatus = {
 						labels = labels,
 						orderIndex = puzzleOrderIndex,
 						order = puzzleOrders[puzzleOrderIndex],
@@ -18590,8 +18636,8 @@ local function run(B, T, P, DfT, ...)
 								yes = hintText and hintText:IsA("TextLabel")
 									and hintText.Text == "Hint,Please" and hint or nil
 							end
-							if yes and _G._GenesisIsVisibleGuiButton(yes) then
-								local sent = _G._GenesisDispatchGuiButton(yes)
+							if yes and _G._KazuIsVisibleGuiButton(yes) then
+								local sent = _G._KazuDispatchGuiButton(yes)
 								if sent then
 									codexDialogueBlockedAt = 0
 									_G.dailyQuestIssue = nil
@@ -18639,13 +18685,13 @@ local function run(B, T, P, DfT, ...)
 					if #chosen < 3 then
 						local slot = frame:FindFirstChild("Slot" .. current.words[#chosen + 1])
 						local button = slot and slot:FindFirstChildWhichIsA("TextButton", true)
-						if not _G._GenesisDispatchGuiButton(button) then
+						if not _G._KazuDispatchGuiButton(button) then
 							_G.dailyQuestIssue = "Kraken Codex word button is unavailable"
 						end
 						nextActionAt = tick() + 0.3
 						return
 					end
-					if _G._GenesisDispatchGuiButton(gui:FindFirstChild("Send")) then
+					if _G._KazuDispatchGuiButton(gui:FindFirstChild("Send")) then
 						codexSubmissions = codexSubmissions + 1
 					end
 					nextActionAt = tick() + 2
@@ -18806,8 +18852,8 @@ local function run(B, T, P, DfT, ...)
 				end
 			end
 		end
-		if _G._GenesisFruitLiveState then
-			local fruit = _G._GenesisFruitLiveState
+		if _G._KazuFruitLiveState then
+			local fruit = _G._KazuFruitLiveState
 			add(fruit.channel, fruit.title, fruit.event_type)
 		end
 		table.sort(events, function(a, b)
@@ -19042,7 +19088,7 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
-	_G._GenesisRunRaidBossAutomation = function()
+	_G._KazuRunRaidBossAutomation = function()
 		updateRaidCache()
 		updateRaidStatusLabel()
 
@@ -19052,8 +19098,8 @@ local function run(B, T, P, DfT, ...)
 		local activeTarget = cachedTarget
 		local activeBossName = cachedBossName
 		if isFeatureEnabledInCurrentSea("autoFarmKaido")
-			and type(_G._GenesisFindLiveKaido) == "function" then
-			local liveKaido = _G._GenesisFindLiveKaido()
+			and type(_G._KazuFindLiveKaido) == "function" then
+			local liveKaido = _G._KazuFindLiveKaido()
 			if liveKaido then
 				activeTarget = liveKaido
 				activeBossName = liveKaido.Name
@@ -19071,13 +19117,13 @@ local function run(B, T, P, DfT, ...)
 			and activeTarget:FindFirstChild("Humanoid")
 			and activeTarget.Humanoid.Health > 0
 		then
-			if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+			if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 				return true, activeBossName
 			end
-			if _G._GenesisPrepareCombatFromFishing and not _G._GenesisPrepareCombatFromFishing("raid_boss") then
+			if _G._KazuPrepareCombatFromFishing and not _G._KazuPrepareCombatFromFishing("raid_boss") then
 				return true, activeBossName
 			end
-			if _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit() then
+			if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
 				return true, activeBossName
 			end
 			pcall(function()
@@ -19105,7 +19151,7 @@ local function run(B, T, P, DfT, ...)
 		return false, nil
 	end
 
-	_G._GenesisRunDailyQuestCombat = function(current)
+	_G._KazuRunDailyQuestCombat = function(current)
 		local target = _G.dailyQuestTarget
 		local activeQuest = LocalPlayer:FindFirstChild("CurrentQuest")
 		if _G.dailyQuestState ~= "kill" or _G.dailyQuestCurrentName ~= current.quest
@@ -19148,7 +19194,7 @@ local function run(B, T, P, DfT, ...)
 
 		_G.allowCombat = false
 		if dailyQuest == true then
-			_G._GenesisSetPriorityOwner("daily_quest_handoff", "settling_quest_state")
+			_G._KazuSetPriorityOwner("daily_quest_handoff", "settling_quest_state")
 			if _G.farmFixThread or _G.farmFixBodyPos then
 				removeFarmFix()
 			end
@@ -19158,22 +19204,22 @@ local function run(B, T, P, DfT, ...)
 			return true
 		end
 
-		if _G._GenesisPriorityOwner ~= "daily_quest" and (_G.farmFixThread or _G.farmFixBodyPos) then
+		if _G._KazuPriorityOwner ~= "daily_quest" and (_G.farmFixThread or _G.farmFixBodyPos) then
 			removeFarmFix()
 		end
-		_G._GenesisSetPriorityOwner("daily_quest", dailyQuest.quest)
-		_G._GenesisRunDailyQuestCombat(dailyQuest)
+		_G._KazuSetPriorityOwner("daily_quest", dailyQuest.quest)
+		_G._KazuRunDailyQuestCombat(dailyQuest)
 		return true
 	end
 
-	_G._GenesisAutomationStepBusy = false
-	_G._GenesisRunAutomationStep = function()
+	_G._KazuAutomationStepBusy = false
+	_G._KazuRunAutomationStep = function()
 		-- A visible difficulty picker is already committed: leaving the circle can no
 		-- longer cancel entry. Treat that transition and the loaded dungeon exactly
 		-- like an active dungeon, even when the toggle is subsequently switched off.
-		local dungeonCommitted, dungeonStage = _G._GenesisUpdateDungeonCommit()
+		local dungeonCommitted, dungeonStage = _G._KazuUpdateDungeonCommit()
 		if dungeonCommitted then
-			_G._GenesisSetPriorityOwner("dungeon_committed", dungeonStage)
+			_G._KazuSetPriorityOwner("dungeon_committed", dungeonStage)
 			_G.allowCombat = false
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
@@ -19194,7 +19240,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		if _G.storingFruit then
-			_G._GenesisSetPriorityOwner("fruit_transaction", "storing")
+			_G._KazuSetPriorityOwner("fruit_transaction", "storing")
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
 			end
@@ -19206,7 +19252,7 @@ local function run(B, T, P, DfT, ...)
 
 		-- Highest priority: Buso V2 / Ken V2 (unlock automations).
 		if _G.isProgressingBusoV2 or _G.isProgressingObservationV2 then
-			_G._GenesisSetPriorityOwner("haki_progression", _G.isProgressingBusoV2 and "buso_v2" or "ken_v2")
+			_G._KazuSetPriorityOwner("haki_progression", _G.isProgressingBusoV2 and "buso_v2" or "ken_v2")
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
 			end
@@ -19224,16 +19270,16 @@ local function run(B, T, P, DfT, ...)
 		-- calls retain the known-good leaf combat implementations; only ownership and
 		-- dispatch order are centralized here.
 		if checkSeaEvents("major") then
-			_G._GenesisSetPriorityOwner("major_sea_event", _G.currentEventName)
+			_G._KazuSetPriorityOwner("major_sea_event", _G.currentEventName)
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
 			end
 			return
 		end
 
-		local hasRaidBoss, raidBossName = _G._GenesisRunRaidBossAutomation()
+		local hasRaidBoss, raidBossName = _G._KazuRunRaidBossAutomation()
 		if hasRaidBoss then
-			_G._GenesisSetPriorityOwner("world_raid_boss", raidBossName)
+			_G._KazuSetPriorityOwner("world_raid_boss", raidBossName)
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
 			end
@@ -19241,7 +19287,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		if checkSeaEvents("serpent") then
-			_G._GenesisSetPriorityOwner("serpent", _G.currentEventName)
+			_G._KazuSetPriorityOwner("serpent", _G.currentEventName)
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
 			end
@@ -19249,7 +19295,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		if checkSeaEvents("galleon") then
-			_G._GenesisSetPriorityOwner("galleon", _G.currentEventName)
+			_G._KazuSetPriorityOwner("galleon", _G.currentEventName)
 			if _G.conquestActive and removeConquestPosition then
 				removeConquestPosition()
 			end
@@ -19263,14 +19309,14 @@ local function run(B, T, P, DfT, ...)
 		-- Live world bosses and sea events above still retain absolute priority.
 		if
 			GetSetting("autoDailyQuestsMaster")
-			and _G._GenesisDailyQuestTravelPending
-			and not _G._GenesisDailyReturnRequested
+			and _G._KazuDailyQuestTravelPending
+			and not _G._KazuDailyReturnRequested
 		then
-			local enteringTravel = _G._GenesisPriorityOwner ~= "daily_quest_handoff"
-			_G._GenesisSetPriorityOwner("daily_quest_handoff", "cross_sea_travel")
+			local enteringTravel = _G._KazuPriorityOwner ~= "daily_quest_handoff"
+			_G._KazuSetPriorityOwner("daily_quest_handoff", "cross_sea_travel")
 			_G.allowCombat = false
 			if fishingOwnsWeaponSlot() then
-				_G._GenesisPrepareCombatFromFishing("daily_quest_travel")
+				_G._KazuPrepareCombatFromFishing("daily_quest_travel")
 			end
 			if _G.farmFixThread or _G.farmFixBodyPos then
 				removeFarmFix()
@@ -19300,12 +19346,12 @@ local function run(B, T, P, DfT, ...)
 		-- Daily return remains committed, but every live world boss and sea event
 		-- above may pause it. Once that higher-priority target is gone, the same
 		-- route resumes without losing its selected destination.
-		if GetSetting("autoDailyQuestsMaster") and _G._GenesisDailyReturnRequested then
-			local enteringReturn = _G._GenesisPriorityOwner ~= "daily_quest_return"
-			_G._GenesisSetPriorityOwner("daily_quest_return", "main_sea")
+		if GetSetting("autoDailyQuestsMaster") and _G._KazuDailyReturnRequested then
+			local enteringReturn = _G._KazuPriorityOwner ~= "daily_quest_return"
+			_G._KazuSetPriorityOwner("daily_quest_return", "main_sea")
 			_G.allowCombat = false
 			if fishingOwnsWeaponSlot() then
-				_G._GenesisPrepareCombatFromFishing("daily_quest_return")
+				_G._KazuPrepareCombatFromFishing("daily_quest_return")
 			end
 			if _G.farmFixThread or _G.farmFixBodyPos then
 				removeFarmFix()
@@ -19337,20 +19383,20 @@ local function run(B, T, P, DfT, ...)
 		-- grant the local worker ownership before dungeon entry, materials, fishing,
 		-- or ordinary farming can consume the frame. Live world bosses and sea
 		-- events remain above this branch.
-		local dailyQuest = _G._GenesisGetDailyQuestPriorityCandidate()
+		local dailyQuest = _G._KazuGetDailyQuestPriorityCandidate()
 		if dailyQuest and fishingOwnsWeaponSlot() then
 			_G.allowCombat = false
-			_G._GenesisSetPriorityOwner("daily_quest_handoff", "restoring_weapon")
+			_G._KazuSetPriorityOwner("daily_quest_handoff", "restoring_weapon")
 			if _G.farmFixThread or _G.farmFixBodyPos then
 				removeFarmFix()
 			end
-			_G._GenesisPrepareCombatFromFishing("daily_quest")
+			_G._KazuPrepareCombatFromFishing("daily_quest")
 			return
 		end
 		if claimDailyQuestPriority(dailyQuest) then
 			return
 		end
-		if _G._GenesisPriorityOwner == "daily_quest" or _G._GenesisPriorityOwner == "daily_quest_handoff" then
+		if _G._KazuPriorityOwner == "daily_quest" or _G._KazuPriorityOwner == "daily_quest_handoff" then
 			_G.allowCombat = false
 			if _G.farmFixThread or _G.farmFixBodyPos then
 				removeFarmFix()
@@ -19363,25 +19409,25 @@ local function run(B, T, P, DfT, ...)
 		-- Enabling Auto Dungeon is only a request. It owns movement after every
 		-- higher phase is absent and while the near-event gate permits a new entry.
 		if GetSetting("auto_dungeon_v2") then
-			local nearSeaEvent, _, timerText = _G._GenesisIsSeaEventNear()
+			local nearSeaEvent, _, timerText = _G._KazuIsSeaEventNear()
 			if not nearSeaEvent then
-				_G._GenesisSetPriorityOwner("dungeon_entry", "waiting_for_picker")
+				_G._KazuSetPriorityOwner("dungeon_entry", "waiting_for_picker")
 				if _G.conquestActive and removeConquestPosition then
 					removeConquestPosition()
 				end
 				if fishingOwnsWeaponSlot() then
-					_G._GenesisPrepareCombatFromFishing("dungeon_entry")
+					_G._KazuPrepareCombatFromFishing("dungeon_entry")
 				end
 				if _G.farmFixThread or _G.farmFixBodyPos then
 					pcall(removeFarmFix)
 				end
 				return
 			end
-			_G._GenesisSetPriorityOwner("dungeon_paused", "sea_event_near:" .. tostring(timerText))
+			_G._KazuSetPriorityOwner("dungeon_paused", "sea_event_near:" .. tostring(timerText))
 		end
 
 		if _G.collectingPearls then
-			_G._GenesisSetPriorityOwner("pearl_collection", "collecting")
+			_G._KazuSetPriorityOwner("pearl_collection", "collecting")
 			if _G.isFishing or _G.fishingToolCaptured then
 				stopFishing()
 			end
@@ -19395,7 +19441,7 @@ local function run(B, T, P, DfT, ...)
 		-- A flag capture uses its own BodyPosition/BodyGyro. Do not let normal
 		-- farming create a second movement controller until it has released them.
 		if _G.conquestActive then
-			_G._GenesisSetPriorityOwner("conquest", "capturing")
+			_G._KazuSetPriorityOwner("conquest", "capturing")
 			if _G.isFishing or _G.fishingToolCaptured then
 				stopFishing()
 			end
@@ -19415,7 +19461,7 @@ local function run(B, T, P, DfT, ...)
 		-- enabled and usable. This closes the half-second startup window in which a
 		-- frame-rate Auto Farm pass could equip the sword before isFishing became true.
 		if typeof(fishingDestination) == "CFrame" then
-			_G._GenesisSetPriorityOwner("fishing", "available")
+			_G._KazuSetPriorityOwner("fishing", "available")
 			_G.allowCombat = false
 			if _G.farmFixThread or _G.farmFixBodyPos then
 				removeFarmFix()
@@ -19424,28 +19470,28 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		if fishingOwnsWeaponSlot() then
-			_G._GenesisSetPriorityOwner("fishing_handoff", "restoring_weapon")
-			_G._GenesisPrepareCombatFromFishing("automation")
+			_G._KazuSetPriorityOwner("fishing_handoff", "restoring_weapon")
+			_G._KazuPrepareCombatFromFishing("automation")
 			return
 		end
 
 		-- Do not let combat start while the Primary slot is still being switched
 		-- back from Basic Rod to the weapon that fishing replaced.
 		if _G.fishingToolCaptured or _G.fishingLoadoutBusy then
-			_G._GenesisSetPriorityOwner("fishing_handoff", "restoring_weapon")
+			_G._KazuSetPriorityOwner("fishing_handoff", "restoring_weapon")
 			stopFishing()
 			return
 		end
 
 		if not _G.isAnyCombatActive() then
-			_G._GenesisSetPriorityOwner("idle", nil)
+			_G._KazuSetPriorityOwner("idle", nil)
 			_G.allowCombat = false
 			if _G.farmFixThread or _G.farmFixBodyPos then
 				pcall(removeFarmFix)
 			end
 			return
 		end
-		_G._GenesisSetPriorityOwner("other_combat", "normal_automation")
+		_G._KazuSetPriorityOwner("other_combat", "normal_automation")
 
 		local selectedBossName, selectedBossCFrame = getCurrentSeaSelectedBoss()
 		if not selectedBossName then
@@ -19502,14 +19548,14 @@ local function run(B, T, P, DfT, ...)
 		if isFeatureEnabledInCurrentSea("autoFarmKaido") then
 			local kaidoHandled = false
 			pcall(function()
-				local dragon = _G._GenesisFindLiveKaido()
-				local orbCount = _G._GenesisGetDragonOrbCount()
+				local dragon = _G._KazuFindLiveKaido()
+				local orbCount = _G._KazuGetDragonOrbCount()
 				_G.kaidoDragon = dragon
 				_G.kaidoHasOrb = orbCount >= 1
 
 				if dragon then
 					kaidoHandled = true
-					_G._GenesisSetPriorityOwner("world_raid_boss", dragon.Name)
+					_G._KazuSetPriorityOwner("world_raid_boss", dragon.Name)
 					if type(_G._stopKaidoAcquisition) == "function" then
 						_G._stopKaidoAcquisition("boss_spawned")
 					end
@@ -19553,14 +19599,14 @@ local function run(B, T, P, DfT, ...)
 					-- Acquisition is a low-priority leaf. The dedicated worker below may
 					-- move only while this exact owner is still published; fishing and
 					-- every higher-priority activity cause it to release immediately.
-					_G._GenesisSetPriorityOwner("other_combat", "kaido_acquisition")
+					_G._KazuSetPriorityOwner("other_combat", "kaido_acquisition")
 					return
 				end
 
 				if type(_G._stopKaidoAcquisition) == "function" then
 					_G._stopKaidoAcquisition("orb_missing")
 				end
-				_G._GenesisSetPriorityOwner("other_combat", "kaido_orb_farm")
+				_G._KazuSetPriorityOwner("other_combat", "kaido_orb_farm")
 				local eliteSkeleton = nil
 				local monsterRoot = Workspace:FindFirstChild("Monster")
 				if monsterRoot then
@@ -19613,7 +19659,7 @@ local function run(B, T, P, DfT, ...)
 				-- current Elite Skeleton died. Wait at its spawn so the next replica is
 				-- acquired immediately. Fishing and daily work still win above this
 				-- low-priority leaf.
-				_G._GenesisSetPriorityOwner("other_combat", "kaido_orb_waiting")
+				_G._KazuSetPriorityOwner("other_combat", "kaido_orb_waiting")
 				local eliteSpawnCFrame = CFrame.new(-5926, 98, 7183)
 				local root = GetRoot(LocalPlayer.Character)
 				if root and (root.Position - eliteSpawnCFrame.Position).Magnitude > 8 then
@@ -20322,15 +20368,15 @@ local function run(B, T, P, DfT, ...)
 		end
 	end
 
-	trackGenesisConnection(RunService.Stepped:Connect(function()
-		if not LocalPlayer:FindFirstChild("PlayerStats") or _G._GenesisAutomationStepBusy then
+	trackKazuConnection(RunService.Stepped:Connect(function()
+		if not LocalPlayer:FindFirstChild("PlayerStats") or _G._KazuAutomationStepBusy then
 			return
 		end
-		_G._GenesisAutomationStepBusy = true
-		local ok, err = pcall(_G._GenesisRunAutomationStep)
-		_G._GenesisAutomationStepBusy = false
+		_G._KazuAutomationStepBusy = true
+		local ok, err = pcall(_G._KazuRunAutomationStep)
+		_G._KazuAutomationStepBusy = false
 		if not ok then
-			warn("[GENESIS HUB] Automation step error: " .. tostring(err))
+			warn("[KAZU HUB] Automation step error: " .. tostring(err))
 		end
 	end))
 
@@ -20420,7 +20466,7 @@ local function run(B, T, P, DfT, ...)
 				if not isFeatureEnabledInCurrentSea("autoSecondSea") then
 					return
 				end
-				if _G._GenesisDailyReturnRequested then return end
+				if _G._KazuDailyReturnRequested then return end
 
 				local level = LocalPlayer.PlayerStats:FindFirstChild("lvl")
 				local playerLevel = level and level.Value or 0
@@ -20464,7 +20510,7 @@ local function run(B, T, P, DfT, ...)
 
 						pcall(function()
 							local acceptBtn = LocalPlayer.PlayerGui.Traveler.Dialogue.Accept
-							_G._GenesisDispatchGuiButton(acceptBtn)
+							_G._KazuDispatchGuiButton(acceptBtn)
 						end)
 					end
 				elseif progression == "Yes" then
@@ -20482,14 +20528,14 @@ local function run(B, T, P, DfT, ...)
 
 					pcall(function()
 						local acceptBtn = LocalPlayer.PlayerGui["Elite Pirate"].Dialogue.Accept
-						_G._GenesisDispatchGuiButton(acceptBtn)
+						_G._KazuDispatchGuiButton(acceptBtn)
 					end)
 				end
 			end)
 		end
 	end)
 
-	_G._GenesisKaidoAcquisition = {
+	_G._KazuKaidoAcquisition = {
 		active = false,
 		phase = "idle",
 		root = nil,
@@ -20504,7 +20550,7 @@ local function run(B, T, P, DfT, ...)
 		lastClickResult = nil,
 	}
 
-	_G._GenesisClearKaidoSwimMovers = function(root)
+	_G._KazuClearKaidoSwimMovers = function(root)
 		for _, mover in ipairs(root and root:GetChildren() or {}) do
 			if (mover.Name == "Swim" and mover:IsA("AlignPosition"))
 				or (mover.Name == "SwimGyro" and mover:IsA("BodyGyro")) then
@@ -20514,7 +20560,7 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	_G._stopKaidoAcquisition = function(reason)
-		local state = _G._GenesisKaidoAcquisition
+		local state = _G._KazuKaidoAcquisition
 		if not state then
 			return
 		end
@@ -20526,7 +20572,7 @@ local function run(B, T, P, DfT, ...)
 		end
 		local root = state.root
 		if state.moved and root and root.Parent then
-			_G._GenesisClearKaidoSwimMovers(root)
+			_G._KazuClearKaidoSwimMovers(root)
 			root.AssemblyLinearVelocity = Vector3.zero
 			root.AssemblyAngularVelocity = Vector3.zero
 		end
@@ -20550,7 +20596,7 @@ local function run(B, T, P, DfT, ...)
 	-- send one pointer press/release, then restore it if the GUI did not advance.
 	-- This helper never moves the character and is called only after the central
 	-- resolver has already granted the non-priority Kaido acquisition leaf.
-	_G._GenesisKaidoPhysicalClick = function(button)
+	_G._KazuKaidoPhysicalClick = function(button)
 		local camera = Workspace.CurrentCamera
 		if not camera or camera.ViewportSize.X <= 0 or camera.ViewportSize.Y <= 0 then
 			return false, "camera_unavailable"
@@ -20559,7 +20605,7 @@ local function run(B, T, P, DfT, ...)
 		local originalSize = nil
 		local originalPosition = nil
 		if button then
-			if not _G._GenesisIsVisibleGuiButton(button) then
+			if not _G._KazuIsVisibleGuiButton(button) then
 				return false, "button_not_visible"
 			end
 			originalSize = button.Size
@@ -20595,24 +20641,24 @@ local function run(B, T, P, DfT, ...)
 		return clickOk, clickOk and "physical_click" or tostring(clickError)
 	end
 
-	_G._GenesisCanRunKaidoAcquisition = function()
+	_G._KazuCanRunKaidoAcquisition = function()
 		if game.PlaceId ~= 6381829480 then
 			return false, "wrong_sea"
 		end
 		if not GetSetting("autoFarmKaido") then
 			return false, "disabled"
 		end
-		if _G._GenesisFindLiveKaido() then
+		if _G._KazuFindLiveKaido() then
 			return false, "boss_spawned"
 		end
-		if _G._GenesisGetDragonOrbCount() < 1 then
+		if _G._KazuGetDragonOrbCount() < 1 then
 			return false, "orb_missing"
 		end
 		-- The summon mechanism never preempts anything. It can act only after the
 		-- central resolver independently reaches this exact low-priority leaf.
-		if _G._GenesisPriorityOwner ~= "other_combat"
-			or _G._GenesisPriorityDetail ~= "kaido_acquisition" then
-			return false, "yielding_to_" .. tostring(_G._GenesisPriorityOwner)
+		if _G._KazuPriorityOwner ~= "other_combat"
+			or _G._KazuPriorityDetail ~= "kaido_acquisition" then
+			return false, "yielding_to_" .. tostring(_G._KazuPriorityOwner)
 		end
 		if fishingOwnsWeaponSlot()
 			or _G.storingFruit
@@ -20623,7 +20669,7 @@ local function run(B, T, P, DfT, ...)
 			or _G.isProgressingBusoV2
 			or _G.isProgressingObservationV2
 			or _G.thirdSeaProgressionActive
-			or (_G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation())
+			or (_G._KazuDungeonOwnsAutomation and _G._KazuDungeonOwnsAutomation())
 		then
 			return false, "higher_priority_active"
 		end
@@ -20633,13 +20679,13 @@ local function run(B, T, P, DfT, ...)
 	spawn(function()
 		while task.wait(0.1) do
 			pcall(function()
-				local state = _G._GenesisKaidoAcquisition
+				local state = _G._KazuKaidoAcquisition
 				local inKaidoSea = game.PlaceId == 6381829480
-				local dragon = inKaidoSea and GetSetting("autoFarmKaido") and _G._GenesisFindLiveKaido() or nil
+				local dragon = inKaidoSea and GetSetting("autoFarmKaido") and _G._KazuFindLiveKaido() or nil
 				_G.kaidoDragon = dragon
-				_G.kaidoHasOrb = inKaidoSea and _G._GenesisGetDragonOrbCount() >= 1 or false
+				_G.kaidoHasOrb = inKaidoSea and _G._KazuGetDragonOrbCount() >= 1 or false
 
-				local canRun, reason = _G._GenesisCanRunKaidoAcquisition()
+				local canRun, reason = _G._KazuCanRunKaidoAcquisition()
 				if not canRun then
 					if state.active or state.hold then
 						_G._stopKaidoAcquisition(reason)
@@ -20665,10 +20711,10 @@ local function run(B, T, P, DfT, ...)
 					state.root = root
 				end
 				local targetCF = summonNpc.CFrame * CFrame.new(0, 3, 0)
-				_G._GenesisClearKaidoSwimMovers(root)
+				_G._KazuClearKaidoSwimMovers(root)
 				if not state.hold or state.hold.Parent ~= root then
 					local hold = Instance.new("BodyPosition")
-					hold.Name = "GenesisKaidoAcquisitionHold"
+					hold.Name = "KazuKaidoAcquisitionHold"
 					hold.MaxForce = Vector3.new(1000000000, 1000000000, 1000000000)
 					hold.D = 100000
 					hold.P = 1000000
@@ -20715,7 +20761,7 @@ local function run(B, T, P, DfT, ...)
 						state.acceptSentAt = now
 						state.acceptAttempts = state.acceptAttempts + 1
 						state.continueSentAt = 0
-						local clickOk, clickResult = _G._GenesisKaidoPhysicalClick(acceptBtn)
+						local clickOk, clickResult = _G._KazuKaidoPhysicalClick(acceptBtn)
 						state.lastClickResult = clickResult
 						if not clickOk then
 							state.acceptSentAt = 0
@@ -20737,7 +20783,7 @@ local function run(B, T, P, DfT, ...)
 						state.phase = state.acceptSentAt > 0 and "continuing_summon" or "closing_stale_status"
 						state.continueSentAt = now
 						state.nextRequestAt = now + 8
-						local clickOk, clickResult = _G._GenesisKaidoPhysicalClick(nil)
+						local clickOk, clickResult = _G._KazuKaidoPhysicalClick(nil)
 						state.lastClickResult = clickResult
 						if not clickOk then
 							state.continueSentAt = 0
@@ -20963,7 +21009,7 @@ local function run(B, T, P, DfT, ...)
 	spawn(function()
 		while task.wait(0.25) do
 			pcall(function()
-				if not GetSetting("autoStoreFruits") or _G._GenesisDailyReturnRequested then
+				if not GetSetting("autoStoreFruits") or _G._KazuDailyReturnRequested then
 					return
 				end
 
@@ -20982,7 +21028,7 @@ local function run(B, T, P, DfT, ...)
 				end
 
 				for _, tool in pairs(LocalPlayer.Backpack:GetChildren()) do
-					if _G._GenesisDailyReturnRequested then break end
+					if _G._KazuDailyReturnRequested then break end
 					if tool:IsA("Tool") and tool.Name:sub(-5) == "Fruit" then
 						local currentCount = storedFruits[tool.Name] or 0
 						if currentCount < maxPerFruit then
@@ -20997,7 +21043,7 @@ local function run(B, T, P, DfT, ...)
 								_G.storingFruit = true
 								pcall(function()
 								task.wait(0.01)
-								if _G._GenesisDailyReturnRequested then return end
+								if _G._KazuDailyReturnRequested then return end
 
 								humanoid:EquipTool(tool)
 								task.wait(0.01)
@@ -21005,7 +21051,7 @@ local function run(B, T, P, DfT, ...)
 								local equippedFruit = nil
 								local startEquip = tick()
 								while tick() - startEquip < 2 do
-									if _G._GenesisDailyReturnRequested then break end
+									if _G._KazuDailyReturnRequested then break end
 									local equipped = LocalPlayer.Character
 										and LocalPlayer.Character:FindFirstChild(fruitName)
 									if equipped then
@@ -21019,13 +21065,13 @@ local function run(B, T, P, DfT, ...)
 								-- normal M1 activation is what opens EatFruitBecky.Dialogue;
 								-- the dedicated worker below then presses Collect.
 								if equippedFruit and equippedFruit.Parent == LocalPlayer.Character
-									and not _G._GenesisDailyReturnRequested then
+									and not _G._KazuDailyReturnRequested then
 									equippedFruit:Activate()
 								end
 
 								local startTime = tick()
 								while tick() - startTime < 5 do
-									if _G._GenesisDailyReturnRequested then break end
+									if _G._KazuDailyReturnRequested then break end
 									local currentStore = LocalPlayer.PlayerStats:FindFirstChild("FruitStore")
 									if currentStore then
 										local success2, data2 = pcall(function()
@@ -21084,7 +21130,7 @@ local function run(B, T, P, DfT, ...)
 				local eatFruitGui = LocalPlayer.PlayerGui:FindFirstChild("EatFruitBecky")
 				local dialogue = eatFruitGui and eatFruitGui:FindFirstChild("Dialogue")
 				local collectBtn = dialogue and dialogue:FindFirstChild("Collect")
-				if not _G._GenesisIsVisibleGuiButton(collectBtn) then
+				if not _G._KazuIsVisibleGuiButton(collectBtn) then
 					return
 				end
 
@@ -21106,7 +21152,7 @@ local function run(B, T, P, DfT, ...)
 					not GetSetting("autoStoreFruits")
 					or not _G.storingFruit
 					or collectBtn ~= dialogue:FindFirstChild("Collect")
-					or not _G._GenesisIsVisibleGuiButton(collectBtn)
+					or not _G._KazuIsVisibleGuiButton(collectBtn)
 				then
 					return
 				end
@@ -21145,7 +21191,7 @@ local function run(B, T, P, DfT, ...)
 				local gui = LocalPlayer.PlayerGui:FindFirstChild(guiName)
 				local dialogue = gui and gui:FindFirstChild("Dialogue")
 				local accept = dialogue and dialogue:FindFirstChild("Accept")
-				_G._GenesisDispatchGuiButton(accept)
+				_G._KazuDispatchGuiButton(accept)
 			end)
 		end
 	end)
@@ -21178,12 +21224,12 @@ local function run(B, T, P, DfT, ...)
 					or { "QuestAccept", "Quest 1", "Quest 2" }) or { "Accept" }
 				for _, buttonName in ipairs(choices) do
 					local candidate = dialogue:FindFirstChild(buttonName)
-					if _G._GenesisIsVisibleGuiButton(candidate) then
+					if _G._KazuIsVisibleGuiButton(candidate) then
 						button = candidate
 						break
 					end
 				end
-				if _G._GenesisDispatchGuiButton(button) then
+				if _G._KazuDispatchGuiButton(button) then
 					lastDailyQuestClick = tick()
 					if not loreQuest then
 						-- These older NPC GUIs also have a server-side Script under Accept.
@@ -21222,7 +21268,7 @@ local function run(B, T, P, DfT, ...)
 				-- Daily sea routing owns cross-sea movement in either direction. Yield
 				-- before publishing the progression blocker so outbound travel can reach
 				-- The Squid and fishing can resume if that route is later released.
-				if _G._GenesisDailyQuestTravelPending then
+				if _G._KazuDailyQuestTravelPending then
 					_G.thirdSeaProgressionActive = false
 					return
 				end
@@ -21258,7 +21304,7 @@ local function run(B, T, P, DfT, ...)
 				end
 				_G.thirdSeaProgressionActive = true
 				if fishingOwnsWeaponSlot() then
-					_G._GenesisPrepareCombatFromFishing("third_sea_progression")
+					_G._KazuPrepareCombatFromFishing("third_sea_progression")
 					return
 				end
 
@@ -21320,9 +21366,9 @@ local function run(B, T, P, DfT, ...)
 					if tick() - lastMatNotify > 15 then
 						lastMatNotify = tick()
 						SpectrumX:Notify({
-							Title = "GENESIS HUB",
+							Title = "KAZU HUB",
 							Text = "Waiting for Sea King's Blood (farm it yourself)",
-							Type = "genesis",
+							Type = "kazu",
 							Duration = 5,
 						})
 					end
@@ -21362,9 +21408,9 @@ local function run(B, T, P, DfT, ...)
 					if tick() - lastMatNotify > 12 then
 						lastMatNotify = tick()
 						SpectrumX:Notify({
-							Title = "GENESIS HUB",
+							Title = "KAZU HUB",
 							Text = string.format("Farming %s (%d/%d)", target.name, target.have, target.need),
-							Type = "genesis",
+							Type = "kazu",
 							Duration = 4,
 						})
 					end
@@ -21612,17 +21658,17 @@ local function run(B, T, P, DfT, ...)
 				if hasStyle(buyingStyle) then
 					SpectrumX:Notify({ Text = "Style purchased!", Type = "success", Duration = 3 })
 					buyingStyle = nil
-					_G._GenesisBuyingStyleStartedAt = 0
+					_G._KazuBuyingStyleStartedAt = 0
 					if prevPosition then
 						tp(prevPosition)
 						prevPosition = nil
 					end
 					return
 				end
-				if tick() - (_G._GenesisBuyingStyleStartedAt or 0) >= 12 then
+				if tick() - (_G._KazuBuyingStyleStartedAt or 0) >= 12 then
 					SpectrumX:Notify({ Text = "Style purchase was not confirmed.", Type = "error", Duration = 3 })
 					buyingStyle = nil
-					_G._GenesisBuyingStyleStartedAt = 0
+					_G._KazuBuyingStyleStartedAt = 0
 					if prevPosition then
 						tp(prevPosition)
 						prevPosition = nil
@@ -21635,14 +21681,14 @@ local function run(B, T, P, DfT, ...)
 					if gui.Name:find("Shop") then
 						local dialogue = gui:FindFirstChild("Dialogue")
 						local candidate = dialogue and dialogue:FindFirstChild("Accept")
-						if _G._GenesisIsVisibleGuiButton(candidate) then
+						if _G._KazuIsVisibleGuiButton(candidate) then
 							accept = candidate
 							break
 						end
 					end
 				end
 
-				_G._GenesisDispatchGuiButton(accept)
+				_G._KazuDispatchGuiButton(accept)
 			end)
 		end
 	end)
@@ -21923,13 +21969,13 @@ local function run(B, T, P, DfT, ...)
 				or (game.PlaceId == 6381829480 and GetSetting("autoSecondSeaDailyQuest")))) then
 			return false
 		end
-		if _G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation() then
+		if _G._KazuDungeonOwnsAutomation and _G._KazuDungeonOwnsAutomation() then
 			return false
 		end
 		if _G.storingFruit or _G.isLootingChests or fishingOwnsWeaponSlot() then
 			return false
 		end
-		local owner = _G._GenesisPriorityOwner
+		local owner = _G._KazuPriorityOwner
 		return owner == "daily_quest"
 	end
 
@@ -22055,7 +22101,7 @@ local function run(B, T, P, DfT, ...)
 		-- Third Sea offers more than one destination. Select only a button
 		-- whose visible label or name explicitly identifies the requested sea.
 		for _, button in ipairs(dialogue:GetDescendants()) do
-			if button:IsA("GuiButton") and _G._GenesisIsVisibleGuiButton(button) then
+			if button:IsA("GuiButton") and _G._KazuIsVisibleGuiButton(button) then
 				local label = button.Name
 				if button:IsA("TextButton") then label = label .. " " .. button.Text end
 				for _, child in ipairs(button:GetDescendants()) do
@@ -22073,7 +22119,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		local accept = dialogue:FindFirstChild("Accept")
-		if not _G._GenesisIsVisibleGuiButton(accept) then return nil end
+		if not _G._KazuIsVisibleGuiButton(accept) then return nil end
 		-- Verified in the live Second Sea: The Squid's Accept is the Third
 		-- Sea option, with a server-side Script attached to the actual button.
 		if current == 2 and hop == 3 then return accept end
@@ -22099,7 +22145,7 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	function dailyCoordinator.clickTravelChoice(button)
-		if not _G._GenesisIsVisibleGuiButton(button) then return false end
+		if not _G._KazuIsVisibleGuiButton(button) then return false end
 		local originalSize, originalPosition = button.Size, button.Position
 		local x, y
 		local clicked, mouseDown = false, false
@@ -22112,7 +22158,7 @@ local function run(B, T, P, DfT, ...)
 			button.Size = UDim2.new(10, 0, 10, 0)
 			button.Position = UDim2.new(-1.9, 0, -5.5, 0)
 			RunService.RenderStepped:Wait()
-			if not _G._GenesisIsVisibleGuiButton(button) then return end
+			if not _G._KazuIsVisibleGuiButton(button) then return end
 			local camera = Workspace.CurrentCamera
 			if not camera then return end
 			local viewport = camera.ViewportSize
@@ -22139,25 +22185,25 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	function dailyCoordinator.travelRetry(route, now, message, delay)
-		_G._GenesisDailyQuestTravelPending = false
-		_G._GenesisDailyReturnRequested = false
+		_G._KazuDailyQuestTravelPending = false
+		_G._KazuDailyReturnRequested = false
 		_G.dailyQuestIssue = message
 		route.retryAt = now + (delay or 30)
 		dailyCoordinator.save()
-		if not _G._GenesisDailyTravelWarningAt or now - _G._GenesisDailyTravelWarningAt >= 60 then
-			_G._GenesisDailyTravelWarningAt = now
+		if not _G._KazuDailyTravelWarningAt or now - _G._KazuDailyTravelWarningAt >= 60 then
+			_G._KazuDailyTravelWarningAt = now
 			SpectrumX:Notify({ Text = message, Type = "warning", Duration = 5 })
 		end
 	end
 
-	_G._GenesisDailyQuestTravelPending = false
-	_G._GenesisDailyReturnRequested = false
+	_G._KazuDailyQuestTravelPending = false
+	_G._KazuDailyReturnRequested = false
 	spawn(function()
 		while task.wait(2) do
 			pcall(function()
 				if not GetSetting("autoDailyQuestsMaster") then
-					_G._GenesisDailyQuestTravelPending = false
-					_G._GenesisDailyReturnRequested = false
+					_G._KazuDailyQuestTravelPending = false
+					_G._KazuDailyReturnRequested = false
 					return
 				end
 				if not LocalPlayer:FindFirstChild("PlayerStats") then return end
@@ -22174,14 +22220,14 @@ local function run(B, T, P, DfT, ...)
 					if route.mainSea ~= main or now - (tonumber(route.startedAt) or now) > 7200 then
 						journal.route = nil
 						route = nil
-						_G._GenesisDailyQuestTravelPending = false
-						_G._GenesisDailyReturnRequested = false
+						_G._KazuDailyQuestTravelPending = false
+						_G._KazuDailyReturnRequested = false
 					elseif route.target == current then
 						route.target = nil
 						route.targetAt = nil
 						route.transferAttempts = 0
-						_G._GenesisDailyQuestTravelPending = false
-						_G._GenesisDailyReturnRequested = false
+						_G._KazuDailyQuestTravelPending = false
+						_G._KazuDailyReturnRequested = false
 						dailyCoordinator.save()
 					elseif route.target then
 						-- A real UI click is not proof that the server accepted the sea
@@ -22189,8 +22235,8 @@ local function run(B, T, P, DfT, ...)
 						-- resume the Squid approach/dialogue loop in this same pass if the
 						-- PlaceId still has not changed.
 						if now - (tonumber(route.targetAt) or 0) < 8 then
-							_G._GenesisDailyQuestTravelPending = true
-							_G._GenesisDailyReturnRequested = tonumber(route.target) == main and current ~= main
+							_G._KazuDailyQuestTravelPending = true
+							_G._KazuDailyReturnRequested = tonumber(route.target) == main and current ~= main
 							return
 						end
 						route.target = nil
@@ -22206,8 +22252,8 @@ local function run(B, T, P, DfT, ...)
 				if activeName and activeName ~= "" then
 					for _, quest in ipairs(dailyQuests[game.PlaceId] or {}) do
 						if not quest.disabled and quest.quest == activeName then
-							_G._GenesisDailyQuestTravelPending = false
-							_G._GenesisDailyReturnRequested = false
+							_G._KazuDailyQuestTravelPending = false
+							_G._KazuDailyReturnRequested = false
 							return
 						end
 					end
@@ -22216,8 +22262,8 @@ local function run(B, T, P, DfT, ...)
 				if dailyCoordinator.seaEnabled(current) then
 					pending, state = getDailyQuestPending()
 					if pending then
-						_G._GenesisDailyQuestTravelPending = false
-						_G._GenesisDailyReturnRequested = false
+						_G._KazuDailyQuestTravelPending = false
+						_G._KazuDailyReturnRequested = false
 						return
 					end
 				end
@@ -22230,8 +22276,8 @@ local function run(B, T, P, DfT, ...)
 						end
 					end
 					if not anyDue and current == main then
-						_G._GenesisDailyQuestTravelPending = false
-						_G._GenesisDailyReturnRequested = false
+						_G._KazuDailyQuestTravelPending = false
+						_G._KazuDailyReturnRequested = false
 						return
 					end
 					route = { startedAt = now, mainSea = main, visited = {} }
@@ -22257,30 +22303,30 @@ local function run(B, T, P, DfT, ...)
 				if not destination and current ~= main then destination = main end
 				if not destination then
 					journal.route = nil
-					_G._GenesisDailyQuestTravelPending = false
-					_G._GenesisDailyReturnRequested = false
+					_G._KazuDailyQuestTravelPending = false
+					_G._KazuDailyReturnRequested = false
 					dailyCoordinator.save()
 					return
 				end
 				if now < (tonumber(route.retryAt) or 0) then
-					_G._GenesisDailyQuestTravelPending = false
-					_G._GenesisDailyReturnRequested = false
+					_G._KazuDailyQuestTravelPending = false
+					_G._KazuDailyReturnRequested = false
 					return
 				end
 				local returningMain = destination == main and current ~= main
-				_G._GenesisDailyQuestTravelPending = true
-				_G._GenesisDailyReturnRequested = returningMain
+				_G._KazuDailyQuestTravelPending = true
+				_G._KazuDailyReturnRequested = returningMain
 				-- Return-to-main preempts outside-dungeon work, including a dungeon
 				-- entry attempt. A committed picker/transition/active raid still wins.
-				local committed = _G._GenesisUpdateDungeonCommit and _G._GenesisUpdateDungeonCommit()
+				local committed = _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit()
 				if committed or fishingOwnsWeaponSlot() then
 					return
 				end
 				if returningMain then
-					if _G._GenesisPriorityOwner ~= "daily_quest_return" then return end
-				elseif _G._GenesisPriorityOwner ~= "daily_quest_handoff"
+					if _G._KazuPriorityOwner ~= "daily_quest_return" then return end
+				elseif _G._KazuPriorityOwner ~= "daily_quest_handoff"
 					or _G.storingFruit or _G.isLootingChests or _G.seaEventActive
-					or (_G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation()) then
+					or (_G._KazuDungeonOwnsAutomation and _G._KazuDungeonOwnsAutomation()) then
 					return
 				end
 				local npcName, hop = dailyCoordinator.travelNpc(current, destination)
@@ -22536,7 +22582,7 @@ local function run(B, T, P, DfT, ...)
 	do
 	local lastInput = tick()
 
-	trackGenesisConnection(UserInputService.InputBegan:Connect(function()
+	trackKazuConnection(UserInputService.InputBegan:Connect(function()
 		lastInput = tick()
 	end))
 
@@ -22766,7 +22812,7 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
-				local raceIsland, _, raceDisplayName = _G._GenesisFindRaceIsland()
+				local raceIsland, _, raceDisplayName = _G._KazuFindRaceIsland()
 				if raceIsland then
 					RaceIslandStatusLabel.SetText("Race Island: \240\159\159\162 | " .. raceDisplayName)
 					RaceIslandStatusLabel.Label.TextColor3 = SpectrumX.Theme.Success
@@ -22965,7 +23011,7 @@ local function run(B, T, P, DfT, ...)
 							title = "<a:red_siren:1515133995657072812> \194\183 SCRIPT EXECUTED",
 							description = desc,
 							color = 10181046,
-							footer = { text = "Genesis Hub | King Legacy" },
+							footer = { text = "Kazu Hub | King Legacy" },
 						},
 					},
 				}),
@@ -22973,10 +23019,10 @@ local function run(B, T, P, DfT, ...)
 		end)
 	end)
 
-	GenesisX:Notify({
-		Title = "GENESIS HUB",
+	KazuX:Notify({
+		Title = "KAZU HUB",
 		Text = "LOADED SUCCESSFULLY!",
-		Type = "genesis",
+		Type = "kazu",
 		Duration = 10,
 	})
 
@@ -23044,7 +23090,7 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
-				detectionConnection = trackGenesisConnection(overlay.ChildAdded:Connect(function(child)
+				detectionConnection = trackKazuConnection(overlay.ChildAdded:Connect(function(child)
 					task.wait(0.6)
 					local text = ""
 					pcall(function()
@@ -23314,7 +23360,7 @@ local function run(B, T, P, DfT, ...)
 			if not accept or not accept:IsA("GuiButton") then
 				return false
 			end
-			return _G._GenesisDispatchGuiButton(accept)
+			return _G._KazuDispatchGuiButton(accept)
 		end)
 		return ok and fired == true
 	end
@@ -23447,7 +23493,7 @@ local function run(B, T, P, DfT, ...)
 
 	_G.HakiV2.startLock = function(targetCF)
 		_G.HakiV2.stopLock()
-		if not targetCF or _G._GenesisDailyReturnRequested then
+		if not targetCF or _G._KazuDailyReturnRequested then
 			return
 		end
 		_G.HakiV2.lockCF = targetCF * CFrame.new(0, 3, 5)
@@ -23473,7 +23519,7 @@ local function run(B, T, P, DfT, ...)
 		_G.HakiV2.bg.P = 500000
 		_G.HakiV2.bg.Parent = root
 
-		_G.HakiV2.lockConn = trackGenesisConnection(RunService.Heartbeat:Connect(function()
+		_G.HakiV2.lockConn = trackKazuConnection(RunService.Heartbeat:Connect(function()
 			pcall(function()
 				if not (_G.isProgressingBusoV2 or _G.isProgressingObservationV2) then
 					_G.HakiV2.stopLock()
@@ -23512,7 +23558,7 @@ local function run(B, T, P, DfT, ...)
 
 		while task.wait(0.35) do
 			pcall(function()
-				if _G._GenesisDailyReturnRequested then
+				if _G._KazuDailyReturnRequested then
 					_G.isProgressingBusoV2 = false
 					H.stopLock()
 					return
@@ -23733,7 +23779,7 @@ local function run(B, T, P, DfT, ...)
 
 		while task.wait(0.35) do
 			pcall(function()
-				if _G._GenesisDailyReturnRequested then
+				if _G._KazuDailyReturnRequested then
 					_G.isProgressingObservationV2 = false
 					H.stopLock()
 					return
@@ -23893,7 +23939,7 @@ local function run(B, T, P, DfT, ...)
 	_G.Raid.boss_dungeon = false
 	_G.Raid.current_target = nil
 	_G.Raid.dodge_active = false
-	_G.Raid.dodge_render_step_name = "GenesisDungeonDodge_" .. tostring(LocalPlayer.UserId)
+	_G.Raid.dodge_render_step_name = "KazuDungeonDodge_" .. tostring(LocalPlayer.UserId)
 	_G.Raid.dodge_gyro = nil
 	_G.Raid.last_tool_switch = 0
 	_G.Raid.last_buso = 0
@@ -23918,7 +23964,7 @@ local function run(B, T, P, DfT, ...)
 		root = nil,
 		generation = 0,
 		bound = false,
-		renderStepName = "GenesisDungeonFarm_" .. tostring(LocalPlayer.UserId),
+		renderStepName = "KazuDungeonFarm_" .. tostring(LocalPlayer.UserId),
 	}
 	_G.Raid.orbit = { active = false, thread = nil, angle = 0, target = nil, radius = 18 }
 	_G.Raid.attackState = {
@@ -24106,8 +24152,8 @@ local function run(B, T, P, DfT, ...)
 		if chosen.Parent ~= character then
 			return nil
 		end
-		if toolTip == "Sword" and _G._GenesisRememberSword then
-			_G._GenesisRememberSword(chosen)
+		if toolTip == "Sword" and _G._KazuRememberSword then
+			_G._KazuRememberSword(chosen)
 		end
 		_G.Raid.attackState.toolReadyAt = os.clock() + 0.08
 		return chosen
@@ -24306,8 +24352,8 @@ local function run(B, T, P, DfT, ...)
 			end
 			_G.Raid.attackState.toolReadyAt = os.clock() + 0.08
 		end
-		if tool.ToolTip == "Sword" and _G._GenesisRememberSword then
-			_G._GenesisRememberSword(tool)
+		if tool.ToolTip == "Sword" and _G._KazuRememberSword then
+			_G._KazuRememberSword(tool)
 		end
 		return tool
 	end
@@ -24327,18 +24373,18 @@ local function run(B, T, P, DfT, ...)
 		-- replicated into Character/Backpack yet. Restore the exact remembered sword
 		-- through the same validated inventory transaction used by fishing.
 		if enabled.Sword then
-			local preferredName = _G._GenesisWaitForLastEquippedSwordName
-				and _G._GenesisWaitForLastEquippedSwordName(timeoutSeconds or 4, shouldContinue)
+			local preferredName = _G._KazuWaitForLastEquippedSwordName
+				and _G._KazuWaitForLastEquippedSwordName(timeoutSeconds or 4, shouldContinue)
 				or _G.lastEquippedSwordName
-			if _G._GenesisIsUsableSwordName(preferredName) then
+			if _G._KazuIsUsableSwordName(preferredName) then
 				local selected = selectPrimaryWeapon(preferredName, timeoutSeconds or 4, shouldContinue)
 				local character = LocalPlayer.Character
 				local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 				if selected and humanoid and selected.Parent ~= character then
 					humanoid:EquipTool(selected)
 				end
-				if _G._GenesisIsSwordTool(selected) and selected.Parent == character then
-					_G._GenesisRememberSword(selected)
+				if _G._KazuIsSwordTool(selected) and selected.Parent == character then
+					_G._KazuRememberSword(selected)
 					_G.Raid.attackState.toolReadyAt = os.clock() + 0.08
 					return selected
 				end
@@ -25279,11 +25325,11 @@ local function run(B, T, P, DfT, ...)
 			if entryGeneration ~= nil and _G.Raid._entryGeneration ~= entryGeneration then
 				return false
 			end
-			local committed = _G._GenesisUpdateDungeonCommit()
+			local committed = _G._KazuUpdateDungeonCommit()
 			if committed then
 				return true
 			end
-			local canStart = _G._GenesisCanStartDungeon()
+			local canStart = _G._KazuCanStartDungeon()
 			return canStart == true
 		end
 
@@ -25313,7 +25359,7 @@ local function run(B, T, P, DfT, ...)
 
 			chooseMap = playerGui:FindFirstChild("ChooseMap")
 			if chooseMap and chooseMap:FindFirstChild("ChooseMapFrame") then
-				_G._GenesisUpdateDungeonCommit()
+				_G._KazuUpdateDungeonCommit()
 				break
 			end
 
@@ -25368,7 +25414,7 @@ local function run(B, T, P, DfT, ...)
 			end
 		end
 
-		if not button or not _G._GenesisIsVisibleGuiButton(button) then
+		if not button or not _G._KazuIsVisibleGuiButton(button) then
 			telemetry.result = "difficulty_button_not_found"
 			return false
 		end
@@ -25383,12 +25429,12 @@ local function run(B, T, P, DfT, ...)
 			telemetry.attempts = attemptCount
 
 			-- Re-dispatch the same validated choice only if this exact popup remains.
-			local fired, dispatchReason = _G._GenesisDispatchGuiButton(button)
+			local fired, dispatchReason = _G._KazuDispatchGuiButton(button)
 			telemetry.lastDispatchReason = dispatchReason
 			if not fired then
 				telemetry.result = "dispatch_failed"
 				task.wait(0.15)
-				if not _G._GenesisIsVisibleGuiButton(button) then
+				if not _G._KazuIsVisibleGuiButton(button) then
 					break
 				end
 				continue
@@ -25413,7 +25459,7 @@ local function run(B, T, P, DfT, ...)
 					or (chooseMapFrame:IsA("GuiObject") and not chooseMapFrame.Visible)
 				then
 					local inRaid = _G.Raid.checkInRaid()
-					local committed = _G._GenesisUpdateDungeonCommit()
+					local committed = _G._KazuUpdateDungeonCommit()
 					telemetry.result = inRaid and "entered_unverified" or "picker_closed_committed"
 					return inRaid or committed
 				end
@@ -25703,7 +25749,7 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 		_G.Raid.veyzorAnimationTarget = target
-		_G.Raid.veyzorAnimationConnection = trackGenesisConnection(animator.AnimationPlayed:Connect(function(track)
+		_G.Raid.veyzorAnimationConnection = trackKazuConnection(animator.AnimationPlayed:Connect(function(track)
 			local animation = track.Animation
 			if not animation or animation.AnimationId ~= "rbxassetid://138126660188153" then
 				return
@@ -26371,7 +26417,7 @@ local function run(B, T, P, DfT, ...)
 			humanoid.AutoRotate = false
 		end
 		local dodgeGyro = Instance.new("BodyGyro")
-		dodgeGyro.Name = "GenesisDungeonDodgeGyro"
+		dodgeGyro.Name = "KazuDungeonDodgeGyro"
 		dodgeGyro.MaxTorque = Vector3.new(1000000000, 1000000000, 1000000000)
 		dodgeGyro.D = 50000
 		dodgeGyro.P = 500000
@@ -26848,8 +26894,8 @@ local function run(B, T, P, DfT, ...)
 		if _G.Raid._entryBusy then
 			return
 		end
-		local committed = _G._GenesisUpdateDungeonCommit()
-		local canStart = committed or _G._GenesisCanStartDungeon()
+		local committed = _G._KazuUpdateDungeonCommit()
+		local canStart = committed or _G._KazuCanStartDungeon()
 		if not canStart then
 			return
 		end
@@ -26864,17 +26910,17 @@ local function run(B, T, P, DfT, ...)
 					if not GetSetting("auto_dungeon_v2") or _G.Raid._entryGeneration ~= generation then
 						return false
 					end
-					if _G._GenesisUpdateDungeonCommit() then
+					if _G._KazuUpdateDungeonCommit() then
 						return true
 					end
-					return _G._GenesisCanStartDungeon() == true
+					return _G._KazuCanStartDungeon() == true
 				end
 				local handoffDeadline = os.clock() + 5
 				while fishingOwnsWeaponSlot()
 					and entryStillValid()
 					and os.clock() < handoffDeadline
 				do
-					_G._GenesisPrepareCombatFromFishing("dungeon_entry")
+					_G._KazuPrepareCombatFromFishing("dungeon_entry")
 					task.wait(0.1)
 				end
 				if fishingOwnsWeaponSlot()
@@ -26894,7 +26940,7 @@ local function run(B, T, P, DfT, ...)
 				if _G.Raid.dodge_active then
 					_G.Raid.stopDodge()
 				end
-				if not _G._GenesisUpdateDungeonCommit() then
+				if not _G._KazuUpdateDungeonCommit() then
 					_G.Raid.teleportToDungeonEntrance()
 				end
 				_G.Raid.selectDifficulty(generation)
@@ -26912,14 +26958,14 @@ local function run(B, T, P, DfT, ...)
 	-- MAIN DUNGEON LOOP. All RemoteFunction work is dispatched through bounded
 	-- workers, so this Heartbeat path only handles state, targeting, and movement.
 	_G.Raid._lastMainStep = 0
-	trackGenesisConnection(RunService.Heartbeat:Connect(function()
+	trackKazuConnection(RunService.Heartbeat:Connect(function()
 		local now = os.clock()
 		if now - (_G.Raid._lastMainStep or 0) < 0.03 then
 			return
 		end
 		_G.Raid._lastMainStep = now
 		local ok, err = pcall(function()
-			local dungeonCommitted = _G._GenesisUpdateDungeonCommit()
+			local dungeonCommitted = _G._KazuUpdateDungeonCommit()
 			if not GetSetting("auto_dungeon_v2") then
 				if _G.Raid._wasDungeon then
 					_G.Raid.clearVeyzorAnimationWatch()
@@ -26937,10 +26983,10 @@ local function run(B, T, P, DfT, ...)
 
 			_G.Raid._wasDungeon = true
 			if not dungeonCommitted then
-				local canStart, reason = _G._GenesisCanStartDungeon()
+				local canStart, reason = _G._KazuCanStartDungeon()
 				if not canStart then
 					if _G.Raid._entryBusy then
-						_G._GenesisCancelDungeonEntry(reason)
+						_G._KazuCancelDungeonEntry(reason)
 					end
 					_G.Raid.current_target = nil
 					_G.Raid.attackState.requestedUntil = 0
@@ -26952,7 +26998,7 @@ local function run(B, T, P, DfT, ...)
 				end
 			end
 			if fishingOwnsWeaponSlot() then
-				_G._GenesisPrepareCombatFromFishing("dungeon")
+				_G._KazuPrepareCombatFromFishing("dungeon")
 				return
 			end
 
