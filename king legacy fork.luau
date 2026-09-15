@@ -14,6 +14,7 @@
 -- GENESIS_KAIDO_ORB_FARM_WAIT_V30
 -- GENESIS_DAILY_TRAVEL_RETRY_EVENT_PRIORITY_V31
 -- GENESIS_KAIDO_LIVE_BOSS_DAILY_YIELD_V32
+-- GENESIS_KAIDO_SEA2_SCOPE_V33
 -- Discord reporting uses the user-configured webhook; event state uses Kai's configured Cloudflare Worker.
 -- Cloudflare Event Hub reads and live-state reporting are enabled when configured.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -52,7 +53,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_KAIDO_LIVE_BOSS_DAILY_YIELD_V32",
+		buildMarker = "GENESIS_KAIDO_SEA2_SCOPE_V33",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -8361,6 +8362,11 @@ local function run(B, T, P, DfT, ...)
 		if _G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation() then
 			return true
 		end
+		-- Auto Kaido is a dormant saved preference outside Second Sea. It must not
+		-- make unrelated seas look combat-busy merely because the toggle persists.
+		if game.PlaceId == 6381829480 and GetSetting("autoFarmKaido") then
+			return true
+		end
 		local keys = {
 			"auto_farm",
 			"farmmaterial",
@@ -8368,7 +8374,6 @@ local function run(B, T, P, DfT, ...)
 			"easybounty",
 			"autoKillMobs",
 			"autoFarmBoss",
-			"autoFarmKaido",
 			"autoDarkBeard",
 			"autoCrimsonDemon",
 			"autoIceKing",
@@ -8990,7 +8995,7 @@ local function run(B, T, P, DfT, ...)
 			or GetSetting("autoKillMobs")
 			or GetSetting("autoFarmBoss")
 			or GetSetting("autoDarkBeard")
-			or GetSetting("autoFarmKaido")
+			or (game.PlaceId == 6381829480 and GetSetting("autoFarmKaido"))
 			or GetSetting("autoCrimsonDemon")
 			or GetSetting("autoIceKing")
 			or _G.seaEventActive
@@ -16165,7 +16170,7 @@ local function run(B, T, P, DfT, ...)
 					or GetSetting("easybounty")
 					or GetSetting("autoKillMobs")
 					or GetSetting("autoFarmBoss")
-					or GetSetting("autoFarmKaido")
+					or (game.PlaceId == 6381829480 and GetSetting("autoFarmKaido"))
 					or GetSetting("autoDarkBeard")
 					or GetSetting("autoCrimsonDemon")
 					or GetSetting("autoIceKing")
@@ -17009,6 +17014,12 @@ local function run(B, T, P, DfT, ...)
 
 	_G._GenesisFindLiveKaido = function()
 		local cache = _G._GenesisKaidoCache
+		-- Kaido's Dragon, its summon altar, and Dragon's Orb farm are Second Sea
+		-- content. Never let a similarly named Sea 3 monster enter this subsystem.
+		if game.PlaceId ~= 6381829480 then
+			cache.live = nil
+			return nil
+		end
 		local now = os.clock()
 		if now - cache.liveCheckedAt < 0.1 then
 			return _G._GenesisIsLiveKaido(cache.live) and cache.live or nil
@@ -17089,7 +17100,7 @@ local function run(B, T, P, DfT, ...)
 		-- including when another player spawned it and regardless of whether the
 		-- downtime-only "Fish Between Boss Spawns" option is enabled. The summon
 		-- NPC itself is deliberately not considered a boss target here.
-		if GetSetting("autoFarmKaido") then
+		if game.PlaceId == 6381829480 and GetSetting("autoFarmKaido") then
 			_G.kaidoDragon = _G._GenesisFindLiveKaido()
 			if _G.kaidoDragon then
 				bossFishingBlockCached = true
@@ -17107,7 +17118,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		if
-			(GetSetting("autoFarmKaido") and isAlive(_G.kaidoDragon))
+			(game.PlaceId == 6381829480 and GetSetting("autoFarmKaido") and isAlive(_G.kaidoDragon))
 			or (GetSetting("autoDarkBeard") and isAlive(_G.darkBeardBoss))
 			or (GetSetting("autoCrimsonDemon") and isAlive(_G.crimsonBoss))
 			or (GetSetting("autoIceKing") and isAlive(_G.iceKingBoss))
@@ -17130,7 +17141,7 @@ local function run(B, T, P, DfT, ...)
 		end
 
 		local matchNames = {}
-		if GetSetting("autoFarmKaido") then
+		if game.PlaceId == 6381829480 and GetSetting("autoFarmKaido") then
 			table.insert(matchNames, "Dragon")
 		end
 		if GetSetting("autoDarkBeard") then
@@ -19001,7 +19012,9 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		if GetSetting("autoFarmKaido") then
+		-- The entire Kaido resolver branch is Second Sea-only. Keeping the toggle
+		-- enabled while travelling must never publish a Kaido owner in another sea.
+		if game.PlaceId == 6381829480 and GetSetting("autoFarmKaido") then
 			local kaidoHandled = false
 			pcall(function()
 				local dragon = _G._GenesisFindLiveKaido()
@@ -20126,6 +20139,9 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	_G._GenesisCanRunKaidoAcquisition = function()
+		if game.PlaceId ~= 6381829480 then
+			return false, "wrong_sea"
+		end
 		if not GetSetting("autoFarmKaido") then
 			return false, "disabled"
 		end
@@ -20161,9 +20177,10 @@ local function run(B, T, P, DfT, ...)
 		while task.wait(0.1) do
 			pcall(function()
 				local state = _G._GenesisKaidoAcquisition
-				local dragon = GetSetting("autoFarmKaido") and _G._GenesisFindLiveKaido() or nil
+				local inKaidoSea = game.PlaceId == 6381829480
+				local dragon = inKaidoSea and GetSetting("autoFarmKaido") and _G._GenesisFindLiveKaido() or nil
 				_G.kaidoDragon = dragon
-				_G.kaidoHasOrb = _G._GenesisGetDragonOrbCount() >= 1
+				_G.kaidoHasOrb = inKaidoSea and _G._GenesisGetDragonOrbCount() >= 1 or false
 
 				local canRun, reason = _G._GenesisCanRunKaidoAcquisition()
 				if not canRun then
@@ -20171,6 +20188,8 @@ local function run(B, T, P, DfT, ...)
 						_G._stopKaidoAcquisition(reason)
 					elseif not GetSetting("autoFarmKaido") then
 						state.phase = "disabled"
+					elseif reason == "wrong_sea" then
+						state.phase = "wrong_sea"
 					end
 					return
 				end
