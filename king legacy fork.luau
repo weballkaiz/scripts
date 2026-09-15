@@ -19,6 +19,7 @@
 -- GENESIS_FISH_POSITION_PER_SEA_V35
 -- GENESIS_MATERIAL_DEALER_AUTO_INIT_V36
 -- GENESIS_MATERIAL_DEALER_HEADLESS_INIT_V37
+-- GENESIS_DAILY_OUTBOUND_TRAVEL_PRIORITY_V38
 -- Discord reporting uses the user-configured webhook; event state uses Kai's configured Cloudflare Worker.
 -- Cloudflare Event Hub reads and live-state reporting are enabled when configured.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -57,7 +58,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_MATERIAL_DEALER_HEADLESS_INIT_V37",
+		buildMarker = "GENESIS_DAILY_OUTBOUND_TRAVEL_PRIORITY_V38",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -19126,6 +19127,47 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
+		-- Outbound daily travel is a real movement phase, just like returning to
+		-- the configured main sea. It must claim ownership before the idle/normal
+		-- automation short-circuit below; otherwise the travel worker reserves the
+		-- route (blocking fishing) but rejects movement because the owner is idle.
+		-- Live world bosses and sea events above still retain absolute priority.
+		if
+			GetSetting("autoDailyQuestsMaster")
+			and _G._GenesisDailyQuestTravelPending
+			and not _G._GenesisDailyReturnRequested
+		then
+			local enteringTravel = _G._GenesisPriorityOwner ~= "daily_quest_handoff"
+			_G._GenesisSetPriorityOwner("daily_quest_handoff", "cross_sea_travel")
+			_G.allowCombat = false
+			if fishingOwnsWeaponSlot() then
+				_G._GenesisPrepareCombatFromFishing("daily_quest_travel")
+			end
+			if _G.farmFixThread or _G.farmFixBodyPos then
+				removeFarmFix()
+			end
+			if removeChestLootFix and (enteringTravel or _G.isLootingChests) then
+				removeChestLootFix()
+			end
+			if _G.conquestActive and removeConquestPosition then
+				removeConquestPosition()
+			end
+			if _G.HakiV2 and (_G.HakiV2.lockCF or _G.HakiV2.lockConn)
+				and type(_G.HakiV2.stopLock) == "function" then
+				_G.HakiV2.stopLock()
+			end
+			if enteringTravel and type(_G._stopSeaEventBypass) == "function" then
+				_G._stopSeaEventBypass()
+			end
+			if enteringTravel and type(_G._stopAbyssalAcquisition) == "function" then
+				_G._stopAbyssalAcquisition()
+			end
+			if enteringTravel and type(_G._stopDailyQuestHover) == "function" then
+				_G._stopDailyQuestHover()
+			end
+			return
+		end
+
 		-- Daily return remains committed, but every live world boss and sea event
 		-- above may pause it. Once that higher-priority target is gone, the same
 		-- route resumes without losing its selected destination.
@@ -21065,7 +21107,10 @@ local function run(B, T, P, DfT, ...)
 		while task.wait(0.25) do
 			pcall(function()
 				-- Already in Sea 3 → disable.
-				if _G._GenesisDailyReturnRequested then
+				-- Daily sea routing owns cross-sea movement in either direction. Yield
+				-- before publishing the progression blocker so outbound travel can reach
+				-- The Squid and fishing can resume if that route is later released.
+				if _G._GenesisDailyQuestTravelPending then
 					_G.thirdSeaProgressionActive = false
 					return
 				end
