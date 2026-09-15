@@ -24,6 +24,7 @@
 -- KAZU_MATERIAL_DEALER_AUTO_INIT_V36
 -- KAZU_MATERIAL_DEALER_HEADLESS_INIT_V37
 -- KAZU_DAILY_OUTBOUND_TRAVEL_PRIORITY_V38
+-- KAZU_HYDRA_PROXIMITY_ACQUISITION_V43
 -- Discord reporting uses the user-configured webhook; event state uses Kai's configured Cloudflare Worker.
 -- Cloudflare Event Hub reads and live-state reporting are enabled when configured.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -76,7 +77,7 @@ local function startKazuRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "KAZU_BRAND_CUTOVER_V42",
+		buildMarker = "KAZU_HYDRA_PROXIMITY_ACQUISITION_V43",
 	}
 	executorEnvironment.__KAZU_RUNTIME = runtime
 	sharedGlobal.__KAZU_RUNTIME = runtime
@@ -324,6 +325,10 @@ local function startKazuRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._KazuKaidoPhysicalClick = nil
 		sharedGlobal._KazuCanRunKaidoAcquisition = nil
 		sharedGlobal._stopKaidoAcquisition = nil
+		sharedGlobal._KazuHydraAcquisition = nil
+		sharedGlobal._KazuFindHydraRewardChest = nil
+		sharedGlobal._KazuGetHydraStandPosition = nil
+		sharedGlobal._KazuApproachHydraIsland = nil
 		sharedGlobal._KazuSeaKingAcquisition = nil
 		sharedGlobal._KazuFindSeaKingRewardChest = nil
 		sharedGlobal._KazuApproachSeaKingIsland = nil
@@ -11172,6 +11177,130 @@ local function run(B, T, P, DfT, ...)
 		return hasEvent
 	end
 
+	_G._KazuHydraAcquisition = {
+		island = nil,
+		generation = 0,
+		advertised = false,
+		attempts = 0,
+		lastApproachAt = -math.huge,
+		retryAt = -math.huge,
+		sawBoss = false,
+	}
+
+	_G._KazuFindHydraRewardChest = function(island)
+		if not island then
+			return nil
+		end
+		for _, descendant in ipairs(island:GetDescendants()) do
+			if
+				descendant:IsA("Model")
+				and descendant:FindFirstChild("RootPart")
+				and descendant:FindFirstChild("ChestAnim")
+			then
+				return descendant
+			end
+		end
+		return nil
+	end
+
+	_G._KazuGetHydraStandPosition = function(island)
+		if not island then
+			return nil
+		end
+		local stand = island:FindFirstChild("HydraStand")
+		if not stand then
+			for _, descendant in ipairs(island:GetDescendants()) do
+				if descendant.Name == "HydraStand" then
+					stand = descendant
+					break
+				end
+			end
+		end
+		if not stand then
+			return nil
+		end
+		if stand:IsA("BasePart") then
+			return stand.Position + Vector3.new(0, 8, 0)
+		end
+		for _, descendant in ipairs(stand:GetDescendants()) do
+			if descendant:IsA("BasePart") then
+				return descendant.Position + Vector3.new(0, 8, 0)
+			end
+		end
+		return nil
+	end
+
+	_G._KazuApproachHydraIsland = function(island)
+		if not isFeatureEnabledInCurrentSea("autoSKHD") then
+			removeChestLootFix()
+			_G.isLootingChests = false
+			_G.seaEventActive = false
+			return false
+		end
+		if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
+			return true
+		end
+
+		local standPosition = _G._KazuGetHydraStandPosition(island)
+		if not standPosition then
+			_G.currentEventName = "Hydra (Island marker unavailable)"
+			_G.seaEventActive = true
+			return true
+		end
+
+		local state = _G._KazuHydraAcquisition
+		_G.hydraIslandEmpty = false
+		_G.hydraJoinLootStarted = false
+		_G.isLootingChests = false
+		_G.allowCombat = false
+		_G.seaEventActive = true
+		_G.currentEventHealth = 0
+		_G.currentEventMaxHealth = 0
+		removeFarmFix()
+		stopSeaEventBypass()
+
+		if _G._KazuPrepareCombatFromFishing and not _G._KazuPrepareCombatFromFishing("hydra_island") then
+			_G.currentEventName = "Hydra (Switching Loadout)"
+			return true
+		end
+		if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
+			return true
+		end
+
+		local now = os.clock()
+		if state.attempts >= 3 then
+			if now < state.retryAt then
+				_G.currentEventName = "Hydra (Waiting for Spawn)"
+				return true
+			end
+			state.attempts = 0
+			state.retryAt = -math.huge
+		end
+		if now - state.lastApproachAt < 4 then
+			_G.currentEventName = "Hydra (Waiting for Spawn)"
+			return true
+		end
+
+		local character = LocalPlayer.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if not humanoid or humanoid.Health <= 0 or not root then
+			_G.currentEventName = "Hydra (Waiting for Respawn)"
+			return true
+		end
+
+		state.attempts = state.attempts + 1
+		state.lastApproachAt = now
+		if state.attempts >= 3 then
+			state.retryAt = now + 15
+		end
+		_G.currentEventName = "Hydra (Locating " .. state.attempts .. "/3)"
+		root.CFrame = CFrame.new(standPosition)
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+		return true
+	end
+
 	_G._KazuSeaKingAcquisition = {
 		island = nil,
 		attempts = 0,
@@ -11342,8 +11471,29 @@ local function run(B, T, P, DfT, ...)
 			-- === HYDRA ===
 			local hydraMob = findHydraMob()
 			local hydraIsland = findHydraIsland()
+			local hydraAdvertised = ReplicatedStorage:GetAttribute("SeaMonsterSpawnText") == "UNLEASHED"
+				and ReplicatedStorage:GetAttribute("Hydra") == true
+			local hydraAcquisition = _G._KazuHydraAcquisition
+			local islandChanged = hydraAcquisition.island ~= hydraIsland
+			local advertisementStarted = hydraAdvertised and not hydraAcquisition.advertised
+			if islandChanged or advertisementStarted then
+				hydraAcquisition.island = hydraIsland
+				hydraAcquisition.generation = hydraAcquisition.generation + 1
+				hydraAcquisition.attempts = 0
+				hydraAcquisition.lastApproachAt = -math.huge
+				hydraAcquisition.retryAt = -math.huge
+				hydraAcquisition.sawBoss = false
+				_G.hydraIslandEmpty = false
+				_G.hydraJoinLootStarted = false
+			end
+			hydraAcquisition.advertised = hydraAdvertised
+			local rawHydra = Workspace.SeaMonster:FindFirstChild("HydraSeaKing")
+			if rawHydra and rawHydra:FindFirstChild("Humanoid") then
+				hydraAcquisition.sawBoss = true
+			end
 
 			if hydraMob and hydraMob:FindFirstChild("Humanoid") and hydraMob.Humanoid.Health > 0 then
+				hydraAcquisition.sawBoss = true
 				_G.hydraIslandEmpty = false
 				_G.hydraJoinLootStarted = false
 				removeFarmFix()
@@ -11430,40 +11580,58 @@ local function run(B, T, P, DfT, ...)
 				end
 				return true
 			elseif hydraIsland then
-				removeFarmFix()
-				if _G.hydraIslandEmpty then
-					_G.currentEventName = "Hydra (Done)"
-					_G.seaEventActive = false
-					return false
+				local hydraRewardChest = _G._KazuFindHydraRewardChest(hydraIsland)
+				-- Hydra is proximity-gated. An advertised island without a boss or a
+				-- confirmed reward chest is a locator, not evidence that Hydra died.
+				if not hydraAcquisition.sawBoss and not hydraRewardChest and hydraAdvertised then
+					return _G._KazuApproachHydraIsland(hydraIsland)
 				end
 
-				_G.currentEventName = "Hydra (Waiting)"
-				_G.seaEventActive = true
+				-- Only enter the loot/completion path after this generation exposed a
+				-- Hydra model, or when a real reward chest proves we joined post-kill.
+				if hydraAcquisition.sawBoss or hydraRewardChest then
+					removeFarmFix()
+					if _G.hydraIslandEmpty then
+						_G.currentEventName = "Hydra (Done)"
+						_G.seaEventActive = false
+					else
+						_G.currentEventName = "Hydra (Waiting)"
+						_G.seaEventActive = true
 
-				-- Joined a server that only has the island/chest (20s).
-				if not _G.hydraJoinLootStarted and not _G.lootState.Hydra.active then
-					_G.hydraJoinLootStarted = true
-					local chestPos = findHydraChestPosition()
-					if chestPos then
-						_G.isLootingChests = true
-						if _G._KazuPrepareCombatFromFishing and not _G._KazuPrepareCombatFromFishing("hydra_loot") then
-							return true
+						-- Joined a server that only has a confirmed island chest (20s).
+						if not _G.hydraJoinLootStarted and not _G.lootState.Hydra.active then
+							local chestPos = findHydraChestPosition()
+							if chestPos then
+								if
+									_G._KazuPrepareCombatFromFishing
+									and not _G._KazuPrepareCombatFromFishing("hydra_loot")
+								then
+									_G.currentEventName = "Hydra (Switching Loadout)"
+									return true
+								end
+								if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
+									_G.isLootingChests = false
+									return true
+								end
+								-- Latch only after every retryable handoff has succeeded.
+								_G.hydraJoinLootStarted = true
+								_G.isLootingChests = true
+								tp(CFrame.new(chestPos))
+								applyChestLootFix(CFrame.new(chestPos))
+								startLootTimer("Hydra", 20)
+							end
+						elseif _G.lootState.Hydra.active then
+							local chestPos = findHydraChestPosition()
+							if chestPos then
+								applyChestLootFix(CFrame.new(chestPos))
+							end
 						end
-						if _G._KazuUpdateDungeonCommit and _G._KazuUpdateDungeonCommit() then
-							_G.isLootingChests = false
-							return true
-						end
-						tp(CFrame.new(chestPos))
-						applyChestLootFix(CFrame.new(chestPos))
-						startLootTimer("Hydra", 20)
+						return true
 					end
-				elseif _G.lootState.Hydra.active then
-					local chestPos = findHydraChestPosition()
-					if chestPos then
-						applyChestLootFix(CFrame.new(chestPos))
-					end
+				else
+					-- A stale island alone owns no priority and is never marked completed.
+					_G.hydraJoinLootStarted = false
 				end
-				return true
 			else
 				_G.hydraJoinLootStarted = false
 			end
@@ -23030,6 +23198,17 @@ local function run(B, T, P, DfT, ...)
 		while task.wait(1) do
 			pcall(function()
 				if not isFeatureEnabledInCurrentSea("autoSKHD") then
+					local hydraAcquisition = _G._KazuHydraAcquisition
+					if hydraAcquisition then
+						hydraAcquisition.island = nil
+						hydraAcquisition.advertised = false
+						hydraAcquisition.attempts = 0
+						hydraAcquisition.lastApproachAt = -math.huge
+						hydraAcquisition.retryAt = -math.huge
+						hydraAcquisition.sawBoss = false
+					end
+					_G.hydraIslandEmpty = false
+					_G.hydraJoinLootStarted = false
 					if _G.lootState.SeaKing.active or _G.lootState.Hydra.active then
 						removeChestLootFix()
 						_G.isLootingChests = false
