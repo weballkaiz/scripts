@@ -16,6 +16,8 @@
 -- GENESIS_KAIDO_LIVE_BOSS_DAILY_YIELD_V32
 -- GENESIS_KAIDO_SEA2_SCOPE_V33
 -- GENESIS_CURRENT_SEA_PRIORITY_SCOPE_V34
+-- GENESIS_DAILY_LOCAL_OWNERSHIP_MATERIAL_GUI_GUARD_V39
+-- GENESIS_DAILY_CURRENT_SEA_PRIORITY_V40
 -- GENESIS_FISH_POSITION_PER_SEA_V35
 -- GENESIS_MATERIAL_DEALER_AUTO_INIT_V36
 -- GENESIS_MATERIAL_DEALER_HEADLESS_INIT_V37
@@ -58,7 +60,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_DAILY_OUTBOUND_TRAVEL_PRIORITY_V38",
+		buildMarker = "GENESIS_DAILY_CURRENT_SEA_PRIORITY_V40",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -12167,6 +12169,7 @@ local function run(B, T, P, DfT, ...)
 		_originalClick()
 	end
 
+	do
 	_G._GenesisMaterialShopState = {
 		initialized = false,
 		initializing = false,
@@ -12188,14 +12191,11 @@ local function run(B, T, P, DfT, ...)
 		initGeneration = 0,
 		keepGuiOpen = false,
 		autoHiddenGui = false,
+		suppressGuiUntil = 0,
+		watchedGuis = {},
 	}
 
-	_G._GenesisSetMaterialShopGuiVisible = function(visible)
-		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-		local shopGui = playerGui and playerGui:FindFirstChild("Material Dealer")
-		if not shopGui then
-			return false
-		end
+	local function setMaterialShopGuiObjectVisible(shopGui, visible)
 		if shopGui:IsA("LayerCollector") then
 			shopGui.Enabled = visible == true
 		elseif shopGui:IsA("GuiObject") then
@@ -12204,6 +12204,83 @@ local function run(B, T, P, DfT, ...)
 			return false
 		end
 		return true
+	end
+
+	local function materialShopGuiShouldBeSuppressed(state)
+		return type(state) == "table"
+			and not state.keepGuiOpen
+			and tick() < (tonumber(state.suppressGuiUntil) or 0)
+	end
+
+	local function watchMaterialShopGui(shopGui)
+		local state = _G._GenesisMaterialShopState
+		if not shopGui or shopGui.Name ~= "Material Dealer" or type(state) ~= "table" then
+			return false
+		end
+
+		state.watchedGuis = state.watchedGuis or {}
+		if not state.watchedGuis[shopGui] then
+			local signal
+			if shopGui:IsA("LayerCollector") then
+				signal = shopGui:GetPropertyChangedSignal("Enabled")
+			elseif shopGui:IsA("GuiObject") then
+				signal = shopGui:GetPropertyChangedSignal("Visible")
+			else
+				return false
+			end
+			state.watchedGuis[shopGui] = trackGenesisConnection(signal:Connect(function()
+				if _G._GenesisMaterialShopState == state and materialShopGuiShouldBeSuppressed(state) then
+					setMaterialShopGuiObjectVisible(shopGui, false)
+				end
+			end))
+		end
+
+		if materialShopGuiShouldBeSuppressed(state) then
+			setMaterialShopGuiObjectVisible(shopGui, false)
+		end
+		return true
+	end
+
+	local function findMaterialShopGui()
+		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+		if not playerGui then
+			return nil
+		end
+		local shopGui = playerGui:FindFirstChild("Material Dealer")
+		if shopGui then
+			return shopGui
+		end
+		for _, descendant in ipairs(playerGui:GetDescendants()) do
+			if descendant.Name == "Material Dealer"
+				and (descendant:IsA("LayerCollector") or descendant:IsA("GuiObject")) then
+				return descendant
+			end
+		end
+		return nil
+	end
+
+	_G._GenesisSetMaterialShopGuiVisible = function(visible)
+		local shopGui = findMaterialShopGui()
+		if not shopGui then
+			return false
+		end
+		watchMaterialShopGui(shopGui)
+		return setMaterialShopGuiObjectVisible(shopGui, visible)
+	end
+
+	do
+		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+		if playerGui then
+			local existingShopGui = findMaterialShopGui()
+			if existingShopGui then
+				watchMaterialShopGui(existingShopGui)
+			end
+			trackGenesisConnection(playerGui.DescendantAdded:Connect(function(descendant)
+				if descendant.Name == "Material Dealer" then
+					task.defer(watchMaterialShopGui, descendant)
+				end
+			end))
+		end
 	end
 
 	_G._GenesisEnsureMaterialShopReady = function(force, keepGuiOpen)
@@ -12228,8 +12305,12 @@ local function run(B, T, P, DfT, ...)
 		state.initGeneration = (state.initGeneration or 0) + 1
 		state.keepGuiOpen = keepGuiOpen == true
 		state.autoHiddenGui = false
+		state.suppressGuiUntil = state.keepGuiOpen and 0 or (now + 15)
 		local initGeneration = state.initGeneration
 		state.lastInitAttemptAt = now
+		if not state.keepGuiOpen then
+			_G._GenesisSetMaterialShopGuiVisible(false)
+		end
 		local ok, response = pcall(function()
 			return ReplicatedStorage.Chest.Remotes.Functions.EtcFunction:InvokeServer("SpecialShopGui", {
 				GuiName = "Material Dealer",
@@ -12257,8 +12338,9 @@ local function run(B, T, P, DfT, ...)
 		if state.keepGuiOpen then
 			_G._GenesisSetMaterialShopGuiVisible(true)
 		else
+			state.suppressGuiUntil = math.max(state.suppressGuiUntil or 0, tick() + 15)
 			task.spawn(function()
-				for _ = 1, 20 do
+				while tick() < (state.suppressGuiUntil or 0) do
 					if _G._GenesisMaterialShopState ~= state
 						or state.initGeneration ~= initGeneration
 						or state.keepGuiOpen
@@ -12267,7 +12349,6 @@ local function run(B, T, P, DfT, ...)
 					end
 					if _G._GenesisSetMaterialShopGuiVisible(false) then
 						state.autoHiddenGui = true
-						return
 					end
 					task.wait(0.1)
 				end
@@ -12325,6 +12406,7 @@ local function run(B, T, P, DfT, ...)
 			end)
 		end
 	end)
+	end
 
 	function c_lv()
 		local mylv = LocalPlayer.PlayerStats.lvl.Value
@@ -14526,7 +14608,7 @@ local function run(B, T, P, DfT, ...)
 	})
 
 	local fishPositionLabel = Window:CreateLabel(uiSections.farmFishing, {
-		Text = "Pos: Not Set",
+		Text = "Fishing Position: Not Set",
 		Color = SpectrumX.Theme.TextSecondary,
 		Size = UDim2.new(1, 0, 0, 25),
 	})
@@ -14535,9 +14617,7 @@ local function run(B, T, P, DfT, ...)
 		local cf, issue, config = _G._GenesisGetConfiguredFishingCFrame(game.PlaceId)
 		if typeof(cf) == "CFrame" and config then
 			fishPositionLabel.SetText(
-				"Sea "
-					.. tostring(config.sea)
-					.. " Pos: "
+				"Fishing Position: "
 					.. tostring(math.floor(cf.X))
 					.. ", "
 					.. tostring(math.floor(cf.Y))
@@ -14546,7 +14626,7 @@ local function run(B, T, P, DfT, ...)
 			)
 			fishPositionLabel.Label.TextColor3 = SpectrumX.Theme.TextSecondary
 		elseif config then
-			fishPositionLabel.SetText("Sea " .. tostring(config.sea) .. " Pos: Not Set")
+			fishPositionLabel.SetText("Fishing Position: Not Set")
 			fishPositionLabel.Label.TextColor3 = SpectrumX.Theme.TextSecondary
 		else
 			fishPositionLabel.SetText(issue or "Fishing position unavailable")
@@ -19037,6 +19117,31 @@ local function run(B, T, P, DfT, ...)
 		handleOpeMethod()
 	end
 
+	local function claimDailyQuestPriority(dailyQuest)
+		if not dailyQuest then
+			return false
+		end
+
+		_G.allowCombat = false
+		if dailyQuest == true then
+			_G._GenesisSetPriorityOwner("daily_quest_handoff", "settling_quest_state")
+			if _G.farmFixThread or _G.farmFixBodyPos then
+				removeFarmFix()
+			end
+			if type(_G._stopDailyQuestHover) == "function" then
+				_G._stopDailyQuestHover()
+			end
+			return true
+		end
+
+		if _G._GenesisPriorityOwner ~= "daily_quest" and (_G.farmFixThread or _G.farmFixBodyPos) then
+			removeFarmFix()
+		end
+		_G._GenesisSetPriorityOwner("daily_quest", dailyQuest.quest)
+		_G._GenesisRunDailyQuestCombat(dailyQuest)
+		return true
+	end
+
 	_G._GenesisAutomationStepBusy = false
 	_G._GenesisRunAutomationStep = function()
 		-- A visible difficulty picker is already committed: leaving the circle can no
@@ -19203,6 +19308,34 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
+		-- A pending quest in the current sea owns all lower-priority automation.
+		-- Cross-sea routing has already yielded once it found this candidate, so
+		-- grant the local worker ownership before dungeon entry, materials, fishing,
+		-- or ordinary farming can consume the frame. Live world bosses and sea
+		-- events remain above this branch.
+		local dailyQuest = _G._GenesisGetDailyQuestPriorityCandidate()
+		if dailyQuest and fishingOwnsWeaponSlot() then
+			_G.allowCombat = false
+			_G._GenesisSetPriorityOwner("daily_quest_handoff", "restoring_weapon")
+			if _G.farmFixThread or _G.farmFixBodyPos then
+				removeFarmFix()
+			end
+			_G._GenesisPrepareCombatFromFishing("daily_quest")
+			return
+		end
+		if claimDailyQuestPriority(dailyQuest) then
+			return
+		end
+		if _G._GenesisPriorityOwner == "daily_quest" or _G._GenesisPriorityOwner == "daily_quest_handoff" then
+			_G.allowCombat = false
+			if _G.farmFixThread or _G.farmFixBodyPos then
+				removeFarmFix()
+			end
+			if type(_G._stopDailyQuestHover) == "function" then
+				_G._stopDailyQuestHover()
+			end
+		end
+
 		-- Enabling Auto Dungeon is only a request. It owns movement after every
 		-- higher phase is absent and while the near-event gate permits a new entry.
 		if GetSetting("auto_dungeon_v2") then
@@ -19248,28 +19381,6 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		local dailyQuest = _G._GenesisGetDailyQuestPriorityCandidate()
-		if dailyQuest and fishingOwnsWeaponSlot() then
-			_G.allowCombat = false
-			_G._GenesisSetPriorityOwner("daily_quest_handoff", "restoring_weapon")
-			if _G.farmFixThread or _G.farmFixBodyPos then
-				removeFarmFix()
-			end
-			_G._GenesisPrepareCombatFromFishing("daily_quest")
-			return
-		end
-		if _G._GenesisPriorityOwner == "daily_quest" or _G._GenesisPriorityOwner == "daily_quest_handoff" then
-			_G.allowCombat = false
-			if _G.farmFixThread or _G.farmFixBodyPos then
-				removeFarmFix()
-			end
-			-- Floating Feather needs its hover lock across resolver passes. The
-			-- objective worker clears it when ownership or the quest is lost.
-			if not dailyQuest and type(_G._stopDailyQuestHover) == "function" then
-				_G._stopDailyQuestHover()
-			end
-		end
-
 		local fishingBlocked = isFishingBlocked()
 		local fishingDestination = nil
 		if GetSetting("autoFish") and not fishingBlocked then
@@ -19302,7 +19413,6 @@ local function run(B, T, P, DfT, ...)
 			return
 		end
 
-		_G._GenesisSetPriorityOwner("other_combat", "normal_automation")
 		if not _G.isAnyCombatActive() then
 			_G._GenesisSetPriorityOwner("idle", nil)
 			_G.allowCombat = false
@@ -19311,6 +19421,7 @@ local function run(B, T, P, DfT, ...)
 			end
 			return
 		end
+		_G._GenesisSetPriorityOwner("other_combat", "normal_automation")
 
 		local selectedBossName, selectedBossCFrame = getCurrentSeaSelectedBoss()
 		if not selectedBossName then
@@ -19841,29 +19952,6 @@ local function run(B, T, P, DfT, ...)
 			if thirdSeaState ~= "farm_materials" and (_G.farmFixThread or _G.farmFixBodyPos) then
 				removeFarmFix()
 			end
-			return
-		end
-
-		-- Normal boss/progression branches above retain their existing priority.
-		-- Re-read the setting in case one of those branches yielded this frame.
-		dailyQuest = _G._GenesisGetDailyQuestPriorityCandidate()
-		if dailyQuest then
-			_G.allowCombat = false
-			if dailyQuest == true then
-				_G._GenesisSetPriorityOwner("daily_quest_handoff", "settling_quest_state")
-				if _G.farmFixThread or _G.farmFixBodyPos then
-					removeFarmFix()
-				end
-				if type(_G._stopDailyQuestHover) == "function" then
-					_G._stopDailyQuestHover()
-				end
-				return
-			end
-			if _G._GenesisPriorityOwner ~= "daily_quest" and (_G.farmFixThread or _G.farmFixBodyPos) then
-				removeFarmFix()
-			end
-			_G._GenesisSetPriorityOwner("daily_quest", dailyQuest.quest)
-			_G._GenesisRunDailyQuestCombat(dailyQuest)
 			return
 		end
 
