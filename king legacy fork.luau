@@ -16,6 +16,7 @@
 -- GENESIS_KAIDO_LIVE_BOSS_DAILY_YIELD_V32
 -- GENESIS_KAIDO_SEA2_SCOPE_V33
 -- GENESIS_CURRENT_SEA_PRIORITY_SCOPE_V34
+-- GENESIS_FISH_POSITION_PER_SEA_V35
 -- Discord reporting uses the user-configured webhook; event state uses Kai's configured Cloudflare Worker.
 -- Cloudflare Event Hub reads and live-state reporting are enabled when configured.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -54,7 +55,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_CURRENT_SEA_PRIORITY_SCOPE_V34",
+		buildMarker = "GENESIS_FISH_POSITION_PER_SEA_V35",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -271,6 +272,10 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._GenesisDispatchM1IfReady = nil
 		sharedGlobal._GenesisSkillLastSent = nil
 		sharedGlobal._GenesisSkillReady = nil
+		sharedGlobal._GenesisFishingPositionConfigByPlaceId = nil
+		sharedGlobal._GenesisGetFishingPositionConfig = nil
+		sharedGlobal._GenesisGetConfiguredFishingCFrame = nil
+		sharedGlobal._GenesisRefreshFishingPositionLabel = nil
 		sharedGlobal._GenesisIsFeatureEnabledInCurrentSea = nil
 		sharedGlobal._GenesisGetCurrentSeaSelectedBoss = nil
 		sharedGlobal._GenesisGetCurrentSeaSelectedMaterial = nil
@@ -7054,12 +7059,16 @@ local function run(B, T, P, DfT, ...)
 		autoCollectPearl = { false, "autoCollectPearl" },
 
 		autoFish = { false, "autoFish" },
-		fishCFrame = { "CFrame.new(0,0,0)", "fishCFrame" },
-		fishPositionSet = { false, "fishPositionSet" },
-		-- A CFrame has no sea identity by itself. Bind saved fishing positions to
-		-- the PlaceId where the user recorded them so a sea transfer cannot reuse
-		-- coordinates from a different world.
-		fishPlaceId = { 0, "fishPlaceId" },
+		-- JSON-native per-sea CFrames. Each populated entry is the 12 numeric values
+		-- returned by CFrame:GetComponents(); empty tables mean not configured.
+		fishPositionsBySea = {
+			{
+				Sea1 = {},
+				Sea2 = {},
+				Sea3 = {},
+			},
+			"fishPositionsBySea",
+		},
 		fishWhenNotSpawned = { false, "fishWhenNotSpawned" },
 		-- Hidden loadout fallback. The rod occupies the game's Sword/Primary slot,
 		-- so preserve the last real sword across fresh joins and script reloads.
@@ -7190,6 +7199,45 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	LoadSettings()
+
+	_G._GenesisFishingPositionConfigByPlaceId = {
+		[4520749081] = { slot = "Sea1", sea = 1 },
+		[6381829480] = { slot = "Sea2", sea = 2 },
+		[15759515082] = { slot = "Sea3", sea = 3 },
+	}
+
+	_G._GenesisGetFishingPositionConfig = function(placeId)
+		return _G._GenesisFishingPositionConfigByPlaceId[tonumber(placeId) or game.PlaceId]
+	end
+
+	_G._GenesisGetConfiguredFishingCFrame = function(placeId)
+		local config = _G._GenesisGetFishingPositionConfig(placeId)
+		if not config then
+			return nil, "Fishing position is unsupported in this sea", nil
+		end
+		local positions = GetSetting("fishPositionsBySea")
+		local components = type(positions) == "table" and positions[config.slot] or nil
+		if type(components) ~= "table" or #components == 0 then
+			return nil, "Sea " .. tostring(config.sea) .. " fishing position is not set", config
+		end
+		if #components ~= 12 then
+			return nil, "Sea " .. tostring(config.sea) .. " fishing position is invalid", config
+		end
+		local numericComponents = {}
+		for index = 1, 12 do
+			local value = tonumber(components[index])
+			if not value or value ~= value or math.abs(value) == math.huge then
+				return nil, "Sea " .. tostring(config.sea) .. " fishing position is invalid", config
+			end
+			numericComponents[index] = value
+		end
+		local ok, cf = pcall(CFrame.new, table.unpack(numericComponents, 1, 12))
+		if not ok or typeof(cf) ~= "CFrame" then
+			return nil, "Sea " .. tostring(config.sea) .. " fishing position is invalid", config
+		end
+		return cf, nil, config
+	end
+
 	-- Race islands are manual destinations now. Keep the legacy key readable so
 	-- old save files remain compatible, but never let a saved toggle resume the
 	-- removed background teleporter.
@@ -14348,49 +14396,52 @@ local function run(B, T, P, DfT, ...)
 		Size = UDim2.new(1, 0, 0, 25),
 	})
 
-	do
-		local savedFishCF = GetSetting("fishCFrame")
-		local savedFishPlaceId = tonumber(GetSetting("fishPlaceId")) or 0
-		if savedFishCF and savedFishCF ~= "CFrame.new(0,0,0)" and savedFishPlaceId == game.PlaceId then
-			pcall(function()
-				local cf = loadstring("return " .. savedFishCF)()
-				if cf then
-					fishPositionLabel.SetText(
-						"Pos: "
-							.. tostring(math.floor(cf.X))
-							.. ", "
-							.. tostring(math.floor(cf.Y))
-							.. ", "
-							.. tostring(math.floor(cf.Z))
-					)
-				end
-			end)
-		elseif savedFishCF and savedFishCF ~= "CFrame.new(0,0,0)" then
-			fishPositionLabel.SetText(savedFishPlaceId == 0 and "Pos: Re-save to bind this sea"
-				or "Pos: Saved for another sea")
+	_G._GenesisRefreshFishingPositionLabel = function()
+		local cf, issue, config = _G._GenesisGetConfiguredFishingCFrame(game.PlaceId)
+		if typeof(cf) == "CFrame" and config then
+			fishPositionLabel.SetText(
+				"Sea "
+					.. tostring(config.sea)
+					.. " Pos: "
+					.. tostring(math.floor(cf.X))
+					.. ", "
+					.. tostring(math.floor(cf.Y))
+					.. ", "
+					.. tostring(math.floor(cf.Z))
+			)
+			fishPositionLabel.Label.TextColor3 = SpectrumX.Theme.TextSecondary
+		elseif config then
+			fishPositionLabel.SetText("Sea " .. tostring(config.sea) .. " Pos: Not Set")
+			fishPositionLabel.Label.TextColor3 = SpectrumX.Theme.TextSecondary
+		else
+			fishPositionLabel.SetText(issue or "Fishing position unavailable")
+			fishPositionLabel.Label.TextColor3 = SpectrumX.Theme.Warning
 		end
 	end
+	_G._GenesisRefreshFishingPositionLabel()
 
 	Window:CreateButton(uiSections.farmFishing, {
 		Text = "Save Fishing Position",
 		Callback = function()
 			local root = GetRoot(LocalPlayer.Character)
-			if root then
-				local cfString = "CFrame.new(" .. tostring(root.CFrame) .. ")"
-				saveAndApply("fishCFrame", cfString)
-				saveAndApply("fishPositionSet", true)
-				saveAndApply("fishPlaceId", game.PlaceId)
-				fishPositionLabel.SetText(
-					"Pos: "
-						.. tostring(math.floor(root.Position.X))
-						.. ", "
-						.. tostring(math.floor(root.Position.Y))
-						.. ", "
-						.. tostring(math.floor(root.Position.Z))
-				)
+			local config = _G._GenesisGetFishingPositionConfig(game.PlaceId)
+			if root and config then
+				local positions = GetSetting("fishPositionsBySea")
+				if type(positions) ~= "table" then
+					positions = {}
+				end
+				positions[config.slot] = { root.CFrame:GetComponents() }
+				saveAndApply("fishPositionsBySea", positions)
+				_G._GenesisRefreshFishingPositionLabel()
 				SpectrumX:Notify({
-					Text = "Fishing position saved!",
+					Text = "Sea " .. tostring(config.sea) .. " fishing position saved!",
 					Type = "success",
+					Duration = 2,
+				})
+			elseif not config then
+				SpectrumX:Notify({
+					Text = "Fishing position is unsupported in this sea.",
+					Type = "warning",
 					Duration = 2,
 				})
 			end
@@ -16446,33 +16497,7 @@ local function run(B, T, P, DfT, ...)
 
 	spawn(function()
 		while task.wait(0.5) do
-			pcall(function()
-				local fishCF = GetSetting("fishCFrame")
-				local fishPlaceId = tonumber(GetSetting("fishPlaceId")) or 0
-				if fishCF and fishCF ~= "CFrame.new(0,0,0)" and fishPlaceId == game.PlaceId then
-					pcall(function()
-						local cf = loadstring("return " .. fishCF)()
-						if cf then
-							fishPositionLabel.SetText(
-								"Pos: "
-									.. tostring(math.floor(cf.X))
-									.. ", "
-									.. tostring(math.floor(cf.Y))
-									.. ", "
-									.. tostring(math.floor(cf.Z))
-							)
-							fishPositionLabel.Label.TextColor3 = SpectrumX.Theme.TextSecondary
-						end
-					end)
-				elseif fishCF and fishCF ~= "CFrame.new(0,0,0)" then
-					fishPositionLabel.SetText(fishPlaceId == 0 and "Pos: Re-save to bind this sea"
-						or "Pos: Saved for another sea")
-					fishPositionLabel.Label.TextColor3 = SpectrumX.Theme.Warning
-				else
-					fishPositionLabel.SetText("Position: Not Set")
-					fishPositionLabel.Label.TextColor3 = SpectrumX.Theme.TextSecondary
-				end
-			end)
+			pcall(_G._GenesisRefreshFishingPositionLabel)
 		end
 	end)
 
@@ -17127,25 +17152,9 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	local function getSavedFishCFrame()
-		local fishCF = GetSetting("fishCFrame")
-		if not fishCF or fishCF == "CFrame.new(0,0,0)" then
-			return nil
-		end
-		local fishPlaceId = tonumber(GetSetting("fishPlaceId")) or 0
-		if fishPlaceId ~= game.PlaceId then
-			_G.fishingPositionIssue = fishPlaceId == 0 and "Saved fishing position has no sea binding"
-				or "Saved fishing position belongs to another sea"
-			return nil
-		end
-		local ok, cf = pcall(function()
-			local buildCFrame = loadstring("return " .. fishCF)
-			return buildCFrame()
-		end)
-		if ok and typeof(cf) == "CFrame" then
-			_G.fishingPositionIssue = nil
-			return cf
-		end
-		return nil
+		local cf, issue = _G._GenesisGetConfiguredFishingCFrame(game.PlaceId)
+		_G.fishingPositionIssue = issue
+		return cf
 	end
 
 	_G._GenesisKaidoCache = {
