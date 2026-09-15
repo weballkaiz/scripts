@@ -17,6 +17,8 @@
 -- GENESIS_KAIDO_SEA2_SCOPE_V33
 -- GENESIS_CURRENT_SEA_PRIORITY_SCOPE_V34
 -- GENESIS_FISH_POSITION_PER_SEA_V35
+-- GENESIS_MATERIAL_DEALER_AUTO_INIT_V36
+-- GENESIS_MATERIAL_DEALER_HEADLESS_INIT_V37
 -- Discord reporting uses the user-configured webhook; event state uses Kai's configured Cloudflare Worker.
 -- Cloudflare Event Hub reads and live-state reporting are enabled when configured.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -55,7 +57,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_FISH_POSITION_PER_SEA_V35",
+		buildMarker = "GENESIS_MATERIAL_DEALER_HEADLESS_INIT_V37",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -276,6 +278,9 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._GenesisGetFishingPositionConfig = nil
 		sharedGlobal._GenesisGetConfiguredFishingCFrame = nil
 		sharedGlobal._GenesisRefreshFishingPositionLabel = nil
+		sharedGlobal._GenesisMaterialShopState = nil
+		sharedGlobal._GenesisSetMaterialShopGuiVisible = nil
+		sharedGlobal._GenesisEnsureMaterialShopReady = nil
 		sharedGlobal._GenesisIsFeatureEnabledInCurrentSea = nil
 		sharedGlobal._GenesisGetCurrentSeaSelectedBoss = nil
 		sharedGlobal._GenesisGetCurrentSeaSelectedMaterial = nil
@@ -12161,6 +12166,116 @@ local function run(B, T, P, DfT, ...)
 		_originalClick()
 	end
 
+	_G._GenesisMaterialShopState = {
+		initialized = false,
+		initializing = false,
+		initAttempts = 0,
+		initSuccesses = 0,
+		initFailures = 0,
+		purchaseAttempts = 0,
+		purchaseInvokeSuccesses = 0,
+		purchaseInvokeFailures = 0,
+		lastInitAttemptAt = 0,
+		lastInitSuccessAt = 0,
+		nextInitAttemptAt = 0,
+		purchaseAllowedAt = 0,
+		lastInitResponseType = nil,
+		lastInitResponse = nil,
+		lastPurchaseResponseType = nil,
+		lastPurchaseResponse = nil,
+		lastError = nil,
+		initGeneration = 0,
+		keepGuiOpen = false,
+		autoHiddenGui = false,
+	}
+
+	_G._GenesisSetMaterialShopGuiVisible = function(visible)
+		local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+		local shopGui = playerGui and playerGui:FindFirstChild("Material Dealer")
+		if not shopGui then
+			return false
+		end
+		if shopGui:IsA("LayerCollector") then
+			shopGui.Enabled = visible == true
+		elseif shopGui:IsA("GuiObject") then
+			shopGui.Visible = visible == true
+		else
+			return false
+		end
+		return true
+	end
+
+	_G._GenesisEnsureMaterialShopReady = function(force, keepGuiOpen)
+		local state = _G._GenesisMaterialShopState
+		if type(state) ~= "table" then
+			return false, "Material Dealer state is unavailable"
+		end
+
+		local now = tick()
+		if state.initializing then
+			return false, "Material Dealer initialization is already in progress"
+		end
+		if not force and state.initialized and now - (state.lastInitSuccessAt or 0) < 21600 then
+			return true, state.lastInitResponse
+		end
+		if not force and now < (state.nextInitAttemptAt or 0) then
+			return false, state.lastError or "Material Dealer initialization is waiting to retry"
+		end
+
+		state.initializing = true
+		state.initAttempts = (state.initAttempts or 0) + 1
+		state.initGeneration = (state.initGeneration or 0) + 1
+		state.keepGuiOpen = keepGuiOpen == true
+		state.autoHiddenGui = false
+		local initGeneration = state.initGeneration
+		state.lastInitAttemptAt = now
+		local ok, response = pcall(function()
+			return ReplicatedStorage.Chest.Remotes.Functions.EtcFunction:InvokeServer("SpecialShopGui", {
+				GuiName = "Material Dealer",
+			})
+		end)
+		state.initializing = false
+
+		if not ok or response == false then
+			state.initialized = false
+			state.initFailures = (state.initFailures or 0) + 1
+			state.lastError = not ok and tostring(response) or "Material Dealer initialization was rejected"
+			state.nextInitAttemptAt = tick() + 10
+			warn("[GENESIS HUB] Material Dealer initialization failed: " .. state.lastError)
+			return false, state.lastError
+		end
+
+		state.initialized = true
+		state.initSuccesses = (state.initSuccesses or 0) + 1
+		state.lastInitSuccessAt = tick()
+		state.nextInitAttemptAt = 0
+		state.purchaseAllowedAt = state.lastInitSuccessAt + 0.75
+		state.lastInitResponseType = typeof(response)
+		state.lastInitResponse = response == nil and "<nil>" or tostring(response)
+		state.lastError = nil
+		if state.keepGuiOpen then
+			_G._GenesisSetMaterialShopGuiVisible(true)
+		else
+			task.spawn(function()
+				for _ = 1, 20 do
+					if _G._GenesisMaterialShopState ~= state
+						or state.initGeneration ~= initGeneration
+						or state.keepGuiOpen
+					then
+						return
+					end
+					if _G._GenesisSetMaterialShopGuiVisible(false) then
+						state.autoHiddenGui = true
+						return
+					end
+					task.wait(0.1)
+				end
+			end)
+		end
+		print("[GENESIS HUB] Material Dealer initialized; automatic purchases are ready.")
+		return true, response
+	end
+
 	spawn(function()
 		-- MaterialDealer is a server invoke; polling it every frame can flood the
 		-- remote and starve other automation. One purchase pass per second is enough
@@ -12178,13 +12293,32 @@ local function run(B, T, P, DfT, ...)
 					return
 				end
 
+				local ready = _G._GenesisEnsureMaterialShopReady(false, false)
+				local dealerState = _G._GenesisMaterialShopState
+				if not ready or tick() < (dealerState.purchaseAllowedAt or 0) then
+					return
+				end
+
 				for _, materialName in pairs(materials) do
-					pcall(function()
-						ReplicatedStorage.Chest.Remotes.Functions.MaterialDealer:InvokeServer("Buy", {
+					dealerState.purchaseAttempts = (dealerState.purchaseAttempts or 0) + 1
+					local ok, response = pcall(function()
+						return ReplicatedStorage.Chest.Remotes.Functions.MaterialDealer:InvokeServer("Buy", {
 							MaterialName = materialName,
 							Stacks = count,
 						})
 					end)
+					dealerState.lastPurchaseResponseType = ok and typeof(response) or "error"
+					dealerState.lastPurchaseResponse = response == nil and "<nil>" or tostring(response)
+					if ok then
+						dealerState.purchaseInvokeSuccesses = (dealerState.purchaseInvokeSuccesses or 0) + 1
+					else
+						dealerState.purchaseInvokeFailures = (dealerState.purchaseInvokeFailures or 0) + 1
+						dealerState.lastError = tostring(response)
+						dealerState.initialized = false
+						dealerState.nextInitAttemptAt = tick() + 10
+						warn("[GENESIS HUB] Material Dealer purchase invoke failed: " .. dealerState.lastError)
+						break
+					end
 					task.wait(0.1)
 				end
 			end)
@@ -14953,11 +15087,9 @@ local function run(B, T, P, DfT, ...)
 	Window:CreateButton(uiSections.itemMaterials, {
 		Text = "Open Material Shop",
 		Callback = function()
-			pcall(function()
-				ReplicatedStorage.Chest.Remotes.Functions.EtcFunction:InvokeServer("SpecialShopGui", {
-					GuiName = "Material Dealer",
-				})
-			end)
+			if type(_G._GenesisEnsureMaterialShopReady) == "function" then
+				_G._GenesisEnsureMaterialShopReady(true, true)
+			end
 		end,
 	})
 
