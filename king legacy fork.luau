@@ -18,6 +18,7 @@
 -- GENESIS_CURRENT_SEA_PRIORITY_SCOPE_V34
 -- GENESIS_DAILY_LOCAL_OWNERSHIP_MATERIAL_GUI_GUARD_V39
 -- GENESIS_DAILY_CURRENT_SEA_PRIORITY_V40
+-- GENESIS_FISHING_LOCK_SELF_HEAL_V41
 -- GENESIS_FISH_POSITION_PER_SEA_V35
 -- GENESIS_MATERIAL_DEALER_AUTO_INIT_V36
 -- GENESIS_MATERIAL_DEALER_HEADLESS_INIT_V37
@@ -60,7 +61,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_DAILY_CURRENT_SEA_PRIORITY_V40",
+		buildMarker = "GENESIS_FISHING_LOCK_SELF_HEAL_V41",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -16726,26 +16727,46 @@ local function run(B, T, P, DfT, ...)
 		end
 		local root = GetRoot(LocalPlayer.Character)
 		if not root then
-			return
+			return false
 		end
 
-		if not _fishBP or not _fishBP.Parent then
+		-- A long session can replace the live root or neutralize a BodyMover without
+		-- clearing our Lua reference. A non-nil Parent is therefore insufficient:
+		-- discard anything not attached to this exact root and continuously restore
+		-- the hold properties that fishing depends on.
+		if _fishBP and _fishBP.Parent ~= root then
+			pcall(function()
+				_fishBP:Destroy()
+			end)
+			_fishBP = nil
+		end
+		if _fishBG and _fishBG.Parent ~= root then
+			pcall(function()
+				_fishBG:Destroy()
+			end)
+			_fishBG = nil
+		end
+
+		if not _fishBP then
 			_fishBP = Instance.new("BodyPosition")
-			_fishBP.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-			_fishBP.D = 1000
-			_fishBP.P = 10000
+			_fishBP.Name = "GenesisFishingPosition"
 			_fishBP.Parent = root
 		end
-		if not _fishBG or not _fishBG.Parent then
+		if not _fishBG then
 			_fishBG = Instance.new("BodyGyro")
-			_fishBG.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-			_fishBG.D = 500
-			_fishBG.P = 10000
+			_fishBG.Name = "GenesisFishingGyro"
 			_fishBG.Parent = root
 		end
 
+		_fishBP.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+		_fishBP.D = 1000
+		_fishBP.P = 10000
 		_fishBP.Position = cf.Position
+		_fishBG.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+		_fishBG.D = 500
+		_fishBG.P = 10000
 		_fishBG.CFrame = cf
+		return _fishBP.Parent == root and _fishBG.Parent == root
 	end
 
 	local function removeFishPosition()
@@ -17728,13 +17749,19 @@ local function run(B, T, P, DfT, ...)
 					-- Travelling to the fishing point already owns the root through the
 					-- fish BodyMovers.  Keep the mode active during that handoff so a
 					-- competing farm cannot start a second position controller.
-					applyFishPosition(cf)
-					root.CFrame = cf
+					if applyFishPosition(cf) then
+						root.CFrame = cf
+						root.AssemblyLinearVelocity = Vector3.zero
+						root.AssemblyAngularVelocity = Vector3.zero
+					end
 					task.wait(0.1)
 					return
 				end
 
-				applyFishPosition(cf)
+				if not applyFishPosition(cf) then
+					stopFishing()
+					return
+				end
 				local rod = equipFishingRod()
 				local character = LocalPlayer.Character
 				if not rod or not character or rod.Parent ~= character then
@@ -17789,12 +17816,9 @@ local function run(B, T, P, DfT, ...)
 
 			local root = GetRoot(LocalPlayer.Character)
 			if root and _G.fishingPosition then
-				if _fishBP and _fishBP.Parent then
-					_fishBP.Position = _G.fishingPosition.Position
-				end
-				if _fishBG and _fishBG.Parent then
-					_fishBG.CFrame = _G.fishingPosition
-				end
+				-- Repair the lock here as well as in the half-second cast worker. This
+				-- prevents a stale mover from turning that worker into a teleport/fall loop.
+				applyFishPosition(_G.fishingPosition)
 			end
 
 			local playerGui = LocalPlayer.PlayerGui
