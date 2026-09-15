@@ -25,6 +25,9 @@
 -- KAZU_MATERIAL_DEALER_HEADLESS_INIT_V37
 -- KAZU_DAILY_OUTBOUND_TRAVEL_PRIORITY_V38
 -- KAZU_HYDRA_PROXIMITY_ACQUISITION_V43
+-- KAZU_ICE_KING_AZLAN_ACQUISITION_V44
+-- KAZU_SPECIAL_BOSS_FISHING_PREEMPT_V45
+-- KAZU_SPECIAL_BOSS_ACQUISITION_OWNERSHIP_V46
 -- Discord reporting uses the user-configured webhook; event state uses Kai's configured Cloudflare Worker.
 -- Cloudflare Event Hub reads and live-state reporting are enabled when configured.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -77,7 +80,7 @@ local function startKazuRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "KAZU_HYDRA_PROXIMITY_ACQUISITION_V43",
+		buildMarker = "KAZU_SPECIAL_BOSS_ACQUISITION_OWNERSHIP_V46",
 	}
 	executorEnvironment.__KAZU_RUNTIME = runtime
 	sharedGlobal.__KAZU_RUNTIME = runtime
@@ -324,6 +327,7 @@ local function startKazuRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._KazuClearKaidoSwimMovers = nil
 		sharedGlobal._KazuKaidoPhysicalClick = nil
 		sharedGlobal._KazuCanRunKaidoAcquisition = nil
+		sharedGlobal._KazuCanRunSpecialBossAcquisition = nil
 		sharedGlobal._stopKaidoAcquisition = nil
 		sharedGlobal._KazuHydraAcquisition = nil
 		sharedGlobal._KazuFindHydraRewardChest = nil
@@ -17706,6 +17710,11 @@ local function run(B, T, P, DfT, ...)
 		bossFishingBlockCheckedAt = now
 		bossFishingBlockCached = false
 
+		local function isAlive(model)
+			local humanoid = model and model.Parent and model:FindFirstChild("Humanoid")
+			return humanoid ~= nil and humanoid.Health > 0
+		end
+
 		-- A live Kaido is combat, not acquisition. It always preempts fishing,
 		-- including when another player spawned it and regardless of whether the
 		-- downtime-only "Fish Between Boss Spawns" option is enabled. The summon
@@ -17718,13 +17727,19 @@ local function run(B, T, P, DfT, ...)
 			end
 		end
 
-		if not GetSetting("fishWhenNotSpawned") then
-			return false
+		-- These special bosses stay below daily quests in the central resolver, but
+		-- a live enabled boss must still stop the lower-priority fishing fallback.
+		if
+			(isFeatureEnabledInCurrentSea("autoDarkBeard") and isAlive(_G.darkBeardBoss))
+			or (isFeatureEnabledInCurrentSea("autoCrimsonDemon") and isAlive(_G.crimsonBoss))
+			or (isFeatureEnabledInCurrentSea("autoIceKing") and isAlive(_G.iceKingBoss))
+		then
+			bossFishingBlockCached = true
+			return true
 		end
 
-		local function isAlive(model)
-			local humanoid = model and model.Parent and model:FindFirstChild("Humanoid")
-			return humanoid ~= nil and humanoid.Health > 0
+		if not GetSetting("fishWhenNotSpawned") then
+			return false
 		end
 
 		if
@@ -19905,6 +19920,13 @@ local function run(B, T, P, DfT, ...)
 					if not foundMob then
 						tp(CFrame.new(-9486, 77, -4761))
 					end
+				elseif not darkBeard and (_G.darkBeardTotemCount or 0) >= 1 then
+					-- Material possession is only a request for the low-priority summon
+					-- phase. The independent worker may move only while this exact owner
+					-- remains selected, matching Kaido's orb-acquisition contract.
+					_G.allowCombat = false
+					removeFarmFix()
+					_G._KazuSetPriorityOwner("other_combat", "dark_beard_acquisition")
 				end
 			end)
 			return
@@ -19978,6 +20000,10 @@ local function run(B, T, P, DfT, ...)
 					if not foundMob then
 						tp(CFrame.new(-7, 135, -3859))
 					end
+				elseif not crimson and _G.crimsonCrystalCount >= 1 then
+					_G.allowCombat = false
+					removeFarmFix()
+					_G._KazuSetPriorityOwner("other_combat", "crimson_demon_acquisition")
 				end
 			end)
 			return
@@ -20011,46 +20037,38 @@ local function run(B, T, P, DfT, ...)
 					autoskill()
 					handleOpeMethod()
 				elseif not iceKing and _G.iceCrystalCount < 1 then
-					removeFarmFix()
-					local foundMob = false
-					for _, folder in pairs(Workspace.Monster:GetChildren()) do
-						if folder:IsA("Folder") then
-							for _, mob in pairs(folder:GetChildren()) do
-								if
-									mob:FindFirstChild("Humanoid")
-									and mob.Humanoid.Health > 0
-									and string.find(mob.Name, "Azlan")
-								then
-									foundMob = true
-									usetool()
-									buso()
-									ken()
+					local azlan = findFarmMob("Azlan", nil)
+					local azlanRoot = azlan and azlan:FindFirstChild("HumanoidRootPart")
+					if azlanRoot then
+						usetool()
+						buso()
+						ken()
 
-									local hrp2 = mob.HumanoidRootPart
-									if hrp2 then
-										getDownwardCFrame(hrp2.CFrame)
-										local height = GetSetting("distance") or 8
-										local targetCF =
-											CFrame.new(hrp2.Position + Vector3.new(0, height, 0), hrp2.Position)
-										updateFarmFix(targetCF, hrp2)
-										if not _G.farmFixThread then
-											applyFarmFix(targetCF, hrp2)
-										end
-									end
-
-									_G.pos_skill = mob.HumanoidRootPart.CFrame
-									_G.allowCombat = true
-									click()
-									autoskill()
-									handleOpeMethod()
-									return
-								end
-							end
+						getDownwardCFrame(azlanRoot.CFrame)
+						local height = GetSetting("distance") or 8
+						local targetCF =
+							CFrame.new(azlanRoot.Position + Vector3.new(0, height, 0), azlanRoot.Position)
+						updateFarmFix(targetCF, azlanRoot)
+						if not _G.farmFixThread then
+							applyFarmFix(targetCF, azlanRoot)
 						end
+
+						_G.pos_skill = azlanRoot.CFrame
+						_G.allowCombat = true
+						click()
+						autoskill()
+						handleOpeMethod()
+					else
+						_G.allowCombat = false
+						removeFarmFix()
+						-- Azlan's confirmed Sea 2 spawn. The former fallback here was
+						-- Bear Man's mountain coordinate, so acquisition never reached Azlan.
+						tp(CFrame.new(-832, 69, -2860))
 					end
-					if not foundMob then
-						tp(CFrame.new(785, 53, -4444))
-					end
+				elseif not iceKing and _G.iceCrystalCount >= 1 then
+					_G.allowCombat = false
+					removeFarmFix()
+					_G._KazuSetPriorityOwner("other_combat", "ice_king_acquisition")
 				end
 			end)
 			return
@@ -20579,6 +20597,37 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
+	_G._KazuCanRunSpecialBossAcquisition = function(settingKey, ownerDetail, boss)
+		if not isFeatureEnabledInCurrentSea(settingKey) then
+			return false, "disabled_or_wrong_sea"
+		end
+		local humanoid = boss and boss.Parent and boss:FindFirstChild("Humanoid")
+		if humanoid and humanoid.Health > 0 then
+			return false, "boss_spawned"
+		end
+		-- As with Kaido, a summon worker never chooses its own priority. It may
+		-- move only after the central resolver reaches this exact acquisition leaf.
+		if _G._KazuPriorityOwner ~= "other_combat"
+			or _G._KazuPriorityDetail ~= ownerDetail
+		then
+			return false, "yielding_to_" .. tostring(_G._KazuPriorityOwner)
+		end
+		if fishingOwnsWeaponSlot()
+			or _G.storingFruit
+			or _G.isLootingChests
+			or _G.collectingPearls
+			or _G.seaEventActive
+			or _G.conquestActive
+			or _G.isProgressingBusoV2
+			or _G.isProgressingObservationV2
+			or _G.thirdSeaProgressionActive
+			or (_G._KazuDungeonOwnsAutomation and _G._KazuDungeonOwnsAutomation())
+		then
+			return false, "higher_priority_active"
+		end
+		return true
+	end
+
 	spawn(function()
 		while task.wait(0.5) do
 			pcall(function()
@@ -21047,7 +21096,12 @@ local function run(B, T, P, DfT, ...)
 				end
 				_G.darkBeardBoss = darkBeard
 
-				if totemCount >= 1 and not darkBeard then
+				local canSummon = _G._KazuCanRunSpecialBossAcquisition(
+					"autoDarkBeard",
+					"dark_beard_acquisition",
+					darkBeard
+				)
+				if totemCount >= 1 and not darkBeard and canSummon then
 					tp(CFrame.new(-9486, 77, -4761))
 					task.wait(0.3)
 					ReplicatedStorage.Chest.Remotes.Functions.EtcFunction:InvokeServer("QuestSpawnBoss", {
@@ -21102,7 +21156,12 @@ local function run(B, T, P, DfT, ...)
 				end
 				_G.crimsonBoss = crimson
 
-				if crystalCount >= 1 and not crimson then
+				local canSummon = _G._KazuCanRunSpecialBossAcquisition(
+					"autoCrimsonDemon",
+					"crimson_demon_acquisition",
+					crimson
+				)
+				if crystalCount >= 1 and not crimson and canSummon then
 					tp(CFrame.new(-7, 135, -3859))
 					task.wait(0.3)
 					ReplicatedStorage.Chest.Remotes.Functions.EtcFunction:InvokeServer("QuestSpawnBoss", {
@@ -21157,7 +21216,12 @@ local function run(B, T, P, DfT, ...)
 				end
 				_G.iceKingBoss = iceKing
 
-				if crystalCount >= 1 and not iceKing then
+				local canSummon = _G._KazuCanRunSpecialBossAcquisition(
+					"autoIceKing",
+					"ice_king_acquisition",
+					iceKing
+				)
+				if crystalCount >= 1 and not iceKing and canSummon then
 					tp(CFrame.new(-846, 97, -2929))
 					task.wait(0.3)
 					ReplicatedStorage.Chest.Remotes.Functions.EtcFunction:InvokeServer("QuestSpawnBoss", {
