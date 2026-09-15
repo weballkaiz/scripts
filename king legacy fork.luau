@@ -8,6 +8,8 @@
 -- GENESIS_DAILY_PUZZLE_CODEX_HANDOFF_V24
 -- GENESIS_EXECUTOR_MANAGED_AUTOEXEC_V25
 -- GENESIS_SECOND_SEA_DAILY_OBJECTIVES_V26
+-- GENESIS_KAIDO_PRIORITY_ACQUISITION_V27
+-- GENESIS_KAIDO_BOUNDED_DIALOGUE_V28
 -- Discord reporting uses the user-configured webhook; event state uses Kai's configured Cloudflare Worker.
 -- Cloudflare Event Hub reads and live-state reporting are enabled when configured.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -46,7 +48,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_SECOND_SEA_DAILY_OBJECTIVES_V26",
+		buildMarker = "GENESIS_KAIDO_BOUNDED_DIALOGUE_V28",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -146,6 +148,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		local cleanupFunctions = {
 			sharedGlobal._stopFishing,
 			sharedGlobal._stopDailyQuestHover,
+			sharedGlobal._stopKaidoAcquisition,
 			sharedGlobal._removeFarmFix,
 			sharedGlobal._stopSeaEventBypass,
 			sharedGlobal._stopAbyssalAcquisition,
@@ -270,6 +273,15 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._GenesisFindAbyssalLocator = nil
 		sharedGlobal._GenesisApproachAbyssalLocator = nil
 		sharedGlobal._stopAbyssalAcquisition = nil
+		sharedGlobal._GenesisKaidoAcquisition = nil
+		sharedGlobal._GenesisKaidoCache = nil
+		sharedGlobal._GenesisIsLiveKaido = nil
+		sharedGlobal._GenesisFindLiveKaido = nil
+		sharedGlobal._GenesisGetDragonOrbCount = nil
+		sharedGlobal._GenesisClearKaidoSwimMovers = nil
+		sharedGlobal._GenesisKaidoPhysicalClick = nil
+		sharedGlobal._GenesisCanRunKaidoAcquisition = nil
+		sharedGlobal._stopKaidoAcquisition = nil
 		sharedGlobal._GenesisSeaKingAcquisition = nil
 		sharedGlobal._GenesisFindSeaKingRewardChest = nil
 		sharedGlobal._GenesisApproachSeaKingIsland = nil
@@ -6893,6 +6905,9 @@ local function run(B, T, P, DfT, ...)
 		}
 		if combatKeys[key] and value == false then
 			_G.allowCombat = false
+			if key == "autoFarmKaido" and type(_G._stopKaidoAcquisition) == "function" then
+				pcall(_G._stopKaidoAcquisition, "toggle_disabled")
+			end
 			pcall(removeFarmFix)
 			if key == "autoFish" then
 				pcall(stopFishing)
@@ -16975,6 +16990,69 @@ local function run(B, T, P, DfT, ...)
 		return nil
 	end
 
+	_G._GenesisKaidoCache = {
+		liveCheckedAt = 0,
+		live = nil,
+		orbCheckedAt = 0,
+		orbCount = 0,
+	}
+	_G._GenesisIsLiveKaido = function(model)
+		local humanoid = model and model.Parent and model:FindFirstChildOfClass("Humanoid")
+		return humanoid ~= nil
+			and humanoid.Health > 0
+			and model:FindFirstChild("HumanoidRootPart") ~= nil
+	end
+
+	_G._GenesisFindLiveKaido = function()
+		local cache = _G._GenesisKaidoCache
+		local now = os.clock()
+		if now - cache.liveCheckedAt < 0.1 then
+			return _G._GenesisIsLiveKaido(cache.live) and cache.live or nil
+		end
+		cache.liveCheckedAt = now
+		local monsterRoot = Workspace:FindFirstChild("Monster")
+		if not monsterRoot then
+			cache.live = nil
+			return nil
+		end
+		for _, folder in ipairs(monsterRoot:GetChildren()) do
+			if folder:IsA("Folder") then
+				for _, mob in ipairs(folder:GetChildren()) do
+					if string.find(mob.Name, "Dragon", 1, true) and _G._GenesisIsLiveKaido(mob) then
+						cache.live = mob
+						return mob
+					end
+				end
+			end
+		end
+		cache.live = nil
+		return nil
+	end
+
+	_G._GenesisGetDragonOrbCount = function()
+		local cache = _G._GenesisKaidoCache
+		local now = os.clock()
+		if now - cache.orbCheckedAt < 0.2 then
+			return cache.orbCount
+		end
+		cache.orbCheckedAt = now
+		local playerStats = LocalPlayer:FindFirstChild("PlayerStats")
+		local materialValue = playerStats and playerStats:FindFirstChild("Material")
+		if not materialValue then
+			cache.orbCount = 0
+			return cache.orbCount
+		end
+		local success, data = pcall(function()
+			return HttpService:JSONDecode(materialValue.Value)
+		end)
+		if not success or type(data) ~= "table" then
+			cache.orbCount = 0
+			return cache.orbCount
+		end
+		cache.orbCount = math.max(0, tonumber(data["Dragon's Orb"]) or 0)
+		return cache.orbCount
+	end
+
 	local function getDesiredFishingCFrame()
 		if GetSetting("inSerpentWhirlpool") then
 			local whirlpoolCF = getWhirlpoolCFrame()
@@ -16993,10 +17071,6 @@ local function run(B, T, P, DfT, ...)
 	local bossFishingBlockCheckedAt = 0
 	local bossFishingBlockCached = false
 	local function hasEnabledBossTarget()
-		if not GetSetting("fishWhenNotSpawned") then
-			return false
-		end
-
 		-- Heartbeat also asks this question, so avoid walking every monster folder
 		-- once per rendered frame. A short cache still reacts well before a cast can
 		-- complete while keeping the check inexpensive.
@@ -17006,6 +17080,22 @@ local function run(B, T, P, DfT, ...)
 		end
 		bossFishingBlockCheckedAt = now
 		bossFishingBlockCached = false
+
+		-- A live Kaido is combat, not acquisition. It always preempts fishing,
+		-- including when another player spawned it and regardless of whether the
+		-- downtime-only "Fish Between Boss Spawns" option is enabled. The summon
+		-- NPC itself is deliberately not considered a boss target here.
+		if GetSetting("autoFarmKaido") then
+			_G.kaidoDragon = _G._GenesisFindLiveKaido()
+			if _G.kaidoDragon then
+				bossFishingBlockCached = true
+				return true
+			end
+		end
+
+		if not GetSetting("fishWhenNotSpawned") then
+			return false
+		end
 
 		local function isAlive(model)
 			local humanoid = model and model.Parent and model:FindFirstChild("Humanoid")
@@ -18909,17 +18999,20 @@ local function run(B, T, P, DfT, ...)
 
 		if GetSetting("autoFarmKaido") then
 			pcall(function()
-				if
-					_G.kaidoDragon
-					and _G.kaidoDragon.Parent
-					and _G.kaidoDragon:FindFirstChild("Humanoid")
-					and _G.kaidoDragon.Humanoid.Health > 0
-				then
+				local dragon = _G._GenesisFindLiveKaido()
+				local orbCount = _G._GenesisGetDragonOrbCount()
+				_G.kaidoDragon = dragon
+				_G.kaidoHasOrb = orbCount >= 1
+
+				if dragon then
+					if type(_G._stopKaidoAcquisition) == "function" then
+						_G._stopKaidoAcquisition("boss_spawned")
+					end
 					usetool()
 					buso()
 					ken()
 
-					local hrp = _G.kaidoDragon.HumanoidRootPart
+					local hrp = dragon.HumanoidRootPart
 					if hrp then
 						getDownwardCFrame(hrp.CFrame)
 						local height = GetSetting("distance") or 8
@@ -18930,47 +19023,58 @@ local function run(B, T, P, DfT, ...)
 						end
 					end
 
-					_G.pos_skill = _G.kaidoDragon.HumanoidRootPart.CFrame
+					_G.pos_skill = dragon.HumanoidRootPart.CFrame
 					_G.allowCombat = true
 					click()
 					autoskill()
 					handleOpeMethod()
 					return
 				end
+
+				_G.allowCombat = false
 				removeFarmFix()
-				tp(Workspace.AllNPC.SummonDragon.CFrame)
-				if not _G.kaidoHasOrb then
-					for _, folder in pairs(Workspace.Monster:GetChildren()) do
-						if folder:IsA("Folder") then
-							for _, mob in pairs(folder:GetChildren()) do
-								if
-									mob:FindFirstChild("Humanoid")
-									and mob.Humanoid.Health > 0
-									and string.find(mob.Name, "Elite Skeleton")
-								then
-									usetool()
-									buso()
-									ken()
+				if orbCount >= 1 then
+					-- Acquisition is a low-priority leaf. The dedicated worker below may
+					-- move only while this exact owner is still published; fishing and
+					-- every higher-priority activity cause it to release immediately.
+					_G._GenesisSetPriorityOwner("other_combat", "kaido_acquisition")
+					return
+				end
 
-									local hrp2 = mob.HumanoidRootPart
-									if hrp2 then
-										getDownwardCFrame(hrp2.CFrame)
-										local height = GetSetting("distance") or 8
-										local targetCF =
-											CFrame.new(hrp2.Position + Vector3.new(0, height, 0), hrp2.Position)
-										updateFarmFix(targetCF, hrp2)
-										if not _G.farmFixThread then
-											applyFarmFix(targetCF, hrp2)
-										end
+				if type(_G._stopKaidoAcquisition) == "function" then
+					_G._stopKaidoAcquisition("orb_missing")
+				end
+				_G._GenesisSetPriorityOwner("other_combat", "kaido_orb_farm")
+				for _, folder in pairs(Workspace.Monster:GetChildren()) do
+					if folder:IsA("Folder") then
+						for _, mob in pairs(folder:GetChildren()) do
+							if
+								mob:FindFirstChild("Humanoid")
+								and mob.Humanoid.Health > 0
+								and string.find(mob.Name, "Elite Skeleton")
+							then
+								usetool()
+								buso()
+								ken()
+
+								local hrp2 = mob.HumanoidRootPart
+								if hrp2 then
+									getDownwardCFrame(hrp2.CFrame)
+									local height = GetSetting("distance") or 8
+									local targetCF =
+										CFrame.new(hrp2.Position + Vector3.new(0, height, 0), hrp2.Position)
+									updateFarmFix(targetCF, hrp2)
+									if not _G.farmFixThread then
+										applyFarmFix(targetCF, hrp2)
 									end
-
-									_G.pos_skill = mob.HumanoidRootPart.CFrame
-									_G.allowCombat = true
-									click()
-									autoskill()
-									handleOpeMethod()
-									break
 								end
+
+								_G.pos_skill = mob.HumanoidRootPart.CFrame
+								_G.allowCombat = true
+								click()
+								autoskill()
+								handleOpeMethod()
+								return
 							end
 						end
 					end
@@ -19871,74 +19975,295 @@ local function run(B, T, P, DfT, ...)
 		end
 	end)
 
-	spawn(function()
-		-- The summon state only changes after a server response; frame-rate polling
-		-- otherwise repeats the teleport and CheckQuest remote dozens of times.
-		while task.wait(0.5) do
+	_G._GenesisKaidoAcquisition = {
+		active = false,
+		phase = "idle",
+		root = nil,
+		hold = nil,
+		moved = false,
+		nextRequestAt = 0,
+		lastRequestAt = 0,
+		lastResponse = nil,
+		acceptSentAt = 0,
+		acceptAttempts = 0,
+		continueSentAt = 0,
+		lastClickResult = nil,
+	}
+
+	_G._GenesisClearKaidoSwimMovers = function(root)
+		for _, mover in ipairs(root and root:GetChildren() or {}) do
+			if (mover.Name == "Swim" and mover:IsA("AlignPosition"))
+				or (mover.Name == "SwimGyro" and mover:IsA("BodyGyro")) then
+				mover:Destroy()
+			end
+		end
+	end
+
+	_G._stopKaidoAcquisition = function(reason)
+		local state = _G._GenesisKaidoAcquisition
+		if not state then
+			return
+		end
+		if state.hold then
 			pcall(function()
-				if not GetSetting("autoFarmKaido") then
-					return
-				end
+				state.hold:Destroy()
+			end)
+			state.hold = nil
+		end
+		local root = state.root
+		if state.moved and root and root.Parent then
+			_G._GenesisClearKaidoSwimMovers(root)
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end
+		state.active = false
+		state.phase = reason or "idle"
+		state.root = nil
+		state.moved = false
+		state.nextRequestAt = 0
+		state.lastRequestAt = 0
+		state.acceptSentAt = 0
+		state.acceptAttempts = 0
+		state.continueSentAt = 0
+		state.lastClickResult = nil
+		_G.NPCTalk = false
+	end
 
-				local dragon = nil
-				for _, folder in pairs(Workspace.Monster:GetChildren()) do
-					if folder:IsA("Folder") then
-						for _, mob in pairs(folder:GetChildren()) do
-							if
-								mob:FindFirstChild("Humanoid")
-								and mob.Humanoid.Health > 0
-								and string.find(mob.Name, "Dragon")
-							then
-								dragon = mob
-								break
-							end
-						end
-					end
-					if dragon then
-						break
-					end
-				end
+	-- SummonDragon's legacy GUI does not complete its server-side path when its
+	-- MouseButton1Click signal is fired directly. On this game's mobile UI the
+	-- reliable path is the same bounded physical click used by the original
+	-- client: briefly expand the real Accept button over a known screen point,
+	-- send one pointer press/release, then restore it if the GUI did not advance.
+	-- This helper never moves the character and is called only after the central
+	-- resolver has already granted the non-priority Kaido acquisition leaf.
+	_G._GenesisKaidoPhysicalClick = function(button)
+		local camera = Workspace.CurrentCamera
+		if not camera or camera.ViewportSize.X <= 0 or camera.ViewportSize.Y <= 0 then
+			return false, "camera_unavailable"
+		end
 
-				_G.kaidoDragon = dragon
+		local originalSize = nil
+		local originalPosition = nil
+		if button then
+			if not _G._GenesisIsVisibleGuiButton(button) then
+				return false, "button_not_visible"
+			end
+			originalSize = button.Size
+			originalPosition = button.Position
+			button.Size = UDim2.new(10, 0, 10, 0)
+			button.Position = UDim2.new(-1.9, 0, -5.5, 0)
+		end
 
-				local materialValue = LocalPlayer.PlayerStats:FindFirstChild("Material")
-				local hasOrb = false
-				if materialValue then
-					local success, data = pcall(function()
-						return HttpService:JSONDecode(materialValue.Value)
-					end)
-					if success and data and data["Dragon's Orb"] and data["Dragon's Orb"] >= 1 then
-						hasOrb = true
-					end
-				end
-				_G.kaidoHasOrb = hasOrb
+		local screenSize = camera.ViewportSize
+		local clickX = math.max(1, screenSize.X - 20)
+		local clickY = math.max(1, screenSize.Y / 15)
+		local clickOk, clickError = pcall(function()
+			VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, true, game, 0)
+			task.wait(0.05)
+			VirtualInputManager:SendMouseButtonEvent(clickX, clickY, 0, false, game, 0)
+		end)
 
-				if not dragon and hasOrb then
-					tp(Workspace.AllNPC.SummonDragon.CFrame)
-					task.wait(0.1)
-					ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(Workspace.AllNPC.SummonDragon)
-					task.wait(0.1)
+		if button and originalSize and originalPosition then
+			task.delay(0.35, function()
+				if button and button.Parent and button.Visible then
+					button.Size = originalSize
+					button.Position = originalPosition
 				end
 			end)
 		end
-	end)
+		return clickOk, clickOk and "physical_click" or tostring(clickError)
+	end
+
+	_G._GenesisCanRunKaidoAcquisition = function()
+		if not GetSetting("autoFarmKaido") then
+			return false, "disabled"
+		end
+		if _G._GenesisFindLiveKaido() then
+			return false, "boss_spawned"
+		end
+		if _G._GenesisGetDragonOrbCount() < 1 then
+			return false, "orb_missing"
+		end
+		-- The summon mechanism never preempts anything. It can act only after the
+		-- central resolver independently reaches this exact low-priority leaf.
+		if _G._GenesisPriorityOwner ~= "other_combat"
+			or _G._GenesisPriorityDetail ~= "kaido_acquisition" then
+			return false, "yielding_to_" .. tostring(_G._GenesisPriorityOwner)
+		end
+		if fishingOwnsWeaponSlot()
+			or _G.storingFruit
+			or _G.isLootingChests
+			or _G.collectingPearls
+			or _G.seaEventActive
+			or _G.conquestActive
+			or _G.isProgressingBusoV2
+			or _G.isProgressingObservationV2
+			or _G.thirdSeaProgressionActive
+			or (_G._GenesisDungeonOwnsAutomation and _G._GenesisDungeonOwnsAutomation())
+		then
+			return false, "higher_priority_active"
+		end
+		return true
+	end
 
 	spawn(function()
 		while task.wait(0.1) do
 			pcall(function()
-				if not GetSetting("autoFarmKaido") then
-					return
-				end
-				if _G.kaidoDragon then
+				local state = _G._GenesisKaidoAcquisition
+				local dragon = GetSetting("autoFarmKaido") and _G._GenesisFindLiveKaido() or nil
+				_G.kaidoDragon = dragon
+				_G.kaidoHasOrb = _G._GenesisGetDragonOrbCount() >= 1
+
+				local canRun, reason = _G._GenesisCanRunKaidoAcquisition()
+				if not canRun then
+					if state.active or state.hold then
+						_G._stopKaidoAcquisition(reason)
+					elseif not GetSetting("autoFarmKaido") then
+						state.phase = "disabled"
+					end
 					return
 				end
 
-				local acceptBtn = LocalPlayer.PlayerGui.SummonDragon.Dialogue.Accept
-				if not acceptBtn or not acceptBtn.Visible then
+				local allNpc = Workspace:FindFirstChild("AllNPC")
+				local summonNpc = allNpc and allNpc:FindFirstChild("SummonDragon")
+				local character = LocalPlayer.Character
+				local root = GetRoot(character)
+				if not summonNpc or not summonNpc:IsA("BasePart") or not root then
+					_G._stopKaidoAcquisition("altar_unavailable")
 					return
 				end
 
-				_G._GenesisDispatchGuiButton(acceptBtn)
+				if state.root ~= root then
+					_G._stopKaidoAcquisition("character_changed")
+					state.root = root
+				end
+				local targetCF = summonNpc.CFrame * CFrame.new(0, 3, 0)
+				_G._GenesisClearKaidoSwimMovers(root)
+				if not state.hold or state.hold.Parent ~= root then
+					local hold = Instance.new("BodyPosition")
+					hold.Name = "GenesisKaidoAcquisitionHold"
+					hold.MaxForce = Vector3.new(1000000000, 1000000000, 1000000000)
+					hold.D = 100000
+					hold.P = 1000000
+					hold.Position = targetCF.Position
+					hold.Parent = root
+					state.hold = hold
+					state.active = true
+					state.moved = true
+					state.phase = "approaching_altar"
+					state.nextRequestAt = os.clock() + 0.4
+				end
+				state.hold.Position = targetCF.Position
+				if (root.Position - targetCF.Position).Magnitude > 8 then
+					root.CFrame = targetCF
+				end
+				root.AssemblyLinearVelocity = Vector3.zero
+				root.AssemblyAngularVelocity = Vector3.zero
+
+				local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+				local summonGui = playerGui and playerGui:FindFirstChild("SummonDragon")
+				local dialogue = summonGui and summonGui:FindFirstChild("Dialogue")
+				local acceptBtn = dialogue and dialogue:FindFirstChild("Accept")
+				local continueLabel = dialogue and dialogue:FindFirstChild("ContinueLabel")
+				local acceptVisible = summonGui and summonGui.Enabled
+					and dialogue and dialogue.Visible
+					and acceptBtn and acceptBtn.Visible
+					and acceptBtn.AbsoluteSize.X > 0 and acceptBtn.AbsoluteSize.Y > 0
+				local continueVisible = summonGui and summonGui.Enabled
+					and dialogue and dialogue.Visible
+					and continueLabel and continueLabel.Visible
+				local now = os.clock()
+
+				if acceptVisible then
+					if state.acceptSentAt == 0 or now - state.acceptSentAt >= 1.5 then
+						if state.acceptAttempts >= 3 then
+							if now < state.nextRequestAt then
+								state.phase = "accept_unresponsive_cooldown"
+								return
+							end
+							state.acceptAttempts = 0
+						end
+						_G.NPCTalk = true
+						state.phase = "accepting_summon"
+						state.acceptSentAt = now
+						state.acceptAttempts = state.acceptAttempts + 1
+						state.continueSentAt = 0
+						local clickOk, clickResult = _G._GenesisKaidoPhysicalClick(acceptBtn)
+						state.lastClickResult = clickResult
+						if not clickOk then
+							state.acceptSentAt = 0
+						end
+					else
+						state.phase = "waiting_for_accept_transition"
+					end
+					return
+				end
+
+				-- After Accept, this GUI switches to a status page and waits for a
+				-- second ordinary input before its server DialogueEvent consumes the
+				-- orb and creates Dragon. A direct signal dispatch never completes that
+				-- server-side path, so make one bounded physical continuation click.
+				if continueVisible then
+					local acceptSettled = state.acceptSentAt == 0 or now - state.acceptSentAt >= 0.35
+					if state.continueSentAt == 0 and acceptSettled then
+						_G.NPCTalk = true
+						state.phase = state.acceptSentAt > 0 and "continuing_summon" or "closing_stale_status"
+						state.continueSentAt = now
+						state.nextRequestAt = now + 8
+						local clickOk, clickResult = _G._GenesisKaidoPhysicalClick(nil)
+						state.lastClickResult = clickResult
+						if not clickOk then
+							state.continueSentAt = 0
+						end
+					else
+						state.phase = "waiting_for_continue_transition"
+					end
+					return
+				end
+
+				if summonGui and summonGui.Enabled and dialogue and dialogue.Visible then
+					state.phase = "waiting_for_dialogue_controls"
+					return
+				end
+
+				if state.continueSentAt > 0 then
+					if now - state.continueSentAt < 8 then
+						state.phase = "waiting_for_dragon"
+						return
+					end
+					-- The server did not consume the orb or replicate Dragon. Reset this
+					-- completed attempt and permit one clean dialogue cycle after cooldown.
+					state.acceptSentAt = 0
+					state.acceptAttempts = 0
+					state.continueSentAt = 0
+					state.nextRequestAt = now + 2
+				end
+
+				if now < state.nextRequestAt then
+					return
+				end
+
+				state.phase = "requesting_dialogue"
+				state.lastRequestAt = now
+				_G.NPCTalk = true
+				local remote = ReplicatedStorage.Chest.Remotes.Functions.CheckQuest
+				local success, response = pcall(function()
+					return remote:InvokeServer(summonNpc)
+				end)
+				state.lastResponse = success and tostring(response) or "error: " .. tostring(response)
+				if success and response == "Cancel NPCTalk" then
+					-- A stale/duplicate request toggles the legacy dialogue back off. Let
+					-- that cancellation settle, then make exactly one fresh request.
+					_G.NPCTalk = false
+					state.phase = "dialogue_cancelled_retrying"
+					state.nextRequestAt = os.clock() + 1.5
+				else
+					state.phase = "waiting_for_dialogue"
+					state.acceptSentAt = 0
+					state.acceptAttempts = 0
+					state.continueSentAt = 0
+					state.nextRequestAt = os.clock() + 8
+				end
 			end)
 		end
 	end)
