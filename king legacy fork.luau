@@ -7,8 +7,9 @@
 -- GENESIS_DAILY_PUZZLE_ADAPTIVE_V23
 -- GENESIS_DAILY_PUZZLE_CODEX_HANDOFF_V24
 -- GENESIS_EXECUTOR_MANAGED_AUTOEXEC_V25
--- Bundled application with reporting only to the user-configured Discord webhook.
--- Shared event/server retrieval remains enabled; Event Hub uploads are disabled.
+-- GENESIS_SECOND_SEA_DAILY_OBJECTIVES_V26
+-- Discord reporting uses the user-configured webhook; event state uses Kai's configured Cloudflare Worker.
+-- Cloudflare Event Hub reads and live-state reporting are enabled when configured.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
 -- Teleport auto-execution is managed by the executor, not this script.
 local function getGenesisRuntimeState()
@@ -45,7 +46,7 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "GENESIS_EXECUTOR_MANAGED_AUTOEXEC_V25",
+		buildMarker = "GENESIS_SECOND_SEA_DAILY_OBJECTIVES_V26",
 	}
 	executorEnvironment.__GENESIS_RUNTIME = runtime
 	sharedGlobal.__GENESIS_RUNTIME = runtime
@@ -278,6 +279,12 @@ local function startGenesisRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._GenesisDailyQuestPriorityCandidate = nil
 		sharedGlobal._GenesisDailyQuestReleaseUntil = nil
 		sharedGlobal._GenesisDailyPuzzleStatus = nil
+		if type(sharedGlobal._GenesisEventHubClient) == "table" then
+			sharedGlobal._GenesisEventHubClient.stopped = true
+		end
+		sharedGlobal._GenesisEventHubClient = nil
+		sharedGlobal._GenesisFruitLiveState = nil
+		sharedGlobal._GenesisManualRefreshAt = nil
 		sharedGlobal.GENESIS_SCRIPT_URL = nil
 		sharedGlobal.GENESIS_SCRIPT_FILE = nil
 		sharedGlobal._autoExecuteQueued = nil
@@ -6590,50 +6597,69 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	-- Event/raid variables
-	local EVENT_HUB_READ_KEY = "Dib-WMfM9qD9KApiIbOk4TkU"
-	local EVENT_HUB_API = "https://shadow.discloud.app/api/events/"
+	-- Set these in the executor during development. After Cloudflare deployment,
+	-- pin the deployed Worker URL and READ key in the distributed client build.
+	local Hub
+	do
+	local hubConfig = ((getgenv and getgenv()) or _G).GenesisEventHubConfig or _G.GenesisEventHubConfig or {}
+	local EVENT_HUB_API = tostring(hubConfig.BaseUrl or ""):gsub("/+$", "")
+	local EVENT_HUB_READ_KEY = tostring(hubConfig.ReadKey or "")
 	local EVENT_HUB_POLL_SECONDS = 5
-	_G.EventHubCache = _G.EventHubCache or { by_channel = {}, events = {}, last_poll = 0, ok = false }
+	_G.EventHubCache = { by_channel = {}, events = {}, last_poll = 0, ok = false }
+	Hub = {
+		writeKey = nil,
+		revision = 0,
+		lastSubmit = 0,
+		lastSuccess = 0,
+		lastIssueAttempt = 0,
+		dirty = true,
+		signature = "",
+		stopped = false,
+	}
+	local hubEnabled = EVENT_HUB_API:match("^https://[%w%.%-]+") ~= nil
+		and not EVENT_HUB_API:find("shadow.discloud.app", 1, true)
+	local hubHeartbeatSeconds = math.clamp(tonumber(hubConfig.HeartbeatSeconds) or 15, 5, 60)
+	Hub.enabled = hubEnabled
+	Hub.devEnabled = type(hubConfig.DevBootstrapKey) == "string" and hubConfig.DevBootstrapKey ~= ""
+	Hub.pollSeconds = EVENT_HUB_POLL_SECONDS
 
 	local function EventHubHttp(opts)
-		-- This client can read the shared feed, but cannot publish to it.
-		local pollUrl = EVENT_HUB_API .. EVENT_HUB_READ_KEY .. "/poll"
-		if (opts.Method or "GET") ~= "GET" or type(opts.Url) ~= "string" then
+		if not hubEnabled or type(opts.Url) ~= "string" or opts.Url:sub(1, #EVENT_HUB_API + 1) ~= EVENT_HUB_API .. "/" then
 			return nil, nil
 		end
-		if opts.Url ~= pollUrl and opts.Url:sub(1, #pollUrl + 9) ~= pollUrl .. "?channel=" then
+		local method = opts.Method or "GET"
+		if method ~= "GET" and method ~= "POST" then
 			return nil, nil
 		end
 		local req = (syn and syn.request) or http_request or request
 		if req then
 			local ok, res = pcall(function()
-				return req({ Url = opts.Url, Method = "GET" })
+				return req({ Url = opts.Url, Method = method, Headers = opts.Headers, Body = opts.Body })
 			end)
 			if not ok or not res then
 				return nil, nil
 			end
 			return (res.Body or res.body), res
 		end
-		local ok, body = pcall(function()
-			return game:HttpGet(opts.Url)
-		end)
-		if ok then
-			return body, nil
-		end
 		return nil, nil
 	end
 
 	function ReportGameEvent(channel, title, data)
-		-- Retain the call interface for existing detection callbacks without sending data.
-		return false, "Event reporting is disabled in this bundle"
+		-- Detection callbacks retain their interface. The current-state scanner
+		-- below publishes every live event together; one-shot callbacks do not
+		-- create stale event assertions or contact Shadow directly.
+		return hubEnabled, hubEnabled and "Included in current-state publisher" or "Cloudflare Event Hub not configured"
 	end
 
 	function PollGameEvents(channel)
-		local url = EVENT_HUB_API .. EVENT_HUB_READ_KEY .. "/poll"
-		if channel and channel ~= "" then
-			url = url .. "?channel=" .. channel
+		if not hubEnabled or EVENT_HUB_READ_KEY == "" then
+			return nil
 		end
-		local resBody = EventHubHttp({ Url = url, Method = "GET" })
+		local url = EVENT_HUB_API .. "/api/events"
+		if channel and channel ~= "" then
+			url = url .. "?channel=" .. HttpService:UrlEncode(channel)
+		end
+		local resBody = EventHubHttp({ Url = url, Method = "GET", Headers = { Authorization = "Bearer " .. EVENT_HUB_READ_KEY } })
 		if not resBody then
 			return nil
 		end
@@ -6648,6 +6674,86 @@ local function run(B, T, P, DfT, ...)
 			_G.EventHubCache.by_channel = data.by_channel or {}
 		end
 		return data
+	end
+
+	function Hub:issueWriteKey()
+		if self.stopped or not hubEnabled or type(hubConfig.DevBootstrapKey) ~= "string" or hubConfig.DevBootstrapKey == "" then
+			return false
+		end
+		if tick() - self.lastIssueAttempt < 30 then
+			return false
+		end
+		self.lastIssueAttempt = tick()
+		local body = HttpService:JSONEncode({
+			username = Players.LocalPlayer.Name,
+			user_id = Players.LocalPlayer.UserId,
+		})
+		local responseBody = EventHubHttp({
+			Url = EVENT_HUB_API .. "/api/write/issue",
+			Method = "POST",
+			Headers = { ["Content-Type"] = "application/json", ["X-Dev-Bootstrap-Key"] = hubConfig.DevBootstrapKey },
+			Body = body,
+		})
+		local ok, decoded = pcall(function()
+			return HttpService:JSONDecode(responseBody or "")
+		end)
+		if ok and type(decoded) == "table" and decoded.ok and type(decoded.write_key) == "string" then
+			self.writeKey = decoded.write_key
+			self.revision = 0
+			return true
+		end
+		return false
+	end
+
+	function Hub:publish(events)
+		if self.stopped or not hubEnabled then
+			return false
+		end
+		local signature = HttpService:JSONEncode(events)
+		if signature ~= self.signature then
+			self.signature = signature
+			self.dirty = true
+		end
+		if not self.dirty and tick() - self.lastSuccess < hubHeartbeatSeconds then
+			return true
+		end
+		if tick() - self.lastSubmit < 1 then
+			return false
+		end
+		if not self.writeKey and not self:issueWriteKey() then
+			return false
+		end
+		self.lastSubmit = tick()
+		self.revision = self.revision + 1
+		local body = HttpService:JSONEncode({
+			job_id = tostring(game.JobId),
+			place_id = game.PlaceId,
+			revision = self.revision,
+			player_count = math.min(#Players:GetPlayers(), 12),
+			events = events,
+		})
+		local responseBody, response = EventHubHttp({
+			Url = EVENT_HUB_API .. "/api/write/state",
+			Method = "POST",
+			Headers = { ["Content-Type"] = "application/json", Authorization = "Bearer " .. self.writeKey },
+			Body = body,
+		})
+		local ok, decoded = pcall(function()
+			return HttpService:JSONDecode(responseBody or "")
+		end)
+		if ok and type(decoded) == "table" and decoded.ok then
+			self.lastSuccess = tick()
+			self.dirty = false
+			return true
+		end
+		if response and (response.StatusCode == 401 or response.status == 401) then
+			-- A revoked key must not silently mint a replacement using the dev gate.
+			self.stopped = true
+		end
+		return false
+	end
+
+	_G._GenesisEventHubClient = Hub
 	end
 
 	function GetEvents(channel)
@@ -6672,7 +6778,6 @@ local function run(B, T, P, DfT, ...)
 			timestamp = ev.created_at or 0,
 			player_count = data.player_count or 0,
 			place_id = ev.place_id,
-			player = ev.player,
 			age_seconds = ev.age_seconds,
 		}
 	end
@@ -6684,7 +6789,7 @@ local function run(B, T, P, DfT, ...)
 				pcall(function()
 					PollGameEvents()
 				end)
-				task.wait(EVENT_HUB_POLL_SECONDS)
+				task.wait(Hub.pollSeconds)
 			end
 		end)
 	end
@@ -7071,6 +7176,7 @@ local function run(B, T, P, DfT, ...)
 
 	_G.notifiedEvents = {}
 	_G.lastFruitStock = ""
+	_G._GenesisFruitLiveState = nil
 	_G.playerCount = 0
 	_G.jobIdEncoded = ""
 	_G.pos_skill = CFrame.new(0, 0, 0)
@@ -13558,20 +13664,23 @@ local function run(B, T, P, DfT, ...)
 	_G.reportSpawnedFruits = function()
 		local names = _G.collectWorkspaceFruits()
 		if not names or #names == 0 then
+			_G._GenesisFruitLiveState = nil
+			_G.lastFruitStock = ""
 			return
 		end
 		local sig = table.concat(names, ",")
-		if _G.lastFruitStock == sig and (tick() - (_G.lastFruitReport or 0)) < 25 then
-			return
-		end
-		_G.lastFruitStock = sig
-		_G.lastFruitReport = tick()
 		local seaNum = game.PlaceId == 4520749081 and 1 or game.PlaceId == 6381829480 and 2 or 3
 		local title = table.concat(names, ", ")
 		if #title > 160 then
 			title = names[1] .. " +" .. tostring(#names - 1)
 		end
 		title = title .. " [Sea " .. tostring(seaNum) .. "]"
+		_G._GenesisFruitLiveState = { channel = "fruits", title = title, event_type = "Fruit" }
+		if _G.lastFruitStock == sig and (tick() - (_G.lastFruitReport or 0)) < 25 then
+			return
+		end
+		_G.lastFruitStock = sig
+		_G.lastFruitReport = tick()
 		pcall(function()
 			ReportGameEvent("fruits", title, {
 				player_count = #Players:GetPlayers(),
@@ -15578,15 +15687,21 @@ local function run(B, T, P, DfT, ...)
 		end
 	end
 
-	local function fetchServersFromBot()
+	local function fetchServersFromBot(forceNetworkRefresh)
 		if _G.isFetchingServers then
-			return
+			return false
+		end
+		if forceNetworkRefresh then
+			if tick() - (_G._GenesisManualRefreshAt or 0) < 5 then
+				return false
+			end
+			_G._GenesisManualRefreshAt = tick()
 		end
 		-- Rebuild the UI list roughly with its 30-second refresh loop.  The
 		-- Event Hub poller maintains the shared cache every five seconds, so
 		-- this does not require a second request for every redraw.
-		if os.time() - _G.lastServerFetch < 25 then
-			return
+		if not forceNetworkRefresh and os.time() - _G.lastServerFetch < 25 then
+			return false
 		end
 
 		_G.isFetchingServers = true
@@ -15604,8 +15719,8 @@ local function run(B, T, P, DfT, ...)
 				-- polled twice back-to-back here, even though a global poller is
 				-- already active.
 				local channelName = "sea_events_" .. tostring(seaNumber)
-				local hubData = _G.EventHubCache
-				if not hubData or tick() - (hubData.last_poll or 0) > EVENT_HUB_POLL_SECONDS * 2 then
+				local hubData = forceNetworkRefresh and nil or _G.EventHubCache
+				if forceNetworkRefresh or not hubData or tick() - (hubData.last_poll or 0) > Hub.pollSeconds * 2 then
 					hubData = PollGameEvents()
 				end
 				if not hubData or not hubData.ok then
@@ -15744,6 +15859,7 @@ local function run(B, T, P, DfT, ...)
 			_G.isFetchingServers = false
 			updateServerListUI()
 		end)
+		return true
 	end
 
 	local serverJobContent = createUiSection(uiSections.ServerTab.Left, "Job ID", "lucide-share")
@@ -15847,9 +15963,11 @@ local function run(B, T, P, DfT, ...)
 	Window:CreateButton(serverBrowserContent, {
 		Text = "Refresh List",
 		Callback = function()
-			_G.lastServerFetch = 0
-			fetchServersFromBot()
-			GenesisX:Notify({ Text = "Fetching servers...", Type = "info", Duration = 2 })
+			if fetchServersFromBot(true) then
+				GenesisX:Notify({ Text = "Fetching servers...", Type = "info", Duration = 2 })
+			else
+				GenesisX:Notify({ Text = "Refresh is cooling down (5 seconds)", Type = "warning", Duration = 2 })
+			end
 		end,
 	})
 
@@ -17000,14 +17118,30 @@ local function run(B, T, P, DfT, ...)
 			return _G._GenesisDailyQuestPriorityCandidate
 		end
 		_G._GenesisDailyQuestPriorityCheckedAt = now
-		local ok, pending = pcall(getDailyQuestPending)
+		local ok, pending, pendingState, pendingDetail = pcall(getDailyQuestPending)
 		if ok and pending then
 			_G._GenesisDailyQuestPriorityCandidate = pending
 			_G._GenesisDailyQuestReleaseUntil = now + 1.5
-		elseif now < _G._GenesisDailyQuestReleaseUntil then
+		elseif ok then
+			-- The coordinator worker intentionally moves only while it owns the
+			-- daily slot. Publish terminal/waiting state here before that ownership
+			-- is released, otherwise the UI can retain the previous objective's
+			-- state and error while fishing has already resumed.
+			_G.dailyQuestState = pendingState or "done"
+			if pendingState == "waiting" then
+				_G.dailyQuestIssue = "Waiting for daily objectives: " .. tostring(pendingDetail or "")
+			elseif pendingState == "paused" then
+				_G.dailyQuestIssue = "Another quest is active: " .. tostring(pendingDetail or "")
+			else
+				_G.dailyQuestIssue = nil
+			end
+			if now < _G._GenesisDailyQuestReleaseUntil then
 			-- Do not send the player fishing during a brief quest-completion
 			-- replication gap. This sentinel owns no movement or combat.
-			_G._GenesisDailyQuestPriorityCandidate = true
+				_G._GenesisDailyQuestPriorityCandidate = true
+			else
+				_G._GenesisDailyQuestPriorityCandidate = nil
+			end
 		else
 			_G._GenesisDailyQuestPriorityCandidate = nil
 		end
@@ -17315,30 +17449,76 @@ local function run(B, T, P, DfT, ...)
 		local puzzleExhausted = false
 		local hoverBodyPosition = nil
 		local hoverRoot = nil
+		local hoverPosition = nil
+		local hoverUnderwater = false
+		local hoverConnection = nil
+
+		local function clearDailyQuestSwimMovers(root)
+			for _, mover in ipairs(root and root:GetChildren() or {}) do
+				if (mover.Name == "Swim" and mover:IsA("AlignPosition"))
+					or (mover.Name == "SwimGyro" and mover:IsA("BodyGyro")) then
+					mover:Destroy()
+				end
+			end
+		end
 
 		local function stopDailyQuestHover()
+			if hoverConnection then
+				hoverConnection:Disconnect()
+				hoverConnection = nil
+			end
 			if hoverBodyPosition then
 				hoverBodyPosition:Destroy()
 				hoverBodyPosition = nil
 			end
 			hoverRoot = nil
+			hoverPosition = nil
+			hoverUnderwater = false
 		end
 		_G._stopDailyQuestHover = stopDailyQuestHover
 
-		local function holdDailyQuestHover(root, position)
+		local function holdDailyQuestHover(root, position, underwater)
 			if hoverRoot ~= root then
 				stopDailyQuestHover()
 				hoverRoot = root
 			end
+			hoverPosition = position
+			hoverUnderwater = underwater == true
 			if not hoverBodyPosition or not hoverBodyPosition.Parent then
 				hoverBodyPosition = Instance.new("BodyPosition")
 				hoverBodyPosition.MaxForce = Vector3.new(1000000000, 1000000000, 1000000000)
-				hoverBodyPosition.D = 1000
-				hoverBodyPosition.P = 10000
+				hoverBodyPosition.D = 100000
+				hoverBodyPosition.P = 1000000
 				hoverBodyPosition.Parent = root
 			end
 			hoverBodyPosition.Position = position
+			if hoverUnderwater then
+				clearDailyQuestSwimMovers(root)
+				root.CFrame = CFrame.new(position)
+			end
 			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+			if not hoverConnection then
+				hoverConnection = trackGenesisConnection(RunService.Heartbeat:Connect(function()
+					if not hoverRoot or not hoverRoot.Parent or not hoverPosition then
+						stopDailyQuestHover()
+						return
+					end
+					if hoverBodyPosition and hoverBodyPosition.Parent then
+						hoverBodyPosition.Position = hoverPosition
+					end
+					if hoverUnderwater then
+						-- King Legacy's swim controller repeatedly adds an AlignPosition
+						-- named Swim which launches a teleported root back to the surface.
+						-- Remove only those two game swim movers and keep this quest's
+						-- root inside the active submerged touch volume.
+						clearDailyQuestSwimMovers(hoverRoot)
+						hoverRoot.CFrame = CFrame.new(hoverPosition)
+					end
+					hoverRoot.AssemblyLinearVelocity = Vector3.zero
+					hoverRoot.AssemblyAngularVelocity = Vector3.zero
+				end))
+			end
 		end
 
 		local function useQuestPrompt(part, prompt, holdInAir)
@@ -17464,7 +17644,8 @@ local function run(B, T, P, DfT, ...)
 					end
 
 					local onQuest = character and character:FindFirstChild("onQuest")
-					local package = character and character:FindFirstChild("yazoooonxQuestBox")
+					local packageName = LocalPlayer.Name .. "QuestBox"
+					local package = character and character:FindFirstChild(packageName)
 					local portGui = LocalPlayer.PlayerGui:FindFirstChild("Civilian Port")
 					if not (onQuest and package) then
 						if onQuest or package or portGui then
@@ -17519,7 +17700,7 @@ local function run(B, T, P, DfT, ...)
 								or LocalPlayer.CurrentQuest.Value ~= "Box Box!"
 								or progressValue.Value ~= progress
 								or not character:FindFirstChild("onQuest")
-								or not character:FindFirstChild("yazoooonxQuestBox") then
+								or not character:FindFirstChild(packageName) then
 								return
 							end
 							local viewport = Workspace.CurrentCamera.ViewportSize
@@ -17554,6 +17735,20 @@ local function run(B, T, P, DfT, ...)
 							return
 						end
 						boxClickAttempts = boxClickAttempts + 1
+						-- The final delivery can remove the quest, package, and GUI before
+						-- our diagnostic MouseButton1Click listener observes the event.
+						-- The replicated quest transition is the authoritative success signal.
+						if progressValue.Value > progress
+							or LocalPlayer.CurrentQuest.Value ~= "Box Box!"
+							or not character:FindFirstChild(packageName) then
+							boxClickedProgress = nil
+							boxPortRequestAt = 0
+							boxPortRequests = 0
+							boxClickAttempts = 0
+							_G.dailyQuestIssue = nil
+							nextActionAt = tick() + 0.5
+							return
+						end
 						if not didClick then
 							_G.dailyQuestIssue = "Civilian Port did not receive the delivery click"
 							nextActionAt = tick() + 1
@@ -17582,7 +17777,7 @@ local function run(B, T, P, DfT, ...)
 						task.spawn(function()
 							if dailyQuestCanAct() and LocalPlayer.CurrentQuest.Value == "Box Box!"
 								and character:FindFirstChild("onQuest")
-								and character:FindFirstChild("yazoooonxQuestBox") then
+								and character:FindFirstChild(packageName) then
 								pcall(function()
 									ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(port)
 								end)
@@ -17652,11 +17847,41 @@ local function run(B, T, P, DfT, ...)
 				-- Sea volumes are submerged; hold the root inside each volume so water
 				-- buoyancy cannot lift it away before the touch is sent.
 				local underwater = current.object == "Under The Sea~"
+				local progressValue = LocalPlayer:FindFirstChild("QuestProgress")
+				if underwater and progressValue then
+					-- A CFrame overlap can advance the server before this worker gets a
+					-- chance to increment its local cursor. Drive the next zone from the
+					-- replicated count so it cannot retry the first bubble forever.
+					promptCursor = math.clamp(progressValue.Value + 1, 1, #objects)
+					part = objects[promptCursor]
+				end
 				local contact = underwater and part.Position or part.Position + Vector3.new(0, 3, 0)
 				if underwater then
-					holdDailyQuestHover(root, contact)
+					holdDailyQuestHover(root, contact, true)
 				else
 					stopDailyQuestHover()
+				end
+				if underwater then
+					if type(firetouchinterest) ~= "function" then
+						_G.dailyQuestIssue = "Executor cannot trigger daily quest touch zones"
+						nextActionAt = tick() + 5
+						return
+					end
+					local ok = pcall(function()
+						-- Send the touch in the same scheduler pass as the teleport. Waiting
+						-- lets the game's Swim AlignPosition eject the root first.
+						root.CFrame = CFrame.new(contact)
+						root.AssemblyLinearVelocity = Vector3.zero
+						firetouchinterest(root, part, 0)
+						firetouchinterest(root, part, 1)
+					end)
+					if not ok then
+						_G.dailyQuestIssue = "Daily quest touch failed: " .. part.Name
+					end
+					-- Do not advance locally. QuestProgress selects the next unique
+					-- submerged volume only after the server confirms this one.
+					nextActionAt = tick() + (ok and 0.8 or 3)
+					return
 				end
 				local delta = root.Position - contact
 				local horizontalDistance = Vector3.new(delta.X, 0, delta.Z).Magnitude
@@ -17976,6 +18201,129 @@ local function run(B, T, P, DfT, ...)
 		local seaNum = game.PlaceId == 4520749081 and 1 or game.PlaceId == 6381829480 and 2 or 3
 		return " [Sea " .. seaNum .. "]"
 	end
+
+	-- Build the exact *current* event set. The older notification callbacks below
+	-- are one-shot and cannot tell the backend when an event disappears.
+	function Hub:collectCurrentEvents()
+		local events, seen = {}, {}
+		local seaNum = game.PlaceId == 4520749081 and 1 or game.PlaceId == 6381829480 and 2 or 3
+		local suffix = " [Sea " .. seaNum .. "]"
+		local seaChannel = "sea_events_" .. seaNum
+		local function add(channel, title, eventType)
+			if #events >= 40 or type(title) ~= "string" then
+				return
+			end
+			local key = channel .. ":" .. title:lower():gsub("%s+", "")
+			if not seen[key] then
+				seen[key] = true
+				table.insert(events, { channel = channel, title = title, event_type = eventType })
+			end
+		end
+		local function alive(model)
+			if not model or not model.Parent then
+				return false
+			end
+			local humanoid = model:FindFirstChild("Humanoid")
+			return humanoid ~= nil and humanoid.Health > 0
+		end
+		local function seaType(name)
+			local lower = name:lower()
+			if lower:find("galleon") then return "Galleon" end
+			if lower:find("serpent") then return "Serpent" end
+			if lower:find("hydra") then return "Hydra" end
+			if lower:find("seaking") or lower:find("sea king") then return "SeaKing" end
+			if lower:find("kraken") or lower:find("tentacle") then return "Kraken" end
+			if lower:find("drakenfyr") or lower:find("thirdseadragon") then return "Drakenfyr" end
+			if lower:find("seadragon") then return "AbyssalTyrant" end
+			if lower:find("eldritch") or lower:find("crusher") then return "DeepseaCrusher" end
+			return "SeaEvent"
+		end
+		if getWhirlpoolCFrame() then
+			add(seaChannel, "Whirlpool" .. suffix, "Whirlpool")
+		end
+		local seaMonsters = Workspace:FindFirstChild("SeaMonster")
+		if seaMonsters then
+			for _, monster in ipairs(seaMonsters:GetChildren()) do
+				local seaKingModel = seaNum == 2 and (monster.Name == "SeaKing" or monster.Name == "HydraSeaKing")
+				if alive(monster) or (seaKingModel and not monster:FindFirstChild("Humanoid")) then
+					if monster.Name:find("Serpent") then
+						add(seaChannel, "Serpent" .. suffix, "Serpent")
+					elseif seaNum == 2 and monster.Name == "SeaKing" then
+						add(seaChannel, "Sea King" .. suffix, "SeaKing")
+					elseif seaNum == 2 and monster.Name == "HydraSeaKing" then
+						add(seaChannel, "Hydra" .. suffix, "Hydra")
+					elseif seaNum == 3 then
+						local name = getDisplayEventName(monster.Name):gsub("%s*Boss%s*$", "")
+						add(seaChannel, name .. suffix, seaType(monster.Name))
+					end
+				end
+			end
+		end
+		local bossFolder = Workspace:FindFirstChild("Monster")
+		bossFolder = bossFolder and bossFolder:FindFirstChild("Boss")
+		if bossFolder then
+			local kraken = bossFolder:FindFirstChild("FuryTentacle")
+			if seaNum == 3 and alive(kraken) then
+				add(seaChannel, "Kraken" .. suffix, "Kraken")
+			end
+			for _, child in ipairs(bossFolder:GetChildren()) do
+				if alive(child) then
+					if child.Name:find("Serpent") then
+						add(seaChannel, "Serpent" .. suffix, "Serpent")
+					end
+					if seaNum == 3 and (child.Name:find("SeaDragon") or child.Name:find("ThirdSeaEldritch")) then
+						add(seaChannel, getDisplayEventName(child.Name) .. suffix, seaType(child.Name))
+					end
+				end
+			end
+			local priority = raidPriority[game.PlaceId] or {}
+			for _, bossName in ipairs(priority) do
+				for _, child in ipairs(bossFolder:GetChildren()) do
+					if child.Name:find(bossName, 1, true) and alive(child) then
+						add("raid_bosses_" .. seaNum, bossName .. suffix, "RaidBoss")
+					end
+				end
+			end
+		end
+		if seaNum == 2 then
+			local ghostFolder = Workspace:FindFirstChild("GhostMonster")
+			local ghost = ghostFolder and ghostFolder:FindFirstChild("Ghost Ship")
+			if alive(ghost) then
+				add(seaChannel, "Ghost Ship" .. suffix, "GhostShip")
+			end
+		end
+		if seaNum == 3 then
+			local islands = Workspace:FindFirstChild("Island")
+			if islands then
+				for _, island in ipairs(islands:GetChildren()) do
+					local name = island.Name
+					if name:find("Human") or name:find("Gale") or name:find("SeaKing")
+						or name:find("Angel") or name:find("Animal") or name:find("Fish")
+						or name:find("Demon") then
+						add("race_island", getDisplayRaceName(name) .. suffix, "RaceIsland")
+					end
+				end
+			end
+		end
+		if _G._GenesisFruitLiveState then
+			local fruit = _G._GenesisFruitLiveState
+			add(fruit.channel, fruit.title, fruit.event_type)
+		end
+		table.sort(events, function(a, b)
+			return a.channel .. a.title < b.channel .. b.title
+		end)
+		return events
+	end
+
+	spawn(function()
+		while task.wait(1) do
+			if Hub.enabled and Hub.devEnabled then
+				pcall(function()
+					Hub:publish(Hub:collectCurrentEvents())
+				end)
+			end
+		end
+	end)
 
 	spawn(function()
 		while task.wait(1) do
@@ -18458,7 +18806,9 @@ local function run(B, T, P, DfT, ...)
 			if _G.farmFixThread or _G.farmFixBodyPos then
 				removeFarmFix()
 			end
-			if type(_G._stopDailyQuestHover) == "function" then
+			-- Floating Feather needs its hover lock across resolver passes. The
+			-- objective worker clears it when ownership or the quest is lost.
+			if not dailyQuest and type(_G._stopDailyQuestHover) == "function" then
 				_G._stopDailyQuestHover()
 			end
 		end
@@ -20686,11 +21036,9 @@ local function run(B, T, P, DfT, ...)
 			{ npc = "Lore Sea Madness", quest = "Catch me,If you can", kind = "prompts", object = "Catch me,If you can", level = 3000 },
 			{ npc = "Daily Quest DeadAbove", quest = "Dead Above", kind = "prompts", object = "Floating Feather", level = 3000 },
 			{ npc = "Lore Sea Sick!", quest = "I'm not,YOU ARE!", kind = "touch", object = "I'm not,YOU ARE!", level = 3000 },
-			-- Temporarily disable the diving daily (reported as "Just Dive?") while its underwater movement is unreliable.
-			{ npc = "Lore Sea Diving", quest = "Under The Sea~", kind = "touch", object = "Under The Sea~", level = 3000, disabled = true },
+			{ npc = "Lore Sea Diving", quest = "Under The Sea~", kind = "touch", object = "Under The Sea~", level = 3000 },
 			{ npc = "Daily Quest Disobey", quest = "Order Disobey", kind = "prompts", object = "PosterQuest", level = 3000 },
-			-- Temporarily disable the broken Box Box! pickup/delivery daily.
-			{ npc = "Braveman", quest = "Box Box!", kind = "boxes", level = 3000, disabled = true },
+			{ npc = "Braveman", quest = "Box Box!", kind = "boxes", level = 3000 },
 			{ npc = "Daily QuestLvl3800", quest = "The Lost Book", kind = "book", level = 3800 },
 			{ npc = "Daily QuestLvl3000", quest = "One More Time", kind = "mob", mob = "Joey", cframe = CFrame.new(-5287, 57, 2066), spawnOnApproach = true, level = 3000 },
 			{ npc = "Daily QuestLvl3500", quest = "Believer", kind = "mob", mob = "Hefty", cframe = CFrame.new(-10489, 84, 969), spawnOnApproach = true, level = 3500 },
