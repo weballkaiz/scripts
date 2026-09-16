@@ -31,6 +31,7 @@
 -- KAZU_AUTO_FISH_INDEPENDENT_DESTINATION_V47
 -- KAZU_PRIVATE_SERVER_ONLY_GUARD_V48
 -- KAZU_ORPHANED_DIALOGUE_MOVEMENT_GUARD_V49
+-- KAZU_PRIVATE_SERVER_CLIENT_CLASSIFICATION_V50
 -- Discord reporting uses the user-configured webhook; event state uses Kai's configured Cloudflare Worker.
 -- Cloudflare Event Hub reads and live-state reporting are enabled when configured.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -49,12 +50,95 @@ local function trackKazuConnection(connection)
 	return connection
 end
 
-local function isKazuPrivateServer(gameObject)
-	-- Roblox uses a non-empty PrivateServerId for both owner-created VIP
-	-- servers and reserved servers. Player count is deliberately irrelevant.
-	return gameObject ~= nil
-		and type(gameObject.PrivateServerId) == "string"
-		and gameObject.PrivateServerId ~= ""
+local function getKazuServerPrivacy(gameObject, waitSeconds)
+	if not gameObject then
+		return nil, "missing_game"
+	end
+
+	-- A non-empty DataModel ID or owner is conclusive when the client exposes
+	-- it. Some Roblox clients leave these properties blank even in a private
+	-- server, so an empty value is not evidence that the server is public.
+	local idOk, privateServerId = pcall(function()
+		return gameObject.PrivateServerId
+	end)
+	local ownerOk, privateServerOwnerId = pcall(function()
+		return gameObject.PrivateServerOwnerId
+	end)
+	if (idOk and type(privateServerId) == "string" and privateServerId ~= "")
+		or (ownerOk and type(privateServerOwnerId) == "number" and privateServerOwnerId ~= 0) then
+		return true, "data_model"
+	end
+
+	-- RobloxReplicatedStorage asks the server for its authoritative type. This
+	-- avoids the client-side blank PrivateServerId false negative while keeping
+	-- reserved servers and owner-created VIP servers distinct from public ones.
+	local serviceOk, replicatedStorage = pcall(function()
+		return gameObject:GetService("RobloxReplicatedStorage")
+	end)
+	local serverTypeRemote = serviceOk and replicatedStorage
+		and replicatedStorage:FindFirstChild("GetServerType")
+	local timeout = math.max(tonumber(waitSeconds) or 0, 0)
+	if not serverTypeRemote and serviceOk and replicatedStorage and timeout > 0 then
+		pcall(function()
+			serverTypeRemote = replicatedStorage:WaitForChild("GetServerType", timeout)
+		end)
+	end
+	if serverTypeRemote and serverTypeRemote:IsA("RemoteFunction") then
+		local invokeOk, serverType = pcall(function()
+			return serverTypeRemote:InvokeServer()
+		end)
+		if invokeOk then
+			local normalized = tostring(serverType or ""):lower():gsub("[^%a]", "")
+			if normalized:find("reservedserver", 1, true)
+				or normalized:find("vipserver", 1, true)
+				or normalized:find("privateserver", 1, true) then
+				return true, "server_type:" .. normalized
+			end
+			if normalized:find("standardserver", 1, true)
+				or normalized:find("publicserver", 1, true) then
+				return false, "server_type:" .. normalized
+			end
+		end
+	end
+
+	-- King Legacy carries the destination's private-server metadata in local
+	-- teleport data. Use it only as an affirmative fallback: an authoritative
+	-- StandardServer response above always wins, preventing stale origin data
+	-- from allowing Kazu to continue in a public destination.
+	local teleportOk, teleportService = pcall(function()
+		return gameObject:GetService("TeleportService")
+	end)
+	local dataOk, teleportData = false, nil
+	if teleportOk and teleportService then
+		dataOk, teleportData = pcall(function()
+			return teleportService:GetLocalPlayerTeleportData()
+		end)
+	end
+	if dataOk and type(teleportData) == "table" then
+		for _, key in ipairs({ "PrivateServerId", "privateServerId", "VIPServerId" }) do
+			local value = teleportData[key]
+			if type(value) == "string" and value ~= "" then
+				return true, "teleport_data:" .. key
+			end
+		end
+		for _, key in ipairs({ "PrivateServerOwnerId", "privateServerOwnerId", "VIPServerOwnerId" }) do
+			local value = tonumber(teleportData[key])
+			if value and value ~= 0 then
+				return true, "teleport_data:" .. key
+			end
+		end
+	end
+
+	return nil, "indeterminate"
+end
+
+local function shouldStopKazuForPrivateServerOnly(gameObject, waitSeconds)
+	local isPrivate, evidence = getKazuServerPrivacy(gameObject, waitSeconds)
+	if isPrivate == nil then
+		warn("[KAZU HUB] Private Server Only could not verify the server type ("
+			.. tostring(evidence) .. "); Kazu was not unloaded.")
+	end
+	return isPrivate == false
 end
 
 local function startKazuDialogueMovementGuard(runtimeEnvironment, sharedGlobal, trackedTask)
@@ -312,7 +396,7 @@ local function startKazuRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "KAZU_ORPHANED_DIALOGUE_MOVEMENT_GUARD_V49",
+		buildMarker = "KAZU_PRIVATE_SERVER_CLIENT_CLASSIFICATION_V50",
 	}
 	executorEnvironment.__KAZU_RUNTIME = runtime
 	sharedGlobal.__KAZU_RUNTIME = runtime
@@ -7490,7 +7574,7 @@ local function run(B, T, P, DfT, ...)
 	-- Teleports create a fresh Roblox server context, and executor-managed
 	-- auto-execution starts Kazu again in that destination. Stop that new runtime
 	-- if the saved guard is enabled and Roblox identifies it as a standard server.
-	if GetSetting("privateServerOnly") and not isKazuPrivateServer(game) then
+	if GetSetting("privateServerOnly") and shouldStopKazuForPrivateServerOnly(game, 15) then
 		warn("[KAZU HUB] Private Server Only stopped Kazu in a public server.")
 		pcall(function()
 			local activeRuntime = getKazuRuntimeState()
@@ -14877,7 +14961,7 @@ local function run(B, T, P, DfT, ...)
 		Default = GetSetting("privateServerOnly") or false,
 		Callback = function(state)
 			saveAndApply("privateServerOnly", state)
-			if state and not isKazuPrivateServer(game) then
+		if state and shouldStopKazuForPrivateServerOnly(game, 5) then
 				SpectrumX:Notify({
 					Title = "PRIVATE SERVER ONLY",
 					Text = "Public server detected. Kazu will unload.",
@@ -14894,7 +14978,7 @@ local function run(B, T, P, DfT, ...)
 		end,
 	})
 	Window:CreateLabel(uiSections.settingsScript, {
-		Text = "Stops Kazu after a teleport lands in a public server. Roblox private-server metadata is used; player count is ignored.",
+		Text = "Stops Kazu only when Roblox confirms a public server. Server type and teleport metadata are used; player count is ignored.",
 		Color = SpectrumX.Theme.TextSecondary,
 		Wrapped = true,
 	})
