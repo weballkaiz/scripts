@@ -28,6 +28,9 @@
 -- KAZU_ICE_KING_AZLAN_ACQUISITION_V44
 -- KAZU_SPECIAL_BOSS_FISHING_PREEMPT_V45
 -- KAZU_SPECIAL_BOSS_ACQUISITION_OWNERSHIP_V46
+-- KAZU_AUTO_FISH_INDEPENDENT_DESTINATION_V47
+-- KAZU_PRIVATE_SERVER_ONLY_GUARD_V48
+-- KAZU_ORPHANED_DIALOGUE_MOVEMENT_GUARD_V49
 -- Discord reporting uses the user-configured webhook; event state uses Kai's configured Cloudflare Worker.
 -- Cloudflare Event Hub reads and live-state reporting are enabled when configured.
 -- Username-based premium checks are disabled, leaving protected Smart Hop locked.
@@ -44,6 +47,235 @@ local function trackKazuConnection(connection)
 		runtime.connections[connection] = true
 	end
 	return connection
+end
+
+local function isKazuPrivateServer(gameObject)
+	-- Roblox uses a non-empty PrivateServerId for both owner-created VIP
+	-- servers and reserved servers. Player count is deliberately irrelevant.
+	return gameObject ~= nil
+		and type(gameObject.PrivateServerId) == "string"
+		and gameObject.PrivateServerId ~= ""
+end
+
+local function startKazuDialogueMovementGuard(runtimeEnvironment, sharedGlobal, trackedTask)
+	local gameObject = runtimeEnvironment.game
+	local players = gameObject and gameObject:GetService("Players")
+	local localPlayer = players and players.LocalPlayer
+	if not localPlayer then
+		return
+	end
+
+	-- King Legacy temporarily sets the local Humanoid's movement values to zero
+	-- while an NPC dialogue is open. Some dialogue exits collapse the shared
+	-- MainGui.Dialogue without restoring those values. Keep the repair tied to a
+	-- Kazu-triggered dialogue (or a freshly joined character that is already in
+	-- that exact collapsed-dialogue state) so ordinary combat stuns are untouched.
+	local guard = {
+		startedAt = os.clock(),
+		character = nil,
+		characterSeenAt = 0,
+		startedFrozen = false,
+		zeroSince = nil,
+		releaseHintAt = 0,
+		hintObservedZero = false,
+		lastReason = nil,
+		lastDialogueText = nil,
+		lastRecoveryAt = 0,
+		recoveryCount = 0,
+		lastWalkSpeed = 16,
+		lastJumpPower = 50,
+		lastJumpHeight = 7.2,
+	}
+	sharedGlobal._KazuMovementGuardState = guard
+
+	local function isActuallyVisible(guiObject, playerGui)
+		if not guiObject or not guiObject:IsA("GuiObject") or not guiObject.Visible
+			or guiObject.AbsoluteSize.X <= 2 or guiObject.AbsoluteSize.Y <= 2 then
+			return false
+		end
+		local current = guiObject.Parent
+		while current and current ~= playerGui do
+			if current:IsA("GuiObject") and not current.Visible then
+				return false
+			end
+			if current:IsA("LayerCollector") and not current.Enabled then
+				return false
+			end
+			current = current.Parent
+		end
+		return true
+	end
+
+	local function getDialogueState()
+		local playerGui = localPlayer:FindFirstChildOfClass("PlayerGui")
+		if not playerGui then
+			return false, nil
+		end
+		for _, descendant in ipairs(playerGui:GetDescendants()) do
+			if descendant.Name == "Dialogue" and descendant:IsA("GuiObject")
+				and isActuallyVisible(descendant, playerGui) then
+				return true, nil
+			end
+		end
+
+		local mainGui = playerGui:FindFirstChild("MainGui")
+		local dialogue = mainGui and mainGui:FindFirstChild("Dialogue")
+		if dialogue and dialogue:IsA("GuiObject") and dialogue.Visible
+			and dialogue.AbsoluteSize.X <= 2 and dialogue.AbsoluteSize.Y <= 2 then
+			local speaker = dialogue:FindFirstChild("LevelRequire")
+			local continueLabel = dialogue:FindFirstChild("ContinueLabel")
+			local speakerText = speaker and speaker:IsA("TextLabel") and speaker.Text or ""
+			local continueText = continueLabel and continueLabel:IsA("TextLabel") and continueLabel.Text or ""
+			if speakerText ~= "" or continueText ~= "" then
+				return false, speakerText ~= "" and speakerText or continueText
+			end
+		end
+		return false, nil
+	end
+
+	local function hasActiveMovementStatus(character)
+		for _, name in ipairs({
+			"Stun", "Stunned", "Ragdoll", "Ragdolled", "UsingSkill",
+			"SkillInUse", "Cutscene", "InCutscene", "Talking", "InDialogue",
+		}) do
+			local marker = character:FindFirstChild(name, true) or localPlayer:FindFirstChild(name, true)
+			if marker then
+				if marker:IsA("BoolValue") and marker.Value then
+					return true
+				end
+				if (marker:IsA("NumberValue") or marker:IsA("IntValue")) and marker.Value > 0 then
+					return true
+				end
+			end
+		end
+		return false
+	end
+
+	local function canRestore(character, humanoid, root)
+		if localPlayer.Character ~= character or humanoid.Health <= 0 or root.Anchored
+			or humanoid.PlatformStand or humanoid.Sit then
+			return false
+		end
+		local stateName = humanoid:GetState().Name
+		if stateName == "Dead" or stateName == "Physics" or stateName == "PlatformStanding"
+			or stateName == "Ragdoll" or stateName == "FallingDown" or stateName == "Seated" then
+			return false
+		end
+		if hasActiveMovementStatus(character) then
+			return false
+		end
+		local owner = sharedGlobal._KazuPriorityOwner
+		if owner ~= nil and owner ~= "idle" and owner ~= "daily_quest" then
+			return false
+		end
+		if sharedGlobal._KazuDailyQuestTravelPending or sharedGlobal._KazuDailyReturnRequested
+			or sharedGlobal.isFishing or sharedGlobal.isLootingChests
+			or sharedGlobal.seaEventActive or sharedGlobal.conquestActive then
+			return false
+		end
+		if type(sharedGlobal.Raid) == "table" and sharedGlobal.Raid.inraid then
+			return false
+		end
+		return true
+	end
+
+	sharedGlobal._KazuMarkDialogueMovementRelease = function(reason)
+		guard.releaseHintAt = os.clock()
+		guard.hintObservedZero = false
+		guard.lastReason = tostring(reason or "kazu_dialogue")
+	end
+
+	sharedGlobal._KazuRestoreOrphanedMovement = function(reason, force)
+		local character = localPlayer.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if not character or not humanoid or not root or (not force and not canRestore(character, humanoid, root)) then
+			return false
+		end
+		if humanoid.WalkSpeed > 0 then
+			return false
+		end
+		humanoid.WalkSpeed = math.max(guard.lastWalkSpeed or 16, 1)
+		if humanoid.JumpPower <= 0 then
+			humanoid.JumpPower = math.max(guard.lastJumpPower or 50, 1)
+		end
+		if humanoid.JumpHeight <= 0 then
+			humanoid.JumpHeight = math.max(guard.lastJumpHeight or 7.2, 1)
+		end
+		guard.lastRecoveryAt = os.clock()
+		guard.recoveryCount = guard.recoveryCount + 1
+		guard.zeroSince = nil
+		guard.startedFrozen = false
+		warn("[KAZU HUB] Restored movement after an orphaned NPC dialogue ("
+			.. tostring(reason or guard.lastReason or "unknown") .. ").")
+		return true
+	end
+
+	trackedTask.spawn(function()
+		while true do
+			trackedTask.wait(0.5)
+			local runtime = getKazuRuntimeState()
+			if not runtime or not runtime.active then
+				break
+			end
+
+			local character = localPlayer.Character
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+			if character ~= guard.character then
+				guard.character = character
+				guard.characterSeenAt = os.clock()
+				guard.startedFrozen = humanoid ~= nil and humanoid.WalkSpeed <= 0
+				guard.zeroSince = nil
+				guard.releaseHintAt = 0
+				guard.hintObservedZero = false
+				guard.recoveryCount = 0
+			end
+
+			if humanoid and root then
+				if humanoid.WalkSpeed > 0 then
+					guard.lastWalkSpeed = humanoid.WalkSpeed
+					guard.startedFrozen = false
+					guard.zeroSince = nil
+					if guard.hintObservedZero then
+						guard.releaseHintAt = 0
+						guard.hintObservedZero = false
+					end
+				end
+				if humanoid.JumpPower > 0 then
+					guard.lastJumpPower = humanoid.JumpPower
+				end
+				if humanoid.JumpHeight > 0 then
+					guard.lastJumpHeight = humanoid.JumpHeight
+				end
+
+				if humanoid.WalkSpeed <= 0 then
+					local now = os.clock()
+					local dialogueActive, collapsedDialogueText = getDialogueState()
+					guard.lastDialogueText = collapsedDialogueText
+					local recentHint = guard.releaseHintAt > 0 and now - guard.releaseHintAt <= 15
+					if recentHint then
+						guard.hintObservedZero = true
+					end
+					local startupRecovery = guard.startedFrozen and now - guard.characterSeenAt <= 30
+						and collapsedDialogueText ~= nil
+					if not dialogueActive and (recentHint or startupRecovery)
+						and canRestore(character, humanoid, root) then
+						guard.zeroSince = guard.zeroSince or now
+						local waitSeconds = recentHint and 3 or 10
+						if now - guard.zeroSince >= waitSeconds and now - guard.lastRecoveryAt >= 2
+							and guard.recoveryCount < 3 then
+							sharedGlobal._KazuRestoreOrphanedMovement(
+								guard.lastReason or ("collapsed_dialogue:" .. tostring(collapsedDialogueText))
+							)
+						end
+					else
+						guard.zeroSince = nil
+					end
+				end
+			end
+		end
+	end)
 end
 
 local function startKazuRuntime(runtimeEnvironment, sharedGlobal)
@@ -80,7 +312,7 @@ local function startKazuRuntime(runtimeEnvironment, sharedGlobal)
 		previousSpectrumX = executorEnvironment.SpectrumX,
 		previousNotify = executorEnvironment.Notify,
 		startedAt = tick(),
-		buildMarker = "KAZU_SPECIAL_BOSS_ACQUISITION_OWNERSHIP_V46",
+		buildMarker = "KAZU_ORPHANED_DIALOGUE_MOVEMENT_GUARD_V49",
 	}
 	executorEnvironment.__KAZU_RUNTIME = runtime
 	sharedGlobal.__KAZU_RUNTIME = runtime
@@ -342,6 +574,9 @@ local function startKazuRuntime(runtimeEnvironment, sharedGlobal)
 		sharedGlobal._KazuDailyQuestPriorityCandidate = nil
 		sharedGlobal._KazuDailyQuestReleaseUntil = nil
 		sharedGlobal._KazuDailyPuzzleStatus = nil
+		sharedGlobal._KazuMovementGuardState = nil
+		sharedGlobal._KazuMarkDialogueMovementRelease = nil
+		sharedGlobal._KazuRestoreOrphanedMovement = nil
 		if type(sharedGlobal._KazuEventHubClient) == "table" then
 			sharedGlobal._KazuEventHubClient.stopped = true
 		end
@@ -7180,6 +7415,7 @@ local function run(B, T, P, DfT, ...)
 
 		hideNotify = { false, "hideNotify" },
 		blackScreen = { false, "blackScreen" },
+		privateServerOnly = { false, "privateServerOnly" },
 
 	}
 
@@ -7250,6 +7486,22 @@ local function run(B, T, P, DfT, ...)
 	end
 
 	LoadSettings()
+
+	-- Teleports create a fresh Roblox server context, and executor-managed
+	-- auto-execution starts Kazu again in that destination. Stop that new runtime
+	-- if the saved guard is enabled and Roblox identifies it as a standard server.
+	if GetSetting("privateServerOnly") and not isKazuPrivateServer(game) then
+		warn("[KAZU HUB] Private Server Only stopped Kazu in a public server.")
+		pcall(function()
+			local activeRuntime = getKazuRuntimeState()
+			if activeRuntime and type(activeRuntime.unload) == "function" then
+				activeRuntime.unload()
+			end
+		end)
+		return
+	end
+
+	startKazuDialogueMovementGuard(runtimeEnvironment, _G, task)
 
 	_G._KazuFishingPositionConfigByPlaceId = {
 		[4520749081] = { slot = "Sea1", sea = 1 },
@@ -14620,6 +14872,32 @@ local function run(B, T, P, DfT, ...)
 
 	uiSections.settingsDisplay = createUiSection(uiSections.SettingsTab.Left, "Display & Performance", "lucide-gauge")
 	uiSections.settingsScript = createUiSection(uiSections.SettingsTab.Right, "Script Control", "lucide-power")
+	Window:CreateToggle(uiSections.settingsScript, {
+		Text = "Private Server Only",
+		Default = GetSetting("privateServerOnly") or false,
+		Callback = function(state)
+			saveAndApply("privateServerOnly", state)
+			if state and not isKazuPrivateServer(game) then
+				SpectrumX:Notify({
+					Title = "PRIVATE SERVER ONLY",
+					Text = "Public server detected. Kazu will unload.",
+					Type = "warning",
+					Duration = 2,
+				})
+				task.delay(1.25, function()
+					local activeRuntime = getKazuRuntimeState()
+					if activeRuntime and type(activeRuntime.unload) == "function" then
+						activeRuntime.unload()
+					end
+				end)
+			end
+		end,
+	})
+	Window:CreateLabel(uiSections.settingsScript, {
+		Text = "Stops Kazu after a teleport lands in a public server. Roblox private-server metadata is used; player count is ignored.",
+		Color = SpectrumX.Theme.TextSecondary,
+		Wrapped = true,
+	})
 	Window:CreateLabel(uiSections.settingsScript, {
 		Text = "Stops Kazu workers, disconnects tracked events, releases movement locks, and removes the UI. Saved settings are kept.",
 		Color = SpectrumX.Theme.TextSecondary,
@@ -17688,11 +17966,9 @@ local function run(B, T, P, DfT, ...)
 			if whirlpoolCF then
 				return whirlpoolCF
 			end
-			-- Keep the legacy setting key so existing saved configurations continue
-			-- to work; the option now represents downtime between any enabled bosses.
-			if not GetSetting("fishWhenNotSpawned") then
-				return nil
-			end
+			-- Whirlpool mode prefers a live whirlpool but does not grant permission
+			-- to fish. Auto Fish remains independently usable at the saved position;
+			-- boss and event priority is decided centrally by isFishingBlocked().
 		end
 		return getSavedFishCFrame()
 	end
@@ -18508,6 +18784,9 @@ local function run(B, T, P, DfT, ...)
 								and character:FindFirstChild("onQuest")
 								and character:FindFirstChild(packageName) then
 								pcall(function()
+									if type(_G._KazuMarkDialogueMovementRelease) == "function" then
+										_G._KazuMarkDialogueMovementRelease("daily_dialogue:Civilian Port")
+									end
 									ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(port)
 								end)
 							end
@@ -18842,6 +19121,9 @@ local function run(B, T, P, DfT, ...)
 							return
 						end
 						local opened = pcall(function()
+							if type(_G._KazuMarkDialogueMovementRelease) == "function" then
+								_G._KazuMarkDialogueMovementRelease("daily_dialogue:Lore Kraken Codex Giver")
+							end
 							ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(giver)
 						end)
 						codexDialogueRetryAt = tick() + (opened and 5 or 2)
@@ -20721,6 +21003,9 @@ local function run(B, T, P, DfT, ...)
 						local traveler = (allNpc and allNpc:FindFirstChild("Traveler"))
 							or (npcFolder and npcFolder:FindFirstChild("Traveler"))
 						if traveler then
+							if type(_G._KazuMarkDialogueMovementRelease) == "function" then
+								_G._KazuMarkDialogueMovementRelease("progression_dialogue:Traveler")
+							end
 							ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(traveler)
 						end
 						task.wait(0.5)
@@ -20739,6 +21024,9 @@ local function run(B, T, P, DfT, ...)
 					local elitePirate = (allNpc and allNpc:FindFirstChild("Elite Pirate"))
 						or (npcFolder and npcFolder:FindFirstChild("Elite Pirate"))
 					if elitePirate then
+						if type(_G._KazuMarkDialogueMovementRelease) == "function" then
+							_G._KazuMarkDialogueMovementRelease("progression_dialogue:Elite Pirate")
+						end
 						ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(elitePirate)
 					end
 					task.wait(0.5)
@@ -22599,6 +22887,9 @@ local function run(B, T, P, DfT, ...)
 						local generation = dailyCoordinator.npcTalkGeneration
 						task.spawn(function()
 							pcall(function()
+								if type(_G._KazuMarkDialogueMovementRelease) == "function" then
+									_G._KazuMarkDialogueMovementRelease("daily_travel_dialogue:" .. tostring(npcName))
+								end
 								ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(npc)
 							end)
 							if dailyCoordinator.npcTalkGeneration == generation then
@@ -22632,6 +22923,9 @@ local function run(B, T, P, DfT, ...)
 			or quest.npc == "Tomb Event Second" then
 			return
 		end
+		if type(_G._KazuMarkDialogueMovementRelease) == "function" then
+			_G._KazuMarkDialogueMovementRelease("daily_dialogue_close:" .. tostring(quest.npc))
+		end
 		local gui = LocalPlayer.PlayerGui:FindFirstChild(quest.npc)
 		local dialogue = gui and gui:FindFirstChild("Dialogue")
 		local close = gui and gui:FindFirstChild("DelGui")
@@ -22649,6 +22943,11 @@ local function run(B, T, P, DfT, ...)
 
 				local current, pendingState, pendingDetail = getDailyQuestPending()
 				if not current then
+					if (_G.dailyQuestState == "get_quest" or _G.dailyQuestState == "kill"
+						or _G.dailyQuestState == "objective")
+						and type(_G._KazuMarkDialogueMovementRelease) == "function" then
+						_G._KazuMarkDialogueMovementRelease("daily_dialogue_finished")
+					end
 					_G.dailyQuestState = pendingState or "done"
 					if pendingState == "waiting" then
 						_G.dailyQuestIssue = "Waiting for daily objectives: " .. pendingDetail
@@ -22714,6 +23013,9 @@ local function run(B, T, P, DfT, ...)
 						pcall(function()
 							local npcPart = Workspace.AllNPC:FindFirstChild(current.npc)
 							if npcPart then
+								if type(_G._KazuMarkDialogueMovementRelease) == "function" then
+									_G._KazuMarkDialogueMovementRelease("daily_dialogue:" .. tostring(current.npc))
+								end
 								response = ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(npcPart)
 							end
 						end)
@@ -22745,6 +23047,9 @@ local function run(B, T, P, DfT, ...)
 
 				if _G.dailyQuestState == "kill" or _G.dailyQuestState == "objective" then
 					if not hasQuest then
+						if type(_G._KazuMarkDialogueMovementRelease) == "function" then
+							_G._KazuMarkDialogueMovementRelease("daily_dialogue_completed:" .. tostring(current.npc))
+						end
 						_G.dailyQuestState = "idle"
 						_G.dailyQuestCheckQueued = false
 						_G.dailyQuestLastCheckAttempt = 0
@@ -23571,6 +23876,9 @@ local function run(B, T, P, DfT, ...)
 				npc = rs and rs:FindFirstChild(npcName)
 			end
 			if npc then
+				if type(_G._KazuMarkDialogueMovementRelease) == "function" then
+					_G._KazuMarkDialogueMovementRelease("haki_dialogue:" .. tostring(npcName))
+				end
 				ReplicatedStorage.Chest.Remotes.Functions.CheckQuest:InvokeServer(npc)
 			end
 		end)
